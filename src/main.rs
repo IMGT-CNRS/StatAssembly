@@ -1,14 +1,27 @@
 use bio_types::genome::AbstractInterval;
 use clap::{crate_authors, Parser};
 use csv;
-use rust_htslib::bam::ext::BamRecordExtensions;
+use noodles_core::Region;
 use noodles_fasta::{self as fasta, record::Sequence};
+use plotters::{self, coord};
+use plotters::chart::{ChartBuilder, LabelAreaPosition};
+use plotters::prelude::{full_palette, AreaSeries, BitMapBackend, IntoDrawingArea, PathElement};
+use plotters::series::LineSeries;
+use plotters::style::*;
+use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam::{self, Read};
 use serde::Deserialize;
+use num_format::{ToFormattedString,Locale};
+use core::num;
 use std::{
-    fmt::Display, fs::File, io::{BufReader, BufWriter, Write}, ops::{Range, RangeInclusive}, path::PathBuf
+    cmp::{max, min},
+    collections::BTreeMap,
+    fmt::Display,
+    fs::File,
+    io::{BufReader, BufWriter, Write},
+    ops::{Range, RangeInclusive},
+    path::PathBuf,
 };
-use noodles_core::Region;
 ///Assess quality of an assembly based on reads mapping
 #[derive(Parser, Debug)]
 #[clap(
@@ -81,6 +94,33 @@ struct LocusInfos {
     start: i64,
     end: i64,
 }
+#[derive(Debug, Clone,PartialEq, Eq)]
+struct HashMapinfo {
+    map60: i64,
+    map1: i64,
+    map0: i64,
+    secondary: i64
+}
+impl PartialOrd for HashMapinfo {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for HashMapinfo {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let a = std::cmp::max(std::cmp::max(std::cmp::max(self.map0,self.map1),self.map60),self.secondary);
+        let b = std::cmp::max(std::cmp::max(std::cmp::max(other.map0,other.map1),other.map60),other.secondary);
+        a.cmp(&b)
+    }
+}
+impl HashMapinfo {
+    fn new(map60: i64, map1: i64, map0: i64, secondary: i64) -> Self {
+        HashMapinfo { map60, map1, map0, secondary }
+    }
+    fn default() -> Self {
+        HashMapinfo { map60: 0, map1: 0, map0: 0, secondary: 0 }
+    }
+}
 fn main() {
     let args = Args::parse();
     let path = &args.file;
@@ -118,71 +158,77 @@ fn main() {
         reader
             .fetch((&loci.contig, loci.start, loci.end + 1))
             .unwrap();
-        /* if reader.records().count() == 0 {
-            eprintln!("Locus {} on {}:{}-{} has no entry, skipped.",loci.locus,loci.contig,loci.start,loci.end);
-            continue;
-        } */
-        let filename = outputdir.join(format!("{}.pileup", &loci.locus));
-        let file = File::create(&filename).unwrap();
-        let mut writer = BufWriter::new(file);
-        /* if reader.pileup().count() == 0 {
-            eprintln!("Locus {} on {}:{}-{} has no pileups, skipped.",loci.locus,loci.contig,loci.start,loci.end);
-            continue;
-        } */
-        /* let pileups = reader.pileup().filter_map(Result::ok).filter(|f| f.alignments().any(|f| {
-            f.record().contig() == loci.contig && f.record().reference_start() == loci.start && f.record().reference_end() == loci.end
-        })); */
-        let mut fasta = fasta::io::indexed_reader::Builder::default().build_from_path(&args.assembly).unwrap();
-        for p in reader.pileup() {
+        //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
+        //let file = File::create(&filename).unwrap();
+        //let mut writer = BufWriter::new(file);
+        let mut pos: BTreeMap<i64, HashMapinfo> = BTreeMap::new();
+        (loci.start..=loci.end).for_each(|p| {
+            pos.insert(p, HashMapinfo::default());
+        });
+        for p in reader.rc_records() {
             let p = p.unwrap();
-            let elem = noodles_core::Position::new(p.pos().try_into().unwrap()).unwrap();
-            let region = Region::new::<std::string::String,RangeInclusive<noodles_core::Position>>(loci.contig.clone(),elem..=elem);
-            let fastachar = fasta.query(&region).unwrap();
-            let seq = String::from_utf8_lossy(fastachar.sequence().as_ref());
-            write!(writer, "{}\t{}\t{}\t{}\t", p.tid(), p.pos(), p.depth(),seq).unwrap();
-            let (mut score, total) = (0,p.alignments().len());
-            p.alignments().for_each(|f| {
-                if !f.is_del() && !f.is_refskip() {
-                    let byte = [f.record().seq()[f.qpos().unwrap()]];
-                    let char = String::from_utf8_lossy(&byte);
-                    if seq.to_ascii_lowercase() == char.to_ascii_lowercase() {
-                        score += 1;
-                    }
-                    write!(
-                        writer,
-                        "{}",
-                        char
-                    )
-                    .unwrap();
-                } else {
-                    write!(
-                        writer,
-                        "*"
-                    ).unwrap();
-                };
-                match f.indel() {
-                    bam::pileup::Indel::Ins(len) => write!(writer, "+{}", len).unwrap(),
-                    bam::pileup::Indel::Del(len) => write!(writer, "-{}", len).unwrap(),
-                    bam::pileup::Indel::None => (),
-                }
+            let newrange =
+                max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
+            if p.is_secondary() {
+                newrange.for_each(|i| {
+                    pos.get_mut(&i).unwrap().secondary += 1;
+                });
+                continue;
+            }
+            newrange.for_each(|i| match p.mapq() {
+                0 => pos.get_mut(&i).unwrap().map0 += 1,
+                1..=59 => pos.get_mut(&i).unwrap().map1 += 1,
+                60 => pos.get_mut(&i).unwrap().map60 += 1,
+                _ => panic!(
+                    "MAPQ score is invalid. Got {} for {}",
+                    p.mapq(),
+                    String::from_utf8_lossy(p.qname())
+                ),
             });
-            write!(writer, "\t").unwrap();
-            let score = score / total * 100;
-            write!(writer, "{}\t",score).unwrap();
-            p.alignments().for_each(|f| {
-                if !f.is_del() {
-                    write!(writer, "{}-", f.record().qual()[f.qpos().unwrap()]).unwrap();
-                } else {
-                    write!(writer, "-").unwrap();
-                }
-            });
-            write!(writer, "\t").unwrap();
-            p.alignments().for_each(|f| {
-                write!(writer, "{}-", f.record().mapq()).unwrap();
-            });
-            writeln!(writer).unwrap();
         }
-        writer.flush().unwrap();
-        println!("Finished, file created {}", &filename.display());
+        let max = pos.values().map(|max| {
+            std::cmp::max(std::cmp::max(std::cmp::max(max.map0,max.map1),max.map60),max.secondary)
+        }).max().unwrap()+5;
+        //writer.flush().unwrap();
+        let outputfile = "result.png";
+        let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
+        let _ = root.fill(&plotters::prelude::WHITE);
+        let mut chart = ChartBuilder::on(&root)
+            .set_label_area_size(LabelAreaPosition::Left, 60)
+            .set_label_area_size(LabelAreaPosition::Bottom, 60)
+            .caption(format!("Reads mapping quality over the locus {}",loci.locus), ("sans-serif", 40))
+            .build_cartesian_2d(loci.start..loci.end, 0..max).unwrap();
+        let _ = chart
+            .configure_mesh()
+            .x_label_formatter(&|f| { f.to_formatted_string(&Locale::en).to_string() })
+            .disable_x_mesh()
+            .y_max_light_lines(3)
+            //.disable_y_mesh()
+            .draw();
+        chart.draw_series(
+            AreaSeries::new(
+                pos.iter().map(|p| (*p.0,p.1.map0)),0,full_palette::RED_300.mix(0.6)
+            ),
+
+        ).unwrap().label("MAPQ: 0").legend(|(x,y)| plotters::element::Rectangle::new([(x,y),(x+10,y+5)],full_palette::RED_300));
+        chart.draw_series(
+            AreaSeries::new(
+                pos.iter().map(|p| (*p.0,p.1.map1)),0,full_palette::YELLOW_900.mix(0.5)
+            )
+        ).unwrap().label("MAPQ: 1-59").legend(|(x,y)| plotters::element::Rectangle::new([(x,y),(x+10,y+5)],full_palette::YELLOW_900));
+        chart.draw_series(
+            AreaSeries::new(
+                pos.iter().map(|p| (*p.0,p.1.map60)),0,full_palette::GREEN_300.mix(0.4)
+            )
+        ).unwrap().label("MAPQ: 60").legend(|(x,y)| plotters::element::Rectangle::new([(x,y),(x+10,y+5)],full_palette::GREEN_300));
+        chart.draw_series(
+            LineSeries::new(
+                pos.iter().map(|p| (*p.0,p.1.secondary)),full_palette::BLACK
+            )
+        ).unwrap().label("Secondary alignments").legend(|(x,y)| PathElement::new(vec![(x,y), (x+20,y)],full_palette::BLACK));
+        chart.configure_series_labels().background_style(WHITE).border_style(BLACK.mix(0.8)).draw().unwrap();
+        // To avoid the IO failure being ignored silently, we manually call the present function
+        root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
+        println!("Result has been saved to {}", outputfile);
     }
 }
