@@ -3,18 +3,19 @@ IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including
 <p align="middle">
 <img src = "images/rust.png" width ="50" />
 </p>
-The script was made for <a href="//www.imgt.org">IMGT team</a>.
+The script was made by <a href="//www.imgt.org">IMGT team</a>.
 <p align="middle">
 <img src= "images/logo_imgt.png" width ="150" />
 </p>
 
 ## Script input files and data
-* The BAM file from analysis, the presence of a cigar with `=` is compulsory. If absent, it can be generated using samtools.
+* The BAM file from analysis, the presence of a cigar with `=`/`X` (match; substitution) is compulsory.
 * A CSV file with the following information, separated by a tabular:
 ```
 Locus Haplotype contig  start end
 ```
 Locus must be IGH,IGK,IGL,TRA,TRB or TRG. Haplotype must be primary or alternate (case sensitive). Contig, start and end should match SAM regions.
+Example in test files.
 
 ## How to install
 
@@ -28,7 +29,9 @@ to access the help.
 
 ### Source code
 
-Do a git clone and then `cargo build --release` to compile the software.
+- [ ] Install rust if not installed.
+- [ ] Check Rust version, should be >= 1.81.
+- [ ] Do a git clone and then `cargo build --release` to compile the software.
 
 ## Output
 
