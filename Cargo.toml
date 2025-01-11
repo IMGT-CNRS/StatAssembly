@@ -14,8 +14,8 @@ bio-types = "1.0.4"
 clap = { version = "4.5.24", features = ["derive", "cargo"] }
 csv = "1.3.1"
 noodles-core = "0.15.0"
-noodles-fasta = "0.46.0"
+#noodles-fasta = "0.46.0"
 num-format = "0.4.4"
 plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
-rust-htslib = { git = "https://github.com/DorianCoding/bamanalysis.git", branch="master" }
+rust-htslib = { git = "ssh://git@github.com/DorianCoding/bamanalysis.git", branch="master" }
 serde = { version = "1.0.217", features = ["serde_derive"] }
