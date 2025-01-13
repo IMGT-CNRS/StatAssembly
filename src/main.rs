@@ -360,10 +360,20 @@ fn genelist(outputdir: &std::path::Path,
             (gene.end,gene.start) = (gene.start,gene.end) //Swap position
         }
         let range = gene.start..=gene.end;
-        let records = records.filter_map(Result::ok).filter(|p| { 
+        let records: Vec<bam::Record> = records.filter_map(Result::ok).filter(|p| { 
             range.contains(&(p.reference_start()+1)) || range.contains(&(p.reference_end()+1))
         });
-        todo!("Continue here");
+        let mut rangecov = vec![0; range];
+        for record in records {
+            let overlaprange = max(*p.reference_start()+1,*range.start())..=min(*p.reference_end()+1,*range.end());
+            reads += 1;
+            overlaprange.for_each(|p| {
+                let e = p.checked_sub(p.reference_start()+1).unwrap();
+                rangecov.get(e).unwrap() += 1;
+            });
+            let blocking = record.aligned_
+
+        }
         let elem = GeneInfosFinish {
             gene: gene.gene,
             chromosome: gene.chromosome,
