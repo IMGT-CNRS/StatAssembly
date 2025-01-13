@@ -1,14 +1,18 @@
 use bio_types::genome::AbstractInterval;
 use clap::{crate_authors, Parser};
-use plotters::coord::Shift;
-use serde::ser::SerializeMap;
 use core::num;
+use std::io::stderr;
 use csv;
 use noodles_core::Region;
+use plotters::coord::Shift;
+use serde::ser::SerializeMap;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
-use plotters::prelude::{full_palette, AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord, PathElement, SVGBackend};
+use plotters::prelude::{
+    full_palette, AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea,
+    IntoSegmentedCoord, PathElement, SVGBackend,
+};
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
 use plotters::{self, coord};
@@ -52,10 +56,10 @@ struct Args {
     #[arg(short, long)]
     locuspos: PathBuf,
     /// Minimal number of reads (included) to declare a break in coverage
-    #[arg(short,long, default_value_t=3)]
+    #[arg(short, long, default_value_t = 3)]
     breaks: u32,
     /// Coverage to calculate on CSV
-    #[arg(short,long, default_value_t=10)]
+    #[arg(short, long, default_value_t = 10)]
     coverage: u32,
     /// Save as SVG images
     #[arg(long)]
@@ -108,19 +112,20 @@ struct GeneInfos {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 enum Strand {
     Plus,
-    Minus
+    Minus,
 }
 impl<'de> Deserialize<'de> for Strand {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: de::Deserializer<'de> {
-            let s: &str = de::Deserialize::deserialize(deserializer)?;
-            
-                match s {
-                    "1" => Ok(Strand::Minus),
-                    "0" => Ok(Strand::Plus),
-                    _ => Err(de::Error::unknown_variant(s, &["1","0"])),
-                }
+        D: de::Deserializer<'de>,
+    {
+        let s: &str = de::Deserialize::deserialize(deserializer)?;
+
+        match s {
+            "1" => Ok(Strand::Minus),
+            "0" => Ok(Strand::Plus),
+            _ => Err(de::Error::unknown_variant(s, &["1", "0"])),
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -135,7 +140,7 @@ struct GeneInfosFinish {
     matchpos: String,
     reads100: usize,
     reads100m: usize,
-    coverage10x: usize
+    coverage10x: usize,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 struct LocusInfos {
@@ -237,6 +242,7 @@ fn main() {
         }
     };
     for loci in locus {
+        //TODO: What to do if haplotype?
         let mut reader = match &args.index {
             Some(d) => bam::IndexedReader::from_path_and_index(path, d),
             None => bam::IndexedReader::from_path(path),
@@ -251,7 +257,7 @@ fn main() {
                     loci.contig, loci.start, loci.end
                 )
             });
-        let mut nocount=true;
+        let mut nocount = true;
         //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
         //let file = File::create(&filename).unwrap();
         //let mut writer = BufWriter::new(file);
@@ -260,7 +266,7 @@ fn main() {
             pos.insert(p, HashMapinfo::default());
         });
         for p in reader.rc_records() {
-            nocount=false;
+            nocount = false;
             let p = p.unwrap();
             let newrange =
                 max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
@@ -272,8 +278,11 @@ fn main() {
                 continue;
             }
             let overlaprange =
-                max(p.reference_start()+1, loci.start)..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
-            let mut matched = p.aligned_pairs_match().expect("No CIGAR = given.").map(|[a, b]| a..=b);
+                max(p.reference_start() + 1, loci.start)..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
+            let mut matched = p
+                .aligned_pairs_match()
+                .expect("No CIGAR = given.")
+                .map(|[a, b]| a..=b);
             let mut aligned = p.aligned_pairs().map(|[a, b]| a..=b);
             newrange.for_each(|i| {
                 let targeting = pos.get_mut(&i).unwrap();
@@ -318,14 +327,20 @@ fn main() {
         let fgraph = "readresult";
         if args.svg {
             let outputfile = outputdir.join(givename(
-                &args.species, &loci.locus,&loci.contig,&format!("{}.svg",fgraph)
+                &args.species,
+                &loci.locus,
+                &loci.contig,
+                &format!("{}.svg", fgraph),
             ));
             let outputfile = outputfile.as_path();
             let root = SVGBackend::new(outputfile, (900, 500)).into_drawing_area();
             readgraph(outputfile, &loci, &pos, &args, root);
         } else {
             let outputfile = outputdir.join(givename(
-                &args.species, &loci.locus,&loci.contig,&format!("{}.png",fgraph)
+                &args.species,
+                &loci.locus,
+                &loci.contig,
+                &format!("{}.png", fgraph),
             ));
             let outputfile = outputfile.as_path();
             let root = BitMapBackend::new(outputfile, (1800, 1000)).into_drawing_area();
@@ -335,14 +350,20 @@ fn main() {
         let sgraph = "mismatchresult";
         if args.svg {
             let outputfile = outputdir.join(givename(
-                &args.species, &loci.locus,&loci.contig,&format!("{}.svg",sgraph)
+                &args.species,
+                &loci.locus,
+                &loci.contig,
+                &format!("{}.svg", sgraph),
             ));
             let outputfile = outputfile.as_path();
             let root = SVGBackend::new(outputfile, (1200, 600)).into_drawing_area();
-            mismatchgraph(outputfile, &loci, &pos, &args,root);
+            mismatchgraph(outputfile, &loci, &pos, &args, root);
         } else {
             let outputfile = outputdir.join(givename(
-                &args.species, &loci.locus,&loci.contig,&format!("{}.png",sgraph)
+                &args.species,
+                &loci.locus,
+                &loci.contig,
+                &format!("{}.png", sgraph),
             ));
             let outputfile = outputfile.as_path();
             let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
@@ -352,26 +373,48 @@ fn main() {
         createcsv(outputdir, &loci, &pos, &args);
         //Create gene CSV
         if args.geneloc.is_some() {
-            genelist(outputdir,&loci,reader.rc_records(),&args);
+            let mut reader = match &args.index {
+                Some(d) => bam::IndexedReader::from_path_and_index(path, d),
+                None => bam::IndexedReader::from_path(path),
+            }
+            .unwrap();
+            reader.set_threads(4).unwrap();
+            reader
+                .fetch((&loci.contig, loci.start, loci.end + 1))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "The region {}:{}-{} cannot be found, exiting.",
+                        loci.contig, loci.start, loci.end
+                    )
+                });
+            genelist(outputdir, &loci, reader.rc_records(), &args);
         }
     }
 }
-fn genelist(outputdir: &std::path::Path,
+fn genelist(
+    outputdir: &std::path::Path,
     loci: &LocusInfos,
     records: bam::RcRecords<'_, IndexedReader>,
-    args: &Args) {
-        let records: Vec<Result<std::rc::Rc<rust_htslib::bam::Record>, rust_htslib::errors::Error>> = records.collect();
-        if records.is_empty() {
-            panic!("Error with records1");
-        }
-        let records: Vec<std::rc::Rc<rust_htslib::bam::Record>> = records.into_iter().filter_map(Result::ok).collect();
-        if records.is_empty() {
-            panic!("Error with records");
-        }
-        let outputfile = outputdir.join(givename(
-            &args.species, &loci.locus,&loci.contig,"geneanalysis.csv"
-        ));
-        let mut csv = csv::ReaderBuilder::new()
+    args: &Args,
+) {
+    let records: Vec<Result<std::rc::Rc<rust_htslib::bam::Record>, rust_htslib::errors::Error>> =
+        records.collect();
+    if records.is_empty() {
+        panic!("Error with records1");
+    }
+    let records: Vec<std::rc::Rc<rust_htslib::bam::Record>> =
+        records.into_iter().filter_map(Result::ok).filter(|p| !p.is_secondary()).collect();
+    if records.is_empty() {
+        panic!("Error with records");
+    }
+    let outputfile = outputdir.join(givename(
+        &args.species,
+        &loci.locus,
+        &loci.contig,
+        "geneanalysis.csv",
+    ));
+    let mut lock: std::io::StderrLock<'_>= stderr().lock();
+    let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b',')
@@ -387,54 +430,85 @@ fn genelist(outputdir: &std::path::Path,
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     for mut gene in genes {
-        let (mut reads, mut reads100,mut reads100m) = (0,0,0);
+        let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
         if gene.start > gene.end {
-            (gene.end,gene.start) = (gene.start,gene.end) //Swap position
+            (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        let mut hash: BTreeMap<i64,(usize,usize)> = BTreeMap::new(); //Match and full match
+        let mut hash: BTreeMap<i64, (usize, usize, usize)> = BTreeMap::new(); //Match and full match and total
         let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
-        range.clone().into_iter().for_each(|p| { hash.insert(p, (0,0)); });
-        let records = records.iter().filter(|p| { 
-            let firstrange = ranges::Ranges::from(vec![p.reference_start()+1..p.reference_end()+1]);
+        range.clone().into_iter().for_each(|p| {
+            hash.insert(p, (0, 0,0));
+        });
+        if records.is_empty() {
+            panic!("Empty records");
+        }
+        let records = records.iter().filter(|p| {
+            let firstrange =
+                ranges::Ranges::from(vec![p.reference_start() + 1..p.reference_end() + 1]);
             !firstrange.intersect(range.clone()).is_empty()
         });
         if records.clone().count() == 0 {
-            panic!("Empty records");
+            writeln!(lock,"Empty records for gene {}",gene.gene).unwrap();
+            continue;
         }
         for record in records {
             reads += 1;
-            'outer: for [start,end] in record.aligned_blocks() {
+            for p in record.reference_start()+1..record.reference_end()+1 {
+                match hash.get_mut(&p) {
+                    Some((.., d)) => *d += 1,
+                    None => {
+                        if record.reference_start() > gene.end {
+                            break;
+                        }
+                    } //Outside coverage of gene
+                }
+            }
+            'outer: for [start, end] in record.aligned_blocks() {
                 for p in start..end {
                     match hash.get_mut(&p) {
-                        Some((d,_)) => { *d +=1 },
-                        None => { if start > gene.end {
-                            break 'outer;
-                        } } //Outside coverage of gene
+                        Some((d, ..)) => *d += 1,
+                        None => {
+                            if start > gene.end {
+                                break 'outer;
+                            }
+                        } //Outside coverage of gene
                     }
                 }
             }
-            'outer: for [start,end] in record.aligned_blocks_match().unwrap() {
+            'outer: for [start, end] in record.aligned_blocks_match().unwrap() {
                 for p in start..end {
                     match hash.get_mut(&p) {
-                        Some((d,_)) => { *d +=1 },
-                        None => { if start > gene.end {
-                            break 'outer;
-                        } } //Outside coverage of gene
+                        Some((_, d, _)) => *d += 1,
+                        None => {
+                            if start > gene.end {
+                                break 'outer;
+                            }
+                        } //Outside coverage of gene
                     }
                 }
             }
-            let range= gene.start..=gene.end;
-            if record.aligned_blocks().any(|p| p[0] <= *range.start() && p[1] >= *range.end()) {
+            if record
+                .aligned_blocks()
+                .any(|p| p[0]+1 <= gene.start && p[1]+1 > gene.end)
+            {
                 reads100 += 1;
             }
-            if record.aligned_blocks_match().unwrap().any(|p| p[0] <= *range.start() && p[1] >= *range.end()) {
+            if record
+                .aligned_blocks_match()
+                .unwrap()
+                .any(|p| p[0]+1 <= gene.start && p[1]+1 > gene.end)
+            {
                 reads100m += 1;
             }
         }
-        let coverage = hash.clone().into_values().filter(|p| p.0 >= args.coverage.try_into().unwrap()).count();
+        let coverage = hash
+            .clone()
+            .into_values()
+            .filter(|p| p.0 >= args.coverage.try_into().unwrap())
+            .count();
         let text = hash.into_values().fold(String::new(), |mut acc, f| {
-                acc.push_str(&format!("{}({})-",f.0,f.1));
-                acc
+            acc.push_str(&format!("{}/{}({})-", f.0, f.2, f.1));
+            acc
         });
         let text = String::from(text.trim_end_matches('-'));
         let elem = GeneInfosFinish {
@@ -443,12 +517,17 @@ fn genelist(outputdir: &std::path::Path,
             strand: gene.strand,
             start: gene.start,
             end: gene.end,
-            length: gene.end.checked_sub(gene.start).unwrap().checked_add(1).unwrap(),
+            length: gene
+                .end
+                .checked_sub(gene.start)
+                .unwrap()
+                .checked_add(1)
+                .unwrap(),
             reads,
             matchpos: text,
             reads100,
             reads100m,
-            coverage10x: coverage
+            coverage10x: coverage,
         };
         finale.push(elem);
     }
@@ -463,23 +542,44 @@ fn genelist(outputdir: &std::path::Path,
     }
     csv.flush().unwrap();
     println!("Gene analysis has been saved to {}", outputfile.display());
-    }
-fn givename(species: &str, locus: &Locus, contig: &str, suffix: &str) -> String {
-    format!("{}_{}_{}_{}",species,locus,contig,suffix)
 }
-fn createcsv(outputdir: &std::path::Path,
+fn givename(species: &str, locus: &Locus, contig: &str, suffix: &str) -> String {
+    format!("{}_{}_{}_{}", species, locus, contig, suffix)
+}
+fn createcsv(
+    outputdir: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
 ) {
     let outputfile = outputdir.join(givename(
-        &args.species, &loci.locus,&loci.contig,"positionresult.csv"
+        &args.species,
+        &loci.locus,
+        &loci.contig,
+        "positionresult.csv",
     ));
     let outputfile = outputfile.as_path();
-    let mut csv = csv::WriterBuilder::new().comment(Some(b'#')).flexible(false).has_headers(false).delimiter(b'\t').from_path(outputfile).unwrap();
-    csv.write_record(["Position","map60","map1","map0","overlaps","secondary","mismatches","misalign","qual"]).unwrap();
-    for (pos,record) in pos.iter() {
-        csv.write_field(format!("{}",pos)).unwrap();
+    let mut csv = csv::WriterBuilder::new()
+        .comment(Some(b'#'))
+        .flexible(false)
+        .has_headers(false)
+        .delimiter(b'\t')
+        .from_path(outputfile)
+        .unwrap();
+    csv.write_record([
+        "Position",
+        "map60",
+        "map1",
+        "map0",
+        "overlaps",
+        "secondary",
+        "mismatches",
+        "misalign",
+        "qual",
+    ])
+    .unwrap();
+    for (pos, record) in pos.iter() {
+        csv.write_field(format!("{}", pos)).unwrap();
         csv.serialize(record).unwrap();
     }
     csv.flush().unwrap();
@@ -490,8 +590,10 @@ fn mismatchgraph<T>(
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
-    root: DrawingArea<T, Shift>
-) where T: DrawingBackend {
+    root: DrawingArea<T, Shift>,
+) where
+    T: DrawingBackend,
+{
     let _ = root.fill(&plotters::prelude::WHITE);
     let mut chart = ChartBuilder::on(&root)
         .set_label_area_size(LabelAreaPosition::Left, 60)
@@ -594,11 +696,13 @@ fn readgraph<T>(
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
-    root: DrawingArea<T, Shift>
-) where T: DrawingBackend {
+    root: DrawingArea<T, Shift>,
+) where
+    T: DrawingBackend,
+{
     let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
-    let (top, bottom) = root.split_vertically((80).percent_height()); 
+    let (top, bottom) = root.split_vertically((80).percent_height());
     let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
@@ -705,18 +809,21 @@ fn readgraph<T>(
         .x_label_style(text_style)
         .disable_x_axis()
         .draw();
-    let breaks = pos.iter().filter_map(|(pos,elem)| {
+    let breaks = pos.iter().filter_map(|(pos, elem)| {
         if elem.overlaps <= args.breaks.into() {
-            Some((*pos,1))
+            Some((*pos, 1))
         } else {
             None
         }
     });
     chart
-        .draw_series(Histogram::vertical(&chart)
-        .style(full_palette::RED.filled())
-        .data(breaks)
-        .margin(0)).unwrap()
+        .draw_series(
+            Histogram::vertical(&chart)
+                .style(full_palette::RED.filled())
+                .data(breaks)
+                .margin(0),
+        )
+        .unwrap()
         .label("Coverage break")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
     chart
