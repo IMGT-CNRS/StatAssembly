@@ -12,6 +12,7 @@ dependencies = [
  "noodles-core",
  "num-format",
  "plotters",
+ "ranges",
  "rust-htslib",
  "serde",
 ]
@@ -1167,6 +1168,12 @@ checksum = "0e4dccaaaf89514f546c693ddc140f729f958c247918a13380cccc6078391acc"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "ranges"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350932f7e8b2d0333d2537f42671a837473576c00e128fbee84c819ea08783b5"
 
 [[package]]
 name = "redox_users"
