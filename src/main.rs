@@ -1,9 +1,9 @@
 use clap::{crate_authors, Parser};
 use colors::full_palette::GREY_300;
 use plotters::coord::Shift;
-use std::collections::BTreeSet;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
+use std::ops::{RangeBounds, RangeInclusive};
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use itertools::Itertools;
@@ -232,7 +232,11 @@ struct HashMapinfo {
     supplementary: i64,
     mismatches: i64,
     misalign: i64,
+    #[serde(skip_serializing_if = "iszero")]
     qual: usize,
+}
+fn iszero(num: &usize) -> bool {
+    num == &0
 }
 impl HashMapinfo {
     fn getmaxvalue(&self) -> i64 {
@@ -501,7 +505,7 @@ fn main() {
             println!("Region {} fetched, analyzing all reads.", loci.locus);
             let mut count = 0;
             let time = Instant::now();
-            //let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
+            let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
             for p in reader.rc_records().filter_map(Result::ok) {
                 count += 1;
                 if count % 100 == 0 {
@@ -517,8 +521,7 @@ fn main() {
                 let newrange =
                     max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
                 if p.is_secondary() || p.is_supplementary() {
-                    newrange.for_each(|i| {
-                        let targeting = pos.get_mut(&i).unwrap();
+                    for (_, targeting) in pos.range_mut(newrange) {
                         if p.is_secondary() {
                             targeting.secondary += 1;
                         } else {
@@ -527,13 +530,11 @@ fn main() {
                             .supplementary
                             .push(String::from_utf8_lossy(p.qname()).to_string()); */
                         }
-                    });
+                    }
                     continue;
                 }
-                let overlaprange = max(p.reference_start() + 1, loci.start)
-                    ..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
-                let matched: BTreeSet<(i64, i64)> = match p.aligned_pairs_match() {
-                    Some(a) => a.map(|[a, b]| (a, b)).collect(),
+                let matched: Vec<RangeInclusive<i64>> = match p.aligned_blocks_match() {
+                    Some(a) => a.map(|[a, b]| a..=b).collect(),
                     None => {
                         let text = "No = CIGAR given";
                         if !args.force {
@@ -543,13 +544,14 @@ fn main() {
                             message = true
                         }
                         std::iter::empty::<IterAlignedPairs>()
-                            .map(|_| (0, 0))
+                            .map(|_| 0..=0)
                             .collect()
                     }
                 };
-                let aligned: BTreeSet<(i64, i64)> =
-                    p.aligned_pairs().map(|[a, b]| (a, b)).collect();
-                for (i, targeting) in pos.range_mut(newrange) {
+                let aligned: Vec<RangeInclusive<i64>> =
+                    p.aligned_blocks().map(|[a, b]| a..=b).collect();
+                for (i, targeting) in pos.range_mut(newrange.clone()) {
+                    let _time = Instant::now();
                     match p.mapq() {
                         0 => targeting.map0 += 1,
                         1..=59 => targeting.map1 += 1,
@@ -560,34 +562,48 @@ fn main() {
                             String::from_utf8_lossy(p.qname())
                         ),
                     };
-                    //Get quality of reads depending on genomic position
-                    if let Some(d) = p.aligned_pairs().find(|p| p[1] == *i) {
-                        let index = d[0] as usize;
-                        targeting.qual += *p.qual().get(index).unwrap() as usize;
+                    if i % sep == 0 {
+                        //Get quality of reads depending on genomic position
+                        if let Some(d) = p.aligned_pairs().find(|p| p[1] == *i) {
+                            let index = d[0] as usize;
+                            targeting.qual += *p.qual().get(index).unwrap() as usize;
+                        }
                     }
-                    targeting.misalign += 1;
-                }
-                //Overlap
-                for (_, targeting) in pos.range_mut(overlaprange) {
-                    targeting.overlaps += 1;
-                }
-                //Remove misalign and mismatched
-                matched.iter().for_each(|p| {
-                    pos.range_mut(p.0..=p.1).for_each(|(_, f)| {
-                        f.misalign -= 1;
-                    })
-                });
-                //Aligned reads but without matches ones
-                aligned.difference(&matched).for_each(|p| {
-                    pos.range_mut(p.0..=p.1).for_each(|(_, f)| {
-                        f.misalign -= 1;
+                    if matched
+                        .iter()
+                        .skip_while(|p| p.end() <= i)
+                        .take_while(|p| p.start() <= i)
+                        .any(|s| s.contains(i))
+                    {
+                        //Match skipped
+                    } else if aligned
+                        .iter()
+                        .skip_while(|p| p.end() <= i)
+                        .take_while(|p| p.start() <= i)
+                        .any(|s| s.contains(i))
+                    {
                         //Aligns but not correct nt
                         if !args.force {
-                            f.mismatches += 1;
+                            targeting.mismatches += 1;
                         };
-                    })
-                });
+                    } else {
+                        //No alignment (deletion in read probably)
+                        targeting.misalign += 1;
+                    }
+                    //Overlap
+                    if newrange.start_bound() != std::ops::Bound::Included(i)
+                        || newrange.end_bound() != std::ops::Bound::Included(i)
+                    {
+                        targeting.overlaps += 1;
+                    }
+                }
             }
+            pos.iter_mut().for_each(|(_, p)| {
+                p.qual /= max(
+                    std::convert::TryInto::<usize>::try_into(p.map0 + p.map1 + p.map60).unwrap(),
+                    1,
+                )
+            });
             if nocount {
                 panic!(
                     "The region {}:{}-{} cannot be found, exiting.",
@@ -663,22 +679,24 @@ fn main() {
             }
             //Create CSV from HashMap
             createcsv(outputdir, loci, &pos, &args);
-        }
-        //Create gene CSV
-        if args.geneloc.is_some() {
-            println!("Gene list starting!");
-            genelist(outputdir, floci, &args);
-            println!("Gene list finished");
+            //Create gene CSV
+            if args.geneloc.is_some() {
+                println!("Gene list starting!");
+                genelist(outputdir, &loci, &args);
+                println!("Gene list finished");
+            } else {
+                eprintln!("You have not provided a gene list, skipped.");
+            }
         }
         println!("Locus {} is done!", &floci.locus);
     }
 }
-fn genelist(outputdir: &std::path::Path, floci: &LocusInfos, args: &Args) {
+fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
     let outputfile = outputdir.join(givename(
         &args.species,
-        &floci.locus,
-        &floci.contig,
-        floci.haplotype.isprimary(),
+        &loci.locus,
+        &loci.contig,
+        loci.haplotype.isprimary(),
         "geneanalysis.csv",
         false,
     ));
@@ -700,12 +718,12 @@ fn genelist(outputdir: &std::path::Path, floci: &LocusInfos, args: &Args) {
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     for mut gene in genes {
-        /* if gene.chromosome != loci.contig
-                || !(loci.start..=loci.end).contains(&gene.start)
-                || !(loci.start..=loci.end).contains(&gene.end)
+        if gene.chromosome != loci.contig
+            || !(loci.start..=loci.end).contains(&gene.start)
+            || !(loci.start..=loci.end).contains(&gene.end)
         {
             continue; //gene not on this loci
-        } */
+        }
         let mut reader = getreaderoffile(args);
         let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
         if gene.start > gene.end {
@@ -805,7 +823,7 @@ fn genelist(outputdir: &std::path::Path, floci: &LocusInfos, args: &Args) {
         let genename = gene.gene.clone();
         let plots = outputdir
             .join(format!("gene_{}", args.species))
-            .join(floci.haplotype.to_string().as_str().to_lowercase());
+            .join(loci.haplotype.to_string().as_str().to_lowercase());
         if !std::fs::exists(&plots).unwrap() {
             println!("Creating the folder {}", plots.display());
             std::fs::create_dir_all(&plots).unwrap();
@@ -814,7 +832,7 @@ fn genelist(outputdir: &std::path::Path, floci: &LocusInfos, args: &Args) {
         output.set_extension("png");
         let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
         //Gene graph
-        genegraph(&hash, &gene, floci, root);
+        genegraph(&hash, &gene, loci, root);
         let elem = GeneInfosFinish {
             gene: gene.gene,
             chromosome: gene.chromosome,
@@ -881,7 +899,7 @@ fn genegraph<T>(
         ))
         .unwrap()
         .label("Equal")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_200));
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_200.mix(0.8)));
     chart
         .draw_series(LineSeries::new(
             hash.iter()
@@ -891,7 +909,7 @@ fn genegraph<T>(
         ))
         .unwrap()
         .label("Match")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600));
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600.mix(0.8)));
     chart
         .draw_series(LineSeries::new(
             hash.iter()
@@ -901,7 +919,7 @@ fn genegraph<T>(
         ))
         .unwrap()
         .label("Total")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::LIGHTBLUE_300));
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::LIGHTBLUE_300.mix(0.8)));
     chart
         .configure_mesh()
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
@@ -909,7 +927,7 @@ fn genegraph<T>(
         .y_desc("Reads count")
         .x_label_style(text_style.clone())
         .y_label_style(text_style)
-        .light_line_style(GREY_300)
+        .light_line_style(GREY_300.mix(0.4))
         .x_max_light_lines(5)
         .y_max_light_lines(2)
         //.disable_y_mesh()
@@ -988,7 +1006,7 @@ fn createcsv(
     ])
     .unwrap();
     for (pos, record) in pos.iter() {
-        csv.write_field(format!("{}", pos)).unwrap();
+        csv.write_field(format!("{}", pos.saturating_add(1))).unwrap(); //Add +1
         csv.serialize(record).unwrap();
     }
     csv.flush().unwrap();
@@ -1066,14 +1084,7 @@ fn mismatchgraph<T>(
         .draw_secondary_series(LineSeries::new(
             pos.iter().filter_map(|p| {
                 if p.1.qual > 0 {
-                    Some((
-                        *p.0,
-                        p.1.qual
-                            / std::convert::TryInto::<usize>::try_into(
-                                p.1.map0 + p.1.map1 + p.1.map60,
-                            )
-                            .unwrap(),
-                    ))
+                    Some((*p.0, p.1.qual))
                 } else {
                     None
                 }
