@@ -1,12 +1,13 @@
 use bio_types::genome::AbstractInterval;
 use clap::{crate_authors, Parser};
+use plotters::coord::Shift;
 use core::num;
 use csv;
 use noodles_core::Region;
-use noodles_fasta::{self as fasta, record::Sequence};
+//use noodles_fasta::{self as fasta, record::Sequence};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
-use plotters::prelude::{full_palette, AreaSeries, BitMapBackend, IntoDrawingArea, PathElement};
+use plotters::prelude::{full_palette, AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord, PathElement, SVGBackend};
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
 use plotters::{self, coord};
@@ -49,6 +50,12 @@ struct Args {
     ///CSV containing locus infos
     #[arg(short, long)]
     locuspos: PathBuf,
+    /// Minimal number of reads (included) to declare a break in coverage
+    #[arg(short,long, default_value_t=3)]
+    breaks: u32,
+    /// Save as SVG images
+    #[arg(long)]
+    svg: bool,
     ///Species
     #[arg(short, long)]
     species: String,
@@ -220,6 +227,7 @@ fn main() {
                     loci.contig, loci.start, loci.end
                 )
             });
+        let mut nocount=true;
         //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
         //let file = File::create(&filename).unwrap();
         //let mut writer = BufWriter::new(file);
@@ -228,12 +236,14 @@ fn main() {
             pos.insert(p, HashMapinfo::default());
         });
         for p in reader.rc_records() {
+            nocount=false;
             let p = p.unwrap();
             let newrange =
                 max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
             if p.is_secondary() {
                 newrange.for_each(|i| {
-                    pos.get_mut(&i).unwrap().secondary += 1;
+                    let targeting = pos.get_mut(&i).unwrap();
+                    targeting.secondary += 1;
                 });
                 continue;
             }
@@ -242,10 +252,11 @@ fn main() {
             let mut matched = p.aligned_pairs_match().expect("No CIGAR = given.").map(|[a, b]| a..=b);
             let mut aligned = p.aligned_pairs().map(|[a, b]| a..=b);
             newrange.for_each(|i| {
+                let targeting = pos.get_mut(&i).unwrap();
                 match p.mapq() {
-                    0 => pos.get_mut(&i).unwrap().map0 += 1,
-                    1..=59 => pos.get_mut(&i).unwrap().map1 += 1,
-                    60 => pos.get_mut(&i).unwrap().map60 += 1,
+                    0 => targeting.map0 += 1,
+                    1..=59 => targeting.map1 += 1,
+                    60 => targeting.map60 += 1,
                     _ => panic!(
                         "MAPQ score is invalid. Got {} for {}",
                         p.mapq(),
@@ -256,38 +267,74 @@ fn main() {
                     //Check every 455 nt
                     if let Some(d) = p.aligned_pairs().find(|p| p[1] == i) {
                         let index = d[0] as usize;
-                        pos.get_mut(&i).unwrap().qual += *p.qual().get(index).unwrap() as usize;
+                        targeting.qual += *p.qual().get(index).unwrap() as usize;
                     }
                 }
                 if overlaprange.contains(&i) {
-                    pos.get_mut(&i).unwrap().overlaps += 1;
+                    targeting.overlaps += 1;
                 }
                 if matched.any(|f| f.contains(&i)) {
                     //Match skipped
                 } else if aligned.any(|f| f.contains(&i)) {
                     //Aligns but not correct nt
-                    pos.get_mut(&i).unwrap().mismatches += 1;
+                    targeting.mismatches += 1;
                 } else {
                     //No alignment (deletion in read probably)
-                    pos.get_mut(&i).unwrap().misalign += 1;
+                    targeting.misalign += 1;
                 }
             });
         }
-        //writer.flush().unwrap();
-        readgraph(outputdir, &loci, &pos, &args);
+        if nocount {
+            panic!(
+                "The region {}:{}-{} cannot be found, exiting.",
+                loci.contig, loci.start, loci.end
+            )
+        }
+        // Second graph with reads
+        let fgraph = "readresult";
+        if args.svg {
+            let outputfile = outputdir.join(givename(
+                &args.species, &loci.locus,&loci.contig,&format!("{}.svg",fgraph)
+            ));
+            let outputfile = outputfile.as_path();
+            let root = SVGBackend::new(outputfile, (900, 500)).into_drawing_area();
+            readgraph(outputfile, &loci, &pos, &args, root);
+        } else {
+            let outputfile = outputdir.join(givename(
+                &args.species, &loci.locus,&loci.contig,&format!("{}.png",fgraph)
+            ));
+            let outputfile = outputfile.as_path();
+            let root = BitMapBackend::new(outputfile, (1800, 1000)).into_drawing_area();
+            readgraph(outputfile, &loci, &pos, &args, root);
+        }
         // Second graph with mismatches
-        mismatchgraph(outputdir, &loci, &pos, &args);
+        let sgraph = "mismatchresult";
+        if args.svg {
+            let outputfile = outputdir.join(givename(
+                &args.species, &loci.locus,&loci.contig,&format!("{}.svg",sgraph)
+            ));
+            let outputfile = outputfile.as_path();
+            let root = SVGBackend::new(outputfile, (1200, 600)).into_drawing_area();
+            mismatchgraph(outputfile, &loci, &pos, &args,root);
+        } else {
+            let outputfile = outputdir.join(givename(
+                &args.species, &loci.locus,&loci.contig,&format!("{}.png",sgraph)
+            ));
+            let outputfile = outputfile.as_path();
+            let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
+            mismatchgraph(outputfile, &loci, &pos, &args, root);
+        }
         //Create CSV from HashMap
         createcsv(outputdir, &loci, &pos, &args);
         //Create gene CSV
         if args.geneloc.is_some() {
-            genelist(outputdir,&loci,&reader.rc_records(),&args);
+            genelist(outputdir,&loci,reader.rc_records(),&args);
         }
     }
 }
 fn genelist(outputdir: &std::path::Path,
     loci: &LocusInfos,
-    records: &bam::RcRecords<'_, IndexedReader>,
+    records: bam::RcRecords<'_, IndexedReader>,
     args: &Args) {
         let outputfile = outputdir.join(givename(
             &args.species, &loci.locus,&loci.contig,"geneanalysis.csv"
@@ -337,7 +384,7 @@ fn genelist(outputdir: &std::path::Path,
         .from_path(&outputdir)
         .unwrap();
     for gene in finale {
-        csv.serialize(csv).unwrap();
+        csv.serialize(gene).unwrap();
     }
     csv.flush().unwrap();
     println!("Gene analysis has been saved to {}", outputfile.display());
@@ -363,17 +410,13 @@ fn createcsv(outputdir: &std::path::Path,
     csv.flush().unwrap();
     println!("CSV analysis has been saved to {}", outputfile.display());
 }
-fn mismatchgraph(
-    outputdir: &std::path::Path,
+fn mismatchgraph<T>(
+    outputfile: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
-) {
-    let outputfile = outputdir.join(givename(
-        &args.species, &loci.locus,&loci.contig,"mismatchresult.png"
-    ));
-    let outputfile = outputfile.as_path();
-    let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
+    root: DrawingArea<T, Shift>
+) where T: DrawingBackend {
     let _ = root.fill(&plotters::prelude::WHITE);
     let mut chart = ChartBuilder::on(&root)
         .set_label_area_size(LabelAreaPosition::Left, 60)
@@ -384,7 +427,7 @@ fn mismatchgraph(
                 "Mismatches rate and quality over the locus {} ({})",
                 loci.locus, loci.contig
             ),
-            ("sans-serif", 40),
+            ("sans-serif", 28),
         )
         .build_cartesian_2d(loci.start..loci.end, 0..100)
         .unwrap();
@@ -471,20 +514,17 @@ fn mismatchgraph(
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
     println!("Result has been saved to {}", outputfile.display());
 }
-fn readgraph(
-    outputdir: &std::path::Path,
+fn readgraph<T>(
+    outputfile: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
-) {
+    root: DrawingArea<T, Shift>
+) where T: DrawingBackend {
     let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
-    let outputfile = outputdir.join(givename(
-        &args.species, &loci.locus,&loci.contig,"readresult.png"
-    ));
-    let outputfile = outputfile.as_path();
-    let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
     let _ = root.fill(&plotters::prelude::WHITE);
-    let mut chart = ChartBuilder::on(&root)
+    let (top, bottom) = root.split_vertically((80).percent_height()); 
+    let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         .caption(
@@ -492,14 +532,14 @@ fn readgraph(
                 "Reads mapping quality over the locus {} ({})",
                 loci.locus, loci.contig
             ),
-            ("sans-serif", 40),
+            ("sans-serif", 28),
         )
         .build_cartesian_2d(loci.start..loci.end, 0..max)
         .unwrap();
     let _ = chart
         .configure_mesh()
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
-        .x_desc("Genomic position (bp)")
+        //.x_desc("Genomic position (bp)")
         .y_desc("Coverage")
         .disable_x_mesh()
         .y_max_light_lines(2)
@@ -563,6 +603,47 @@ fn readgraph(
         .unwrap()
         .label("Overlapping reads")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300));
+    chart
+        .configure_series_labels()
+        .position(plotters::chart::SeriesLabelPosition::UpperRight)
+        .background_style(WHITE)
+        .border_style(BLACK.mix(0.8))
+        .draw()
+        .unwrap();
+    //Bottom graph
+    let mut chart = ChartBuilder::on(&bottom)
+        .set_label_area_size(LabelAreaPosition::Left, 60)
+        .set_label_area_size(LabelAreaPosition::Bottom, 60)
+        /*.caption(
+            format!(
+                "Break in coverage {} ({})",
+                loci.locus, loci.contig
+            ),
+            ("sans-serif", 40),
+        )  */
+        .build_cartesian_2d((loci.start..loci.end).into_segmented(), 0..1i64)
+        .unwrap();
+    let text_style = ("sans-serif", 14, &BLACK).into_text_style(&root);
+    let _ = chart
+        .configure_mesh()
+        .x_desc("Genomic position (bp)")
+        .x_label_style(text_style)
+        .disable_x_axis()
+        .draw();
+    let breaks = pos.iter().filter_map(|(pos,elem)| {
+        if elem.overlaps <= args.breaks.into() {
+            Some((*pos,1))
+        } else {
+            None
+        }
+    });
+    chart
+        .draw_series(Histogram::vertical(&chart)
+        .style(full_palette::RED.filled())
+        .data(breaks)
+        .margin(0)).unwrap()
+        .label("Coverage break")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
     chart
         .configure_series_labels()
         .position(plotters::chart::SeriesLabelPosition::UpperRight)
