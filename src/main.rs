@@ -1,5 +1,4 @@
 use clap::{crate_authors, Parser};
-use csv;
 use plotters::coord::Shift;
 use std::io::stderr;
 //use noodles_fasta::{self as fasta, record::Sequence};
@@ -11,7 +10,6 @@ use plotters::prelude::{
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
-use plotters;
 use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam::{self, IndexedReader, Read};
 use serde::{de, Deserialize, Serialize};
@@ -152,15 +150,15 @@ struct HashMapinfo {
     map1: i64,
     map0: i64,
     overlaps: i64,
-    secondary: i64,
+    secondary: Vec<String>,
+    supplementary: Vec<String>,
     mismatches: i64,
     misalign: i64,
     qual: usize,
 }
 impl HashMapinfo {
     fn getmaxvalue(&self) -> i64 {
-        assert!(std::mem::size_of::<HashMapinfo>() <= isize::MAX as _);
-        let elem = unsafe { std::slice::from_raw_parts(self as *const Self as *const i64, 7) };
+        let elem = [self.map0,self.map1,self.overlaps,self.secondary.len() as i64,self.supplementary.len() as i64];
         *elem.iter().max().unwrap()
     }
 }
@@ -175,12 +173,13 @@ impl Ord for HashMapinfo {
     }
 }
 impl HashMapinfo {
-    #[allow(dead_code)]
+    #[allow(dead_code,clippy::too_many_arguments)]
     fn new(
         map60: i64,
         map1: i64,
         map0: i64,
-        secondary: i64,
+        secondary: Vec<String>,
+        supplementary: Vec<String>,
         overlaps: i64,
         mismatches: i64,
         misalign: i64,
@@ -191,6 +190,7 @@ impl HashMapinfo {
             map1,
             map0,
             secondary,
+            supplementary,
             overlaps,
             mismatches,
             misalign,
@@ -202,7 +202,8 @@ impl HashMapinfo {
             map60: 0,
             map1: 0,
             map0: 0,
-            secondary: 0,
+            secondary: vec![],
+            supplementary: vec![],
             overlaps: 0,
             mismatches: 0,
             misalign: 0,
@@ -250,7 +251,7 @@ fn main() {
             .fetch((&loci.contig, loci.start, loci.end + 1))
             .unwrap_or_else(|_| {
                 panic!(
-                    "The region {}:{}-{} cannot be found, exiting.",
+                    "The region {}:{}-{} cannot be found, exnniting.",
                     loci.contig, loci.start, loci.end
                 )
             });
@@ -267,10 +268,14 @@ fn main() {
             let p = p.unwrap();
             let newrange =
                 max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
-            if p.is_secondary() {
+            if p.is_secondary() || p.is_supplementary() { 
                 newrange.for_each(|i| {
                     let targeting = pos.get_mut(&i).unwrap();
-                    targeting.secondary += 1;
+                    if p.is_secondary() {
+                    targeting.secondary.push(String::from_utf8_lossy(p.qname()).to_string());
+                    } else {
+                        targeting.supplementary.push(String::from_utf8_lossy(p.qname()).to_string());
+                    }
                 });
                 continue;
             }
@@ -327,7 +332,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
-                &loci.haplotype == &Haplotype::Primary,
+                loci.haplotype == Haplotype::Primary,
                 &format!("{}.svg", fgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -338,7 +343,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
-                &loci.haplotype == &Haplotype::Primary,
+                loci.haplotype == Haplotype::Primary,
                 &format!("{}.png", fgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -352,7 +357,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
-                &loci.haplotype == &Haplotype::Primary,
+                loci.haplotype == Haplotype::Primary,
                 &format!("{}.svg", sgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -363,7 +368,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
-                &loci.haplotype == &Haplotype::Primary,
+                loci.haplotype == Haplotype::Primary,
                 &format!("{}.png", sgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -415,7 +420,7 @@ fn genelist(
         &args.species,
         &loci.locus,
         &loci.contig,
-        &loci.haplotype == &Haplotype::Primary,
+        loci.haplotype == Haplotype::Primary,
         "geneanalysis.csv",
     ));
     let mut lock: std::io::StderrLock<'_> = stderr().lock();
@@ -423,7 +428,7 @@ fn genelist(
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b',')
-        .from_path(&args.geneloc.as_ref().unwrap())
+        .from_path(args.geneloc.as_ref().unwrap())
         .unwrap();
     let mut genes: Vec<GeneInfos> = Vec::new();
     for record in csv.deserialize() {
@@ -439,23 +444,23 @@ fn genelist(
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        let mut hash: BTreeMap<i64, (usize, usize, usize)> = BTreeMap::new(); //Match and full match and total
-        let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
-        range.clone().into_iter().for_each(|p| {
-            hash.insert(p, (0, 0, 0));
-        });
         if records.is_empty() {
             panic!("Empty records");
         }
+        let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
         let records = records.iter().filter(|p| {
             let firstrange =
-                ranges::Ranges::from(vec![p.reference_start() + 1..p.reference_end() + 1]);
+                ranges::Ranges::from((p.reference_start() + 1..p.reference_end() + 1).collect::<std::vec::Vec<i64>>());
             !firstrange.intersect(range.clone()).is_empty()
         });
         if records.clone().count() == 0 {
             writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
             continue;
         }
+        let mut hash: BTreeMap<i64, (usize, usize, usize)> = BTreeMap::new(); //Match and full match and total
+        range.clone().into_iter().for_each(|p| {
+            hash.insert(p, (0, 0, 0));
+        });
         let mut coverageperc = 0;
         for record in records {
             reads += 1;
@@ -496,14 +501,14 @@ fn genelist(
             }
             if record
                 .aligned_blocks()
-                .any(|p| p[0] + 1 <= gene.start && p[1] + 1 > gene.end)
+                .any(|p| p[0] < gene.start && p[1] + 1 > gene.end)
             {
                 reads100 += 1;
             }
             if record
                 .aligned_blocks_match()
                 .unwrap()
-                .any(|p| p[0] + 1 <= gene.start && p[1] + 1 > gene.end)
+                .any(|p| p[0] < gene.start && p[1] + 1 > gene.end)
             {
                 reads100m += 1;
             }
@@ -571,7 +576,7 @@ fn createcsv(
         &args.species,
         &loci.locus,
         &loci.contig,
-        &loci.haplotype == &Haplotype::Primary,
+        loci.haplotype == Haplotype::Primary,
         "positionresult.csv",
     ));
     let outputfile = outputfile.as_path();
@@ -580,6 +585,7 @@ fn createcsv(
         .flexible(false)
         .has_headers(false)
         .delimiter(b'\t')
+        .flexible(true)
         .from_path(outputfile)
         .unwrap();
     csv.write_record([
@@ -784,12 +790,20 @@ fn readgraph<T>(
         });
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.secondary)),
+            pos.iter().map(|p| (*p.0, p.1.secondary.len() as i64)),
             full_palette::BLACK,
         ))
         .unwrap()
         .label("Secondary alignments")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
+    chart
+        .draw_series(LineSeries::new(
+            pos.iter().map(|p| (*p.0, p.1.supplementary.len() as i64)),
+            full_palette::BLUE_700,
+        ))
+        .unwrap()
+        .label("Supplementary alignments")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_700));
     chart
         .draw_series(LineSeries::new(
             pos.iter().map(|p| (*p.0, p.1.overlaps)),
