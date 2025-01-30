@@ -654,14 +654,14 @@ fn main() {
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting for {}!",loci.haplotype);
-                genelist(outputdir, loci, &args);
+                genelist(outputdir, loci, &args, &floci);
                 println!("Gene list finished for {}!",loci.haplotype);
             }
         }
         println!("Locus {} is done!", &floci.locus);
     }
 }
-fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
+fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args, floci: &LocusInfos) {
     let outputfile = outputdir.join(givename(
         &args.species,
         &loci.locus,
@@ -688,7 +688,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     for mut gene in genes {
-        if !args.complete && gene.chromosome != loci.contig || !(loci.start..=loci.end).contains(&gene.start) || !(loci.start..=loci.end).contains(&gene.end) {
+        if !args.complete && (gene.chromosome != loci.contig || !(loci.start..=loci.end).contains(&gene.start) || !(loci.start..=loci.end).contains(&gene.end)) {
             continue; //gene not on this loci
         }
         let mut reader = getreaderoffile(args);
@@ -796,7 +796,9 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         )
         .into_drawing_area();
     //Gene graph
-        genegraph(&hash, &gene, loci, root);
+        if !args.complete || floci == loci {
+            genegraph(&hash, &gene, loci, root);
+        }
         let elem = GeneInfosFinish {
             gene: gene.gene,
             chromosome: gene.chromosome,

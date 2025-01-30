@@ -36,5 +36,5 @@ to access the help.
 ## Output
 
 ### Memory consumption
-The script uses hundreds of Mo for a several Mo locus. It does not therefore require a lot of memory.
+The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
 ![Memory consumption](/images/memory.png)
