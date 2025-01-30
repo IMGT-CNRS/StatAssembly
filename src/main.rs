@@ -1459,8 +1459,12 @@ fn readgraph<T>(
                 } else {
                     acc.push_str(&format!("{}:{}..{}\n", loci.contig, f + 1, prev_num + 1));
                 }
-                first = Some(num);
-                prev = Some(num);
+                if num != *finalpos {
+                    first = Some(num);
+                    prev = Some(num);
+                } else {
+                    first = None;
+                }
             } else {
                 prev = Some(num);
             }
