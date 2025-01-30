@@ -1,5 +1,5 @@
 use clap::{crate_authors, Parser};
-use colors::full_palette::{GREY_300, GREY_400, GREY_900};
+use colors::full_palette::GREY_400;
 use plotters::coord::Shift;
 use std::collections::HashMap;
 use std::io::{stderr, stdout};
@@ -69,7 +69,7 @@ struct Args {
     /// Percent warning position for mismatch reads
     #[arg(long, default_value_t = 60)]
     percentalerting: u8,
-    /// Force cigar even if no =
+    /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     force: bool,
     /// Save as SVG images
@@ -100,6 +100,33 @@ struct Posread {
     r#match: usize,
     indel: usize,
     total: usize,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Position {
+    zbased: bool,
+    position: i64,
+}
+impl Position {
+    fn new(zbased: bool, position: i64) -> Self {
+        Position { zbased, position }
+    }
+    fn getzbasedpos(&self) -> i64 {
+        if self.zbased {
+            self.position
+        } else {
+            self.position.saturating_sub(1)
+        }
+    }
+    fn getobasedpos(&self) -> i64 {
+        if self.zbased {
+            self.position.saturating_add(1)
+        } else {
+            self.position
+        }
+    }
+    fn iszbased(&self) -> bool {
+        self.zbased
+    }
 }
 impl Posread {
     #[allow(dead_code)]
@@ -151,9 +178,7 @@ enum Haplotype {
 }
 impl Ord for Haplotype {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if (self == &Haplotype::Primary && other == &Haplotype::Primary)
-            || (self == &Haplotype::Alternate && other == &Haplotype::Alternate)
-        {
+        if self == other {
             std::cmp::Ordering::Equal
         } else if self == &Haplotype::Primary {
             std::cmp::Ordering::Less
@@ -246,7 +271,7 @@ struct HashMapinfo {
     qual: usize,
 }
 fn iszero(num: &usize) -> bool {
-    num == &0
+    *num == 0
 }
 impl HashMapinfo {
     fn getmaxvalue(&self) -> i64 {
@@ -317,7 +342,7 @@ fn getreaderoffile(args: &Args) -> IndexedReader {
     }
     .unwrap();
     let threads = match std::thread::available_parallelism() {
-        Ok(d) => max(d, NonZero::new(12).unwrap()),
+        Ok(d) => min(d, NonZero::new(12).unwrap()),
         Err(_) => NonZero::new(4).unwrap(),
     };
     reader.set_threads(threads.get()).unwrap();
@@ -359,6 +384,7 @@ fn main() {
         std::cmp::Ordering::Equal => a.haplotype.cmp(&b.haplotype),
         o => o,
     });
+    //Group between primary and alternate
     let grouped = locus.into_iter().into_group_map_by(|f| f.locus.to_string());
     for (_, locus) in grouped {
         let floci = locus.first().unwrap();
@@ -372,6 +398,7 @@ fn main() {
             floci.locus,
             if !haplotypebool { "diploid" } else { "haploid" }
         );
+        //Get infos for graph
         let mut outputfile1 = PathBuf::new();
         let mut outputfile2 = PathBuf::new();
         let mut outputfile3 = PathBuf::new();
@@ -446,7 +473,7 @@ fn main() {
                     &args.species,
                     &floci.locus,
                     &floci.contig,
-                    haplotype == 1,
+                    haplotypebool,
                     &format!("{}.svg", sgraph),
                     true,
                 ));
@@ -472,7 +499,7 @@ fn main() {
                     &args.species,
                     &floci.locus,
                     &floci.contig,
-                    haplotype == 1,
+                    haplotypebool,
                     &format!("{}.png", sgraph),
                     true,
                 ));
@@ -501,12 +528,15 @@ fn main() {
         let mut lock = stdout().lock();
         for loci in locus.iter() {
             let mut reader = getreaderoffile(&args);
+            //0-based
             reader
-                .fetch((&loci.contig, loci.start, loci.end + 1))
+                .fetch((&loci.contig, loci.start - 1, loci.end + 1))
                 .unwrap_or_else(|_| {
                     panic!(
                         "The region {}:{}-{} cannot be found, exiting.",
-                        loci.contig, loci.start, loci.end
+                        loci.contig,
+                        loci.start - 1,
+                        loci.end + 1
                     )
                 });
             let mut nocount = true;
@@ -524,6 +554,7 @@ fn main() {
             let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
             for p in reader.rc_records().filter_map(Result::ok) {
                 count += 1;
+                //Print every 100 reads done
                 if count % 100 == 0 {
                     writeln!(
                         lock,
@@ -534,6 +565,7 @@ fn main() {
                     .unwrap();
                 }
                 nocount = false;
+                //Get range to put the reads inclusive pos
                 let newrange =
                     max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
                 if p.is_secondary() || p.is_supplementary() {
@@ -562,7 +594,7 @@ fn main() {
                         if !args.force {
                             panic!("{}. Add --force to force even without = (some results won't be available).", text);
                         } else if !message {
-                            eprintln!("{} but it was forced...", text);
+                            eprintln!("{} but it was forced... Continuing...", text);
                             message = true
                         }
                         std::iter::empty::<IterAlignedPairs>()
@@ -612,14 +644,13 @@ fn main() {
                         //No alignment (deletion in read probably)
                         targeting.misalign += 1;
                     }
-                    //Overlap
-                    if newrange.start_bound() != std::ops::Bound::Included(i)
-                        || newrange.end_bound() != std::ops::Bound::Included(i)
-                    {
+                    //Overlap reads
+                    if p.reference_start() != *i && p.reference_end() != *i {
                         targeting.overlaps += 1;
                     }
                 }
             }
+            //Quality is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
                 p.qual /= max(
                     std::convert::TryInto::<usize>::try_into(p.map0 + p.map1 + p.map60).unwrap(),
@@ -629,7 +660,9 @@ fn main() {
             if nocount {
                 panic!(
                     "The region {}:{}-{} cannot be found, exiting.",
-                    loci.contig, loci.start, loci.end
+                    loci.contig,
+                    loci.start + 1,
+                    loci.end + 1
                 )
             }
             println!("Making graphs");
@@ -754,6 +787,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
         let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
+        //Add +1 because 0-based
         reader
             .fetch((&gene.chromosome, gene.start + 1, gene.end + 1))
             .unwrap();
@@ -770,11 +804,9 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         {
             empty = false;
             reads += 1;
-            coverageperc +=
-                ranges::Ranges::from(record.reference_start() + 1..record.reference_end() + 1)
-                    .into_iter()
-                    .count();
-            for p in record.reference_start() + 1..record.reference_end() + 1 {
+            let range = record.reference_start() + 1..record.reference_end() + 1;
+            coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
+            for p in range {
                 match hash.get_mut(&p) {
                     Some(d) => d.addtotal(1),
                     None => {
@@ -812,7 +844,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
             }
             if record
                 .aligned_blocks()
-                .any(|p| p[0] < gene.start && p[1] + 1 > gene.end)
+                .any(|p| p[0] <= gene.start && p[1] >= gene.end)
             {
                 reads100 += 1;
             }
@@ -820,7 +852,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
                 && record
                     .aligned_blocks_match()
                     .unwrap()
-                    .any(|p| p[0] < gene.start && p[1] + 1 > gene.end)
+                    .any(|p| p[0] <= gene.start && p[1] >= gene.end)
             {
                 reads100m += 1;
             }
@@ -829,11 +861,12 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
             writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
             continue;
         }
+        //Coverage calculus
         let coverage = hash
-            .clone()
-            .into_values()
-            .filter(|p| p.gettotal() >= args.coverage.try_into().unwrap())
+            .iter()
+            .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap())
             .count();
+        //Merging data
         let text = hash.iter().fold(String::new(), |mut acc, (_, f)| {
             acc.push_str(&format!(
                 "{}/{}({})-",
@@ -858,7 +891,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         //Gene graph
         genegraph(args, &hash, &gene, loci, root, &mut alertingpositions);
         let elem = GeneInfosFinish {
-            gene: gene.gene,
+            gene: genename,
             chromosome: gene.chromosome,
             strand: gene.strand,
             start: gene.start,
@@ -868,12 +901,12 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
                 .checked_sub(gene.start)
                 .unwrap()
                 .checked_add(1)
-                .unwrap(),
+                .unwrap(), //Calculate the length
             reads,
             matchpos: text,
             reads100,
             reads100m,
-            coverageperc: ((coverageperc / reads / range.into_iter().count()) as f32 * 1000.0)
+            coverageperc: ((coverageperc / reads / range.into_iter().count()) as f32 * 1_000.0)
                 .round()
                 / 1000.0,
             coveragex: coverage,
@@ -889,18 +922,17 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
     for gene in finale {
         csv.serialize(gene).unwrap();
     }
-    alertingpositions.iter_mut().for_each(|(_,vec)| {
-        vec.sort_unstable_by(|a,b| {
-            match a.1.cmp(&b.1) {
-                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-                ord => ord
-            }
+    csv.flush().unwrap();
+    //Sorting the positions
+    alertingpositions.iter_mut().for_each(|(_, vec)| {
+        vec.sort_unstable_by(|a, b| match a.1.cmp(&b.1) {
+            std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+            ord => ord,
         });
     });
     if !args.force {
         printpossus(args, loci, outputdir, &alertingpositions);
     }
-    csv.flush().unwrap();
     println!("Gene analysis has been saved to {}", outputfile.display());
 }
 fn printpossus(
@@ -923,6 +955,8 @@ fn printpossus(
         .delimiter(b'\t')
         .from_path(&outputfile)
         .unwrap();
+    csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])
+        .unwrap();
     for (gene, vec) in data {
         csv.write_field(&gene.gene).unwrap();
         let infos = vec.iter().fold(String::new(), |mut acc, f| {
@@ -934,7 +968,10 @@ fn printpossus(
         csv.write_record(None::<&[u8]>).unwrap();
     }
     csv.flush().unwrap();
-    println!("Gene suspicious position has been saved to {}", outputfile.display());
+    println!(
+        "Gene suspicious position has been saved to {}",
+        outputfile.display()
+    );
 }
 fn genegraph<T>(
     args: &Args,
@@ -960,6 +997,7 @@ fn genegraph<T>(
         )
         .build_cartesian_2d(1..hash.len(), 0..max)
         .unwrap();
+    //Enumerate to get position relative to the gene (+1 because 0-related)
     chart
         .draw_series(LineSeries::new(
             hash.iter()
@@ -1003,13 +1041,17 @@ fn genegraph<T>(
                 Histogram::vertical(&chart)
                     .style(full_palette::ORANGE_300.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
-                        let pos = pos+1;
+                        let pos = pos + 1;
                         let percent = if val.total > 0 {
                             val.r#match * 100 / val.total
                         } else {
                             0
                         };
-                        if (usize::from(args.percentalerting+1)..usize::from(args.percentwarning)).contains(&percent) || (val.r#match <= usize::try_from(args.minreads).unwrap() && percent > usize::from(args.percentalerting)) {
+                        if (usize::from(args.percentalerting + 1)..usize::from(args.percentwarning))
+                            .contains(&percent)
+                            || (val.r#match <= usize::try_from(args.minreads).unwrap()
+                                && percent > usize::from(args.percentalerting))
+                        {
                             match alerting.get_mut(gene) {
                                 Some(d) => d.push((false, pos)),
                                 None => {
@@ -1036,7 +1078,7 @@ fn genegraph<T>(
                 Histogram::vertical(&chart)
                     .style(full_palette::RED_400.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
-                        let pos = pos+1;
+                        let pos = pos + 1;
                         let percent = if val.total > 0 {
                             val.r#match * 100 / val.total
                         } else {
@@ -1146,6 +1188,7 @@ fn createcsv(
         "map0",
         "overlaps",
         "secondary",
+        "supplementary",
         "mismatches",
         "misalign",
         "qual",
@@ -1153,7 +1196,7 @@ fn createcsv(
     .unwrap();
     for (pos, record) in pos.iter() {
         csv.write_field(format!("{}", pos.saturating_add(1)))
-            .unwrap(); //Add +1
+            .unwrap(); //Add +1 because 0-based
         csv.serialize(record).unwrap();
     }
     csv.flush().unwrap();
@@ -1175,7 +1218,7 @@ fn mismatchgraph<T>(
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         .caption(
             format!(
-                "Mismatches rate and quality over the locus {} ({}-{})",
+                "Mismatches rate and quality on the locus {} ({}-{})",
                 loci.locus, loci.contig, loci.haplotype
             ),
             ("sans-serif", 28),
@@ -1185,11 +1228,11 @@ fn mismatchgraph<T>(
     chart
         .draw_series(
             Histogram::vertical(&chart)
-                .style(full_palette::BROWN.mix(0.8).filled())
+                .style(full_palette::DEEPPURPLE_200.mix(0.8).filled())
                 .margin(0)
                 .data(pos.iter().map(|p| {
                     (
-                        *p.0,
+                        *p.0 + 1,
                         (p.1.mismatches as f64 / (p.1.map0 + p.1.map1 + p.1.map60) as f64 * 100.0)
                             .round() as i32,
                     )
@@ -1197,7 +1240,7 @@ fn mismatchgraph<T>(
         )
         .unwrap()
         .label("Mismatches (%)")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BROWN));
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_200));
     chart
         .draw_series(
             Histogram::vertical(&chart)
@@ -1205,7 +1248,7 @@ fn mismatchgraph<T>(
                 .margin(0)
                 .data(pos.iter().map(|p| {
                     (
-                        *p.0,
+                        *p.0 + 1,
                         (p.1.misalign as f64 / (p.1.map0 + p.1.map1 + p.1.map60) as f64 * 100.0)
                             .round() as i32,
                     )
@@ -1231,7 +1274,7 @@ fn mismatchgraph<T>(
         .draw_secondary_series(LineSeries::new(
             pos.iter().filter_map(|p| {
                 if p.1.qual > 0 {
-                    Some((*p.0, p.1.qual))
+                    Some((*p.0 + 1, p.1.qual))
                 } else {
                     None
                 }
@@ -1292,7 +1335,7 @@ fn readgraph<T>(
         .draw();
     chart
         .draw_series(AreaSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.map0)),
+            pos.iter().map(|p| (*p.0 + 1, p.1.map0)),
             0,
             full_palette::RED_300.mix(0.6),
         ))
@@ -1306,7 +1349,7 @@ fn readgraph<T>(
         });
     chart
         .draw_series(AreaSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.map1)),
+            pos.iter().map(|p| (*p.0 + 1, p.1.map1)),
             0,
             full_palette::YELLOW_900.mix(0.5),
         ))
@@ -1320,7 +1363,7 @@ fn readgraph<T>(
         });
     chart
         .draw_series(AreaSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.map60)),
+            pos.iter().map(|p| (*p.0 + 1, p.1.map60)),
             0,
             full_palette::GREEN_400.mix(0.4),
         ))
@@ -1334,7 +1377,7 @@ fn readgraph<T>(
         });
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.secondary)),
+            pos.iter().map(|p| (*p.0 + 1, p.1.secondary)),
             full_palette::BLACK,
         ))
         .unwrap()
@@ -1342,7 +1385,7 @@ fn readgraph<T>(
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.supplementary)),
+            pos.iter().map(|p| (*p.0 + 1, p.1.supplementary)),
             full_palette::BLUE_700,
         ))
         .unwrap()
@@ -1350,7 +1393,7 @@ fn readgraph<T>(
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_700));
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.overlaps)),
+            pos.iter().map(|p| (*p.0 + 1, p.1.overlaps)),
             full_palette::ORANGE_300,
         ))
         .unwrap()
@@ -1399,23 +1442,35 @@ fn readgraph<T>(
         false,
     )))
     .unwrap();
-    let mut result = Vec::new();
+    let mut first = None;
     let mut prev = None;
-    breaks.clone().fold((), |_, (num, _)| {
-        if let Some(prev_num) = prev {
-            if num - prev_num != 1 {
-                result.push(format!("{}:{}..{}", loci.contig, prev_num, num));
+    let (finalpos, _) = pos.iter().last().unwrap();
+    let mut acc = breaks.clone().fold(String::new(), |mut acc, (num, _)| {
+        if first.is_none() {
+            first = Some(num);
+            prev = Some(num);
+        } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
+            if num - prev_num != 1 || num == *finalpos {
+                if num == *finalpos {
+                    prev_num = *finalpos;
+                }
+                if f == prev_num {
+                    acc.push_str(&format!("{}:{}\n", loci.contig, f + 1));
+                } else {
+                    acc.push_str(&format!("{}:{}..{}\n", loci.contig, f + 1, prev_num + 1));
+                }
+                first = Some(num);
+                prev = Some(num);
+            } else {
+                prev = Some(num);
             }
-        } else {
-            result.push(format!("{}:{}", loci.contig, num));
         }
-        prev = Some(num);
-    });
-    let breakcode = result.into_iter().fold(String::new(), |mut acc, f| {
-        acc.push_str(&format!("Break: {}\n", f));
         acc
     });
-    breakfile.write_all(breakcode.trim().as_bytes()).unwrap();
+    if let Some(d) = first {
+        acc.push_str(&format!("{}:{}\n", loci.contig, d + 1));
+    }
+    breakfile.write_all(acc.trim().as_bytes()).unwrap();
     chart
         .draw_series(
             Histogram::vertical(&chart)
