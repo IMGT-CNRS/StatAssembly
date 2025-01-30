@@ -270,7 +270,6 @@ fn getreaderoffile(args: &Args) -> IndexedReader {
 }
 fn main() {
     let args = Args::parse();
-    let path = &args.file;
     let mut csv = csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
@@ -307,8 +306,8 @@ fn main() {
         if haplotype > 2 {
             panic!("There is more than 2 haplotypes for {}", floci.locus);
         }
-        let haplotype = haplotype == 1;
-        println!("Going for {} locus - {}",floci.locus,if !haplotype { "diploid"} else { "haploid"});
+        let haplotypebool = haplotype == 1;
+        println!("Going for {} locus - {}",floci.locus,if !haplotypebool { "diploid"} else { "haploid"});
         let mut outputfile1 = PathBuf::new();
         let mut outputfile2 = PathBuf::new();
         let mut outputfile3 = PathBuf::new();
@@ -330,7 +329,7 @@ fn main() {
                     &args.species,
                     &floci.locus,
                     &floci.contig,
-                    haplotype,
+                    haplotypebool,
                     &format!("{}.svg", fgraph),
                     true,
                 ));
@@ -343,7 +342,7 @@ fn main() {
                     ),
                 )
                 .into_drawing_area();
-                if haplotype {
+                if haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (Some(top), Some(bottom), None, None)
                     //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
@@ -355,7 +354,7 @@ fn main() {
                     &args.species,
                     &floci.locus,
                     &floci.contig,
-                    haplotype,
+                    haplotypebool,
                     &format!("{}.png", fgraph),
                     true,
                 ));
@@ -368,7 +367,7 @@ fn main() {
                     ),
                 )
                 .into_drawing_area();
-                if !haplotype {
+                if !haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (None, None, Some(top), Some(bottom))
                     //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
@@ -383,7 +382,7 @@ fn main() {
                     &args.species,
                     &floci.locus,
                     &floci.contig,
-                    haplotype,
+                    haplotype == 1,
                     &format!("{}.svg", sgraph),
                     true,
                 ));
@@ -396,7 +395,7 @@ fn main() {
                     ),
                 )
                 .into_drawing_area();
-                if !haplotype {
+                if !haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (Some(top), Some(bottom), None, None)
                     //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
@@ -409,7 +408,7 @@ fn main() {
                     &args.species,
                     &floci.locus,
                     &floci.contig,
-                    haplotype,
+                    haplotype == 1,
                     &format!("{}.png", sgraph),
                     true,
                 ));
@@ -422,7 +421,7 @@ fn main() {
                     ),
                 )
                 .into_drawing_area();
-                if !haplotype {
+                if !haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (None, None, Some(top), Some(bottom))
                     //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
