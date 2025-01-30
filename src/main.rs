@@ -11,8 +11,8 @@ use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
 use plotters::{self, coord};
 use rust_htslib::bam::ext::BamRecordExtensions;
-use rust_htslib::bam::{self, Read};
-use serde::Deserialize;
+use rust_htslib::bam::{self, IndexedReader, Read};
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, min},
     collections::BTreeMap,
@@ -52,9 +52,9 @@ struct Args {
     ///Species
     #[arg(short, long)]
     species: String,
-    ///Assembly file (FASTA)
+    ///Gene location (csv file)
     #[arg(short, long)]
-    assembly: PathBuf,
+    geneloc: Option<PathBuf>,
     ///Output directory
     #[arg(short, long)]
     outdir: PathBuf,
@@ -87,6 +87,26 @@ enum Haplotype {
     Alternate,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+struct GeneInfos {
+    gene: String,
+    chromosome: String,
+    strand: bool,
+    start: i64,
+    end: i64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct GeneInfosFinish {
+    gene: String,
+    chromosome: String,
+    strand: bool,
+    start: i64,
+    end: i64,
+    reads: usize,
+    reads100: usize,
+    reads100m: usize,
+    coverage10x: usize
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 struct LocusInfos {
     locus: Locus,
     haplotype: Haplotype,
@@ -94,7 +114,7 @@ struct LocusInfos {
     start: i64,
     end: i64,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct HashMapinfo {
     map60: i64,
     map1: i64,
@@ -211,16 +231,16 @@ fn main() {
             let p = p.unwrap();
             let newrange =
                 max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
-            let overlaprange =
-                max(p.reference_start(), loci.start + 1)..min(loci.end, p.reference_end()); //Remove 1 because does not overlap on borders
-            let mut matched = p.aligned_pairs_match().unwrap().map(|[a, b]| a..=b);
-            let mut aligned = p.aligned_pairs().map(|[a, b]| a..=b);
             if p.is_secondary() {
                 newrange.for_each(|i| {
                     pos.get_mut(&i).unwrap().secondary += 1;
                 });
                 continue;
             }
+            let overlaprange =
+                max(p.reference_start()+1, loci.start)..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
+            let mut matched = p.aligned_pairs_match().expect("No CIGAR = given.").map(|[a, b]| a..=b);
+            let mut aligned = p.aligned_pairs().map(|[a, b]| a..=b);
             newrange.for_each(|i| {
                 match p.mapq() {
                     0 => pos.get_mut(&i).unwrap().map0 += 1,
@@ -232,8 +252,9 @@ fn main() {
                         String::from_utf8_lossy(p.qname())
                     ),
                 };
-                if i % 455 == 0 { //Check every 455 nt
-                    if let Some(d) = p.aligned_pairs().find(|p| p[1]==i) {
+                if i % 455 == 0 {
+                    //Check every 455 nt
+                    if let Some(d) = p.aligned_pairs().find(|p| p[1] == i) {
                         let index = d[0] as usize;
                         pos.get_mut(&i).unwrap().qual += *p.qual().get(index).unwrap() as usize;
                     }
@@ -256,7 +277,91 @@ fn main() {
         readgraph(outputdir, &loci, &pos, &args);
         // Second graph with mismatches
         mismatchgraph(outputdir, &loci, &pos, &args);
+        //Create CSV from HashMap
+        createcsv(outputdir, &loci, &pos, &args);
+        //Create gene CSV
+        if args.geneloc.is_some() {
+            genelist(outputdir,&loci,&reader.rc_records(),&args);
+        }
     }
+}
+fn genelist(outputdir: &std::path::Path,
+    loci: &LocusInfos,
+    records: &bam::RcRecords<'_, IndexedReader>,
+    args: &Args) {
+        let outputfile = outputdir.join(givename(
+            &args.species, &loci.locus,&loci.contig,"geneanalysis.csv"
+        ));
+        let mut csv = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .from_path(&args.locuspos)
+        .unwrap();
+    let mut genes: Vec<GeneInfos> = Vec::new();
+    for record in csv.deserialize() {
+        let record = record.expect("Invalid CSV format, waiting gene\tcontig\tstrand\tstart\tend");
+        genes.push(record);
+    }
+    if genes.is_empty() {
+        panic!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
+    }
+    let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
+    for mut gene in genes {
+        let (mut reads, mut reads100,mut reads100m, mut coverage10x) = (0,0,0,0);
+        if gene.start > gene.end {
+            (gene.end,gene.start) = (gene.start,gene.end) //Swap position
+        }
+        let range = gene.start..=gene.end;
+        let records = records.filter_map(Result::ok).filter(|p| { 
+            range.contains(&(p.reference_start()+1)) || range.contains(&(p.reference_end()+1))
+        });
+        todo!("Continue here");
+        let elem = GeneInfosFinish {
+            gene: gene.gene,
+            chromosome: gene.chromosome,
+            strand: gene.strand,
+            start: gene.start,
+            end: gene.end,
+            reads,
+            reads100,
+            reads100m,
+            coverage10x
+        };
+        finale.push(elem);
+    }
+    let mut csv = csv::WriterBuilder::new()
+        .has_headers(true)
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .from_path(&outputdir)
+        .unwrap();
+    for gene in finale {
+        csv.serialize(csv).unwrap();
+    }
+    csv.flush().unwrap();
+    println!("Gene analysis has been saved to {}", outputfile.display());
+    }
+fn givename(species: &str, locus: &Locus, contig: &str, suffix: &str) -> String {
+    format!("{}_{}_{}_{}",species,locus,contig,suffix)
+}
+fn createcsv(outputdir: &std::path::Path,
+    loci: &LocusInfos,
+    pos: &BTreeMap<i64, HashMapinfo>,
+    args: &Args,
+) {
+    let outputfile = outputdir.join(givename(
+        &args.species, &loci.locus,&loci.contig,"positionresult.csv"
+    ));
+    let outputfile = outputfile.as_path();
+    let mut csv = csv::WriterBuilder::new().comment(Some(b'#')).flexible(false).has_headers(false).delimiter(b'\t').from_path(outputfile).unwrap();
+    csv.write_record(["Position","map60","map1","map0","overlaps","secondary","mismatches","misalign","qual"]).unwrap();
+    for (pos,record) in pos.iter() {
+        csv.write_field(format!("{}",pos)).unwrap();
+        csv.serialize(record).unwrap();
+    }
+    csv.flush().unwrap();
+    println!("CSV analysis has been saved to {}", outputfile.display());
 }
 fn mismatchgraph(
     outputdir: &std::path::Path,
@@ -264,9 +369,8 @@ fn mismatchgraph(
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
 ) {
-    let outputfile = outputdir.join(format!(
-        "{}_{}_mismatchresult.png",
-        &args.species, &loci.locus
+    let outputfile = outputdir.join(givename(
+        &args.species, &loci.locus,&loci.contig,"mismatchresult.png"
     ));
     let outputfile = outputfile.as_path();
     let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
@@ -331,7 +435,20 @@ fn mismatchgraph(
     //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
     secondary
         .draw_secondary_series(LineSeries::new(
-            pos.iter().filter_map(|p| if p.1.qual > 0 { Some((*p.0, p.1.qual / std::convert::TryInto::<usize>::try_into(p.1.map0 + p.1.map1 + p.1.map60).unwrap())) } else { None }),
+            pos.iter().filter_map(|p| {
+                if p.1.qual > 0 {
+                    Some((
+                        *p.0,
+                        p.1.qual
+                            / std::convert::TryInto::<usize>::try_into(
+                                p.1.map0 + p.1.map1 + p.1.map60,
+                            )
+                            .unwrap(),
+                    ))
+                } else {
+                    None
+                }
+            }),
             full_palette::BLACK.mix(0.4),
         ))
         .unwrap()
@@ -361,7 +478,9 @@ fn readgraph(
     args: &Args,
 ) {
     let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
-    let outputfile = outputdir.join(format!("{}_{}_readresult.png", &args.species, &loci.locus));
+    let outputfile = outputdir.join(givename(
+        &args.species, &loci.locus,&loci.contig,"readresult.png"
+    ));
     let outputfile = outputfile.as_path();
     let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
     let _ = root.fill(&plotters::prelude::WHITE);
