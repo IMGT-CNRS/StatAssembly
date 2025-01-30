@@ -1,7 +1,9 @@
 use clap::{crate_authors, Parser};
 use plotters::coord::Shift;
 use std::io::stderr;
+use std::num::NonZero;
 //use noodles_fasta::{self as fasta, record::Sequence};
+use itertools::Itertools;
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
@@ -10,7 +12,7 @@ use plotters::prelude::{
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
-use rust_htslib::bam::ext::BamRecordExtensions;
+use rust_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use rust_htslib::bam::{self, IndexedReader, Read};
 use serde::{de, Deserialize, Serialize};
 use std::{
@@ -54,6 +56,9 @@ struct Args {
     /// Coverage to calculate on CSV
     #[arg(short, long, default_value_t = 10)]
     coverage: u32,
+    /// Force cigar even if no =
+    #[arg(long)]
+    force: bool,
     /// Save as SVG images
     #[arg(long)]
     svg: bool,
@@ -93,6 +98,39 @@ impl Display for Locus {
 enum Haplotype {
     Primary,
     Alternate,
+}
+impl Ord for Haplotype {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if (self == &Haplotype::Primary && other == &Haplotype::Primary)
+            || (self == &Haplotype::Alternate && other == &Haplotype::Alternate)
+        {
+            std::cmp::Ordering::Equal
+        } else if self == &Haplotype::Primary {
+            std::cmp::Ordering::Less
+        } else if other == &Haplotype::Primary {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }
+}
+impl Display for Haplotype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Primary => write!(f,"Primary"),
+            Self::Alternate => write!(f,"Alternate")
+        }
+    }
+}
+impl PartialOrd for Haplotype {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Haplotype {
+    fn isprimary(&self) -> bool {
+        self == &Haplotype::Primary
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 struct GeneInfos {
@@ -158,7 +196,13 @@ struct HashMapinfo {
 }
 impl HashMapinfo {
     fn getmaxvalue(&self) -> i64 {
-        let elem = [self.map0,self.map1,self.overlaps,self.secondary.len() as i64,self.supplementary.len() as i64];
+        let elem = [
+            self.map0,
+            self.map1,
+            self.overlaps,
+            self.secondary.len() as i64,
+            self.supplementary.len() as i64,
+        ];
         *elem.iter().max().unwrap()
     }
 }
@@ -173,7 +217,7 @@ impl Ord for HashMapinfo {
     }
 }
 impl HashMapinfo {
-    #[allow(dead_code,clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn new(
         map60: i64,
         map1: i64,
@@ -211,6 +255,19 @@ impl HashMapinfo {
         }
     }
 }
+fn getreaderoffile(args: &Args) -> IndexedReader {
+    let mut reader = match &args.index {
+        Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
+        None => bam::IndexedReader::from_path(&args.file),
+    }
+    .unwrap();
+    let threads = match std::thread::available_parallelism() {
+        Ok(d) => max(d, NonZero::new(12).unwrap()),
+        Err(_) => NonZero::new(4).unwrap(),
+    };
+    reader.set_threads(threads.get()).unwrap();
+    reader
+}
 fn main() {
     let args = Args::parse();
     let path = &args.file;
@@ -239,152 +296,147 @@ fn main() {
             &args.outdir
         }
     };
-    for loci in locus {
-        //TODO: What to do if haplotype?
-        let mut reader = match &args.index {
-            Some(d) => bam::IndexedReader::from_path_and_index(path, d),
-            None => bam::IndexedReader::from_path(path),
+    locus.sort_unstable_by(|a, b| match a.locus.to_string().cmp(&b.locus.to_string()) {
+        std::cmp::Ordering::Equal => a.haplotype.cmp(&b.haplotype),
+        o => o,
+    });
+    let grouped = locus.into_iter().into_group_map_by(|f| f.locus.to_string());
+    for (_, locus) in grouped {
+        let floci = locus.first().unwrap();
+        let haplotype = locus.len();
+        if haplotype > 2 {
+            panic!("There is more than 2 haplotypes for {}", floci.locus);
         }
-        .unwrap();
-        reader.set_threads(4).unwrap();
-        reader
-            .fetch((&loci.contig, loci.start, loci.end + 1))
-            .unwrap_or_else(|_| {
-                panic!(
-                    "The region {}:{}-{} cannot be found, exnniting.",
-                    loci.contig, loci.start, loci.end
-                )
-            });
-        let mut nocount = true;
-        //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
-        //let file = File::create(&filename).unwrap();
-        //let mut writer = BufWriter::new(file);
-        let mut pos: BTreeMap<i64, HashMapinfo> = BTreeMap::new();
-        (loci.start..=loci.end).for_each(|p| {
-            pos.insert(p, HashMapinfo::default());
-        });
-        for p in reader.rc_records() {
-            nocount = false;
-            let p = p.unwrap();
-            let newrange =
-                max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
-            if p.is_secondary() || p.is_supplementary() { 
-                newrange.for_each(|i| {
-                    let targeting = pos.get_mut(&i).unwrap();
-                    if p.is_secondary() {
-                    targeting.secondary.push(String::from_utf8_lossy(p.qname()).to_string());
-                    } else {
-                        targeting.supplementary.push(String::from_utf8_lossy(p.qname()).to_string());
-                    }
-                });
-                continue;
-            }
-            let overlaprange =
-                max(p.reference_start() + 1, loci.start)..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
-            let mut matched = p
-                .aligned_pairs_match()
-                .expect("No CIGAR = given.")
-                .map(|[a, b]| a..=b);
-            let mut aligned = p.aligned_pairs().map(|[a, b]| a..=b);
-            newrange.for_each(|i| {
-                let targeting = pos.get_mut(&i).unwrap();
-                match p.mapq() {
-                    0 => targeting.map0 += 1,
-                    1..=59 => targeting.map1 += 1,
-                    60 => targeting.map60 += 1,
-                    _ => panic!(
-                        "MAPQ score is invalid. Got {} for {}",
-                        p.mapq(),
-                        String::from_utf8_lossy(p.qname())
+        let haplotype = haplotype == 1;
+        println!("Going for {} locus - {}",floci.locus,if !haplotype { "diploid"} else { "haploid"});
+        let mut outputfile1 = PathBuf::new();
+        let mut outputfile2 = PathBuf::new();
+        let mut outputfile3 = PathBuf::new();
+        let mut outputfile4 = PathBuf::new();
+        let (
+            readgraphtop,
+            readgraphbottom,
+            mismatchgraphtop,
+            mismatchgraphbottom,
+            readgraphtop2,
+            readgraphbottom2,
+            mismatchgraphtop2,
+            mismatchgraphbottom2,
+        ) = {
+            // Second graph with reads
+            let fgraph = "readresult";
+            let (top, bottom, topb, bottomb) = if args.svg {
+                let outputfile = outputdir.join(givename(
+                    &args.species,
+                    &floci.locus,
+                    &floci.contig,
+                    haplotype,
+                    &format!("{}.svg", fgraph),
+                    true,
+                ));
+                outputfile1 = outputfile;
+                let root = SVGBackend::new(
+                    &outputfile1,
+                    (
+                        900,
+                        500 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
                     ),
-                };
-                if i % 455 == 0 {
-                    //Check every 455 nt
-                    if let Some(d) = p.aligned_pairs().find(|p| p[1] == i) {
-                        let index = d[0] as usize;
-                        targeting.qual += *p.qual().get(index).unwrap() as usize;
-                    }
-                }
-                if overlaprange.contains(&i) {
-                    targeting.overlaps += 1;
-                }
-                if matched.any(|f| f.contains(&i)) {
-                    //Match skipped
-                } else if aligned.any(|f| f.contains(&i)) {
-                    //Aligns but not correct nt
-                    targeting.mismatches += 1;
+                )
+                .into_drawing_area();
+                if haplotype {
+                    let (top, bottom) = root.split_vertically((50).percent_height());
+                    (Some(top), Some(bottom), None, None)
+                    //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
                 } else {
-                    //No alignment (deletion in read probably)
-                    targeting.misalign += 1;
+                    (Some(root), None, None, None)
                 }
-            });
-        }
-        if nocount {
-            panic!(
-                "The region {}:{}-{} cannot be found, exiting.",
-                loci.contig, loci.start, loci.end
+            } else {
+                let outputfile = outputdir.join(givename(
+                    &args.species,
+                    &floci.locus,
+                    &floci.contig,
+                    haplotype,
+                    &format!("{}.png", fgraph),
+                    true,
+                ));
+                outputfile2 = outputfile;
+                let root = BitMapBackend::new(
+                    &outputfile2,
+                    (
+                        1800,
+                        1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+                    ),
+                )
+                .into_drawing_area();
+                if !haplotype {
+                    let (top, bottom) = root.split_vertically((50).percent_height());
+                    (None, None, Some(top), Some(bottom))
+                    //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
+                } else {
+                    (None, None, Some(root), None)
+                }
+            };
+            // Second graph with mismatches
+            let sgraph = "mismatchresult";
+            let (mistop, misbottom, mistopb, misbottomb) = if args.svg {
+                let outputfile = outputdir.join(givename(
+                    &args.species,
+                    &floci.locus,
+                    &floci.contig,
+                    haplotype,
+                    &format!("{}.svg", sgraph),
+                    true,
+                ));
+                outputfile3 = outputfile;
+                let root = SVGBackend::new(
+                    &outputfile3,
+                    (
+                        1200,
+                        600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+                    ),
+                )
+                .into_drawing_area();
+                if !haplotype {
+                    let (top, bottom) = root.split_vertically((50).percent_height());
+                    (Some(top), Some(bottom), None, None)
+                    //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
+                } else {
+                    (Some(root), None, None, None)
+                }
+                //mismatchgraph(outputfile, floci, &pos, &args, root);
+            } else {
+                let outputfile = outputdir.join(givename(
+                    &args.species,
+                    &floci.locus,
+                    &floci.contig,
+                    haplotype,
+                    &format!("{}.png", sgraph),
+                    true,
+                ));
+                outputfile4 = outputfile;
+                let root = BitMapBackend::new(
+                    &outputfile4,
+                    (
+                        1200,
+                        600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+                    ),
+                )
+                .into_drawing_area();
+                if !haplotype {
+                    let (top, bottom) = root.split_vertically((50).percent_height());
+                    (None, None, Some(top), Some(bottom))
+                    //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
+                } else {
+                    (None, None, Some(root), None)
+                }
+                //mismatchgraph(outputfile, floci, &pos, &args, root);
+            };
+            (
+                top, bottom, mistop, misbottom, topb, bottomb, mistopb, misbottomb,
             )
-        }
-        // Second graph with reads
-        let fgraph = "readresult";
-        if args.svg {
-            let outputfile = outputdir.join(givename(
-                &args.species,
-                &loci.locus,
-                &loci.contig,
-                loci.haplotype == Haplotype::Primary,
-                &format!("{}.svg", fgraph),
-            ));
-            let outputfile = outputfile.as_path();
-            let root = SVGBackend::new(outputfile, (900, 500)).into_drawing_area();
-            readgraph(outputfile, &loci, &pos, &args, root);
-        } else {
-            let outputfile = outputdir.join(givename(
-                &args.species,
-                &loci.locus,
-                &loci.contig,
-                loci.haplotype == Haplotype::Primary,
-                &format!("{}.png", fgraph),
-            ));
-            let outputfile = outputfile.as_path();
-            let root = BitMapBackend::new(outputfile, (1800, 1000)).into_drawing_area();
-            readgraph(outputfile, &loci, &pos, &args, root);
-        }
-        // Second graph with mismatches
-        let sgraph = "mismatchresult";
-        if args.svg {
-            let outputfile = outputdir.join(givename(
-                &args.species,
-                &loci.locus,
-                &loci.contig,
-                loci.haplotype == Haplotype::Primary,
-                &format!("{}.svg", sgraph),
-            ));
-            let outputfile = outputfile.as_path();
-            let root = SVGBackend::new(outputfile, (1200, 600)).into_drawing_area();
-            mismatchgraph(outputfile, &loci, &pos, &args, root);
-        } else {
-            let outputfile = outputdir.join(givename(
-                &args.species,
-                &loci.locus,
-                &loci.contig,
-                loci.haplotype == Haplotype::Primary,
-                &format!("{}.png", sgraph),
-            ));
-            let outputfile = outputfile.as_path();
-            let root = BitMapBackend::new(outputfile, (1200, 600)).into_drawing_area();
-            mismatchgraph(outputfile, &loci, &pos, &args, root);
-        }
-        //Create CSV from HashMap
-        createcsv(outputdir, &loci, &pos, &args);
-        //Create gene CSV
-        if args.geneloc.is_some() {
-            let mut reader = match &args.index {
-                Some(d) => bam::IndexedReader::from_path_and_index(path, d),
-                None => bam::IndexedReader::from_path(path),
-            }
-            .unwrap();
-            reader.set_threads(4).unwrap();
+        };
+        for loci in locus.iter() {
+            let mut reader = getreaderoffile(&args);
             reader
                 .fetch((&loci.contig, loci.start, loci.end + 1))
                 .unwrap_or_else(|_| {
@@ -393,35 +445,181 @@ fn main() {
                         loci.contig, loci.start, loci.end
                     )
                 });
-            genelist(outputdir, &loci, reader.rc_records(), &args);
+            let mut nocount = true;
+            //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
+            //let file = File::create(&filename).unwrap();
+            //let mut writer = BufWriter::new(file);
+            let mut pos: BTreeMap<i64, HashMapinfo> = BTreeMap::new();
+            (loci.start..=loci.end).for_each(|p| {
+                pos.insert(p, HashMapinfo::default());
+            });
+            let mut message = false;
+            for p in reader.rc_records() {
+                nocount = false;
+                let p = p.unwrap();
+                let newrange =
+                    max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
+                if p.is_secondary() || p.is_supplementary() {
+                    newrange.for_each(|i| {
+                        let targeting = pos.get_mut(&i).unwrap();
+                        if p.is_secondary() {
+                            targeting
+                                .secondary
+                                .push(String::from_utf8_lossy(p.qname()).to_string());
+                        } else {
+                            targeting
+                                .supplementary
+                                .push(String::from_utf8_lossy(p.qname()).to_string());
+                        }
+                    });
+                    continue;
+                }
+                let overlaprange = max(p.reference_start() + 1, loci.start)
+                    ..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
+                let matched: Vec<std::ops::RangeInclusive<i64>> = match p.aligned_pairs_match() {
+                    Some(a) => a.map(|[a, b]| a..=b).collect(),
+                    None => {
+                        let text = "No = CIGAR given";
+                        if !args.force {
+                            panic!("{}", text);
+                        } else if !message {
+                            eprintln!("{} but it was forced.", text);
+                            message = true
+                        }
+                        std::iter::empty::<IterAlignedPairs>()
+                            .map(|_| 0..=0)
+                            .collect()
+                    }
+                };
+                let mut aligned = p.aligned_pairs().map(|[a, b]| a..=b);
+                let sep = (loci.end - loci.start + 1) / 1000; //1000 points for quality point
+                newrange.for_each(|i| {
+                    let targeting = pos.get_mut(&i).unwrap();
+                    match p.mapq() {
+                        0 => targeting.map0 += 1,
+                        1..=59 => targeting.map1 += 1,
+                        60 => targeting.map60 += 1,
+                        _ => panic!(
+                            "MAPQ score is invalid. Got {} for {}",
+                            p.mapq(),
+                            String::from_utf8_lossy(p.qname())
+                        ),
+                    };
+                    if i % sep == 0 {
+                        //Check every x nt
+                        if let Some(d) = p.aligned_pairs().find(|p| p[1] == i) {
+                            let index = d[0] as usize;
+                            targeting.qual += *p.qual().get(index).unwrap() as usize;
+                        }
+                    }
+                    if overlaprange.contains(&i) {
+                        targeting.overlaps += 1;
+                    }
+                    if matched.iter().any(|f| f.contains(&i)) {
+                        //Match skipped
+                    } else if aligned.any(|f| f.contains(&i)) {
+                        //Aligns but not correct nt
+                        if !args.force {
+                            targeting.mismatches += 1
+                        };
+                    } else {
+                        //No alignment (deletion in read probably)
+                        targeting.misalign += 1;
+                    }
+                });
+            }
+            if nocount {
+                panic!(
+                    "The region {}:{}-{} cannot be found, exiting.",
+                    loci.contig, loci.start, loci.end
+                )
+            }
+            match (loci.haplotype.isprimary(), args.svg) {
+                (true, true) => {
+                    readgraph(
+                        &outputfile1,
+                        loci,
+                        &pos,
+                        &args,
+                        readgraphtop.clone().unwrap(),
+                    );
+                    mismatchgraph(
+                        &outputfile3,
+                        loci,
+                        &pos,
+                        &args,
+                        mismatchgraphtop.clone().unwrap(),
+                    );
+                }
+                (false, true) => {
+                    readgraph(
+                        &outputfile1,
+                        loci,
+                        &pos,
+                        &args,
+                        readgraphbottom.clone().unwrap(),
+                    );
+                    mismatchgraph(
+                        &outputfile3,
+                        loci,
+                        &pos,
+                        &args,
+                        mismatchgraphbottom.clone().unwrap(),
+                    );
+                }
+                (true, false) => {
+                    readgraph(
+                        &outputfile2,
+                        loci,
+                        &pos,
+                        &args,
+                        readgraphtop2.clone().unwrap(),
+                    );
+                    mismatchgraph(
+                        &outputfile4,
+                        loci,
+                        &pos,
+                        &args,
+                        mismatchgraphtop2.clone().unwrap(),
+                    );
+                }
+                (false, false) => {
+                    readgraph(
+                        &outputfile2,
+                        loci,
+                        &pos,
+                        &args,
+                        readgraphbottom2.clone().unwrap(),
+                    );
+                    mismatchgraph(
+                        &outputfile4,
+                        loci,
+                        &pos,
+                        &args,
+                        mismatchgraphbottom2.clone().unwrap(),
+                    );
+                }
+            }
+            //Create CSV from HashMap
+            createcsv(outputdir, loci, &pos, &args);
+            //Create gene CSV
+            if args.geneloc.is_some() {
+                println!("Gene list starting for {}!",loci.haplotype);
+                genelist(outputdir, loci, &args);
+                println!("Gene list finished for {}!",loci.haplotype);
+            }
         }
+        println!("Locus {} is done!", &floci.locus);
     }
 }
-fn genelist(
-    outputdir: &std::path::Path,
-    loci: &LocusInfos,
-    records: bam::RcRecords<'_, IndexedReader>,
-    args: &Args,
-) {
-    let records: Vec<Result<std::rc::Rc<rust_htslib::bam::Record>, rust_htslib::errors::Error>> =
-        records.collect();
-    if records.is_empty() {
-        panic!("Error with records1");
-    }
-    let records: Vec<std::rc::Rc<rust_htslib::bam::Record>> = records
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|p| !p.is_secondary())
-        .collect();
-    if records.is_empty() {
-        panic!("Error with records");
-    }
+fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
     let outputfile = outputdir.join(givename(
         &args.species,
         &loci.locus,
         &loci.contig,
-        loci.haplotype == Haplotype::Primary,
+        loci.haplotype.isprimary(),
         "geneanalysis.csv",
+        false,
     ));
     let mut lock: std::io::StderrLock<'_> = stderr().lock();
     let mut csv = csv::ReaderBuilder::new()
@@ -432,39 +630,38 @@ fn genelist(
         .unwrap();
     let mut genes: Vec<GeneInfos> = Vec::new();
     for record in csv.deserialize() {
-        let record = record.expect("Invalid CSV format, waiting gene,chromosome,strand,start,end");
+        let record = record
+            .expect("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
         genes.push(record);
     }
     if genes.is_empty() {
-        panic!("Invalid CSV format, waiting gene,chromosome,strand,start,end");
+        panic!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     for mut gene in genes {
+        let mut reader = getreaderoffile(args);
         let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        if records.is_empty() {
-            panic!("Empty records");
-        }
         let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
-        let records = records.iter().filter(|p| {
-            let firstrange =
-                ranges::Ranges::from((p.reference_start() + 1..p.reference_end() + 1).collect::<std::vec::Vec<i64>>());
-            !firstrange.intersect(range.clone()).is_empty()
-        });
-        if records.clone().count() == 0 {
-            writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
-            continue;
-        }
+        reader
+            .fetch((&gene.chromosome, gene.start + 1, gene.end + 1))
+            .unwrap();
+        let records = reader.records();
         let mut hash: BTreeMap<i64, (usize, usize, usize)> = BTreeMap::new(); //Match and full match and total
         range.clone().into_iter().for_each(|p| {
             hash.insert(p, (0, 0, 0));
         });
         let mut coverageperc = 0;
-        for record in records {
+        let mut empty = true;
+        for record in records.filter_map(Result::ok) {
+            empty = false;
             reads += 1;
-            coverageperc += ranges::Ranges::from(record.reference_start() + 1..record.reference_end() + 1).into_iter().count();
+            coverageperc +=
+                ranges::Ranges::from(record.reference_start() + 1..record.reference_end() + 1)
+                    .into_iter()
+                    .count();
             for p in record.reference_start() + 1..record.reference_end() + 1 {
                 match hash.get_mut(&p) {
                     Some((.., d)) => *d += 1,
@@ -487,15 +684,17 @@ fn genelist(
                     }
                 }
             }
-            'outer: for [start, end] in record.aligned_blocks_match().unwrap() {
-                for p in start..end {
-                    match hash.get_mut(&p) {
-                        Some((_, d, _)) => *d += 1,
-                        None => {
-                            if start > gene.end {
-                                break 'outer;
-                            }
-                        } //Outside coverage of gene
+            if !args.force {
+                'outer: for [start, end] in record.aligned_blocks_match().unwrap() {
+                    for p in start..end {
+                        match hash.get_mut(&p) {
+                            Some((_, d, _)) => *d += 1,
+                            None => {
+                                if start > gene.end {
+                                    break 'outer;
+                                }
+                            } //Outside coverage of gene
+                        }
                     }
                 }
             }
@@ -505,13 +704,18 @@ fn genelist(
             {
                 reads100 += 1;
             }
-            if record
-                .aligned_blocks_match()
-                .unwrap()
-                .any(|p| p[0] < gene.start && p[1] + 1 > gene.end)
+            if !args.force
+                && record
+                    .aligned_blocks_match()
+                    .unwrap()
+                    .any(|p| p[0] < gene.start && p[1] + 1 > gene.end)
             {
                 reads100m += 1;
             }
+        }
+        if empty {
+            writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
+            continue;
         }
         let coverage = hash
             .clone()
@@ -539,7 +743,9 @@ fn genelist(
             matchpos: text,
             reads100,
             reads100m,
-            coverageperc: ((coverageperc/reads/range.into_iter().count()) as f32*1000.0).round()/1000.0,
+            coverageperc: ((coverageperc / reads / range.into_iter().count()) as f32 * 1000.0)
+                .round()
+                / 1000.0,
             coveragex: coverage,
         };
         finale.push(elem);
@@ -556,13 +762,30 @@ fn genelist(
     csv.flush().unwrap();
     println!("Gene analysis has been saved to {}", outputfile.display());
 }
-fn givename(species: &str, locus: &Locus, contig: &str, haplo: bool, suffix: &str) -> String {
+fn givename(
+    species: &str,
+    locus: &Locus,
+    contig: &str,
+    haplo: bool,
+    suffix: &str,
+    image: bool,
+) -> String {
     format!(
-        "{}_{}_{}_{}_{}",
+        "{}_{}_{}{}_{}",
         species,
         locus,
-        contig,
-        if haplo { "primary" } else { "alternate" },
+        if haplo {
+            format!("{}-", contig)
+        } else {
+            String::new()
+        },
+        if haplo {
+            "primary"
+        } else if image {
+            "full"
+        } else {
+            "alternate"
+        },
         suffix
     )
 }
@@ -576,8 +799,9 @@ fn createcsv(
         &args.species,
         &loci.locus,
         &loci.contig,
-        loci.haplotype == Haplotype::Primary,
+        loci.haplotype.isprimary(),
         "positionresult.csv",
+        false,
     ));
     let outputfile = outputfile.as_path();
     let mut csv = csv::WriterBuilder::new()
@@ -608,7 +832,7 @@ fn createcsv(
     println!("CSV analysis has been saved to {}", outputfile.display());
 }
 fn mismatchgraph<T>(
-    outputfile: &std::path::Path,
+    _outputfile: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     _args: &Args,
@@ -623,8 +847,8 @@ fn mismatchgraph<T>(
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         .caption(
             format!(
-                "Mismatches rate and quality over the locus {} ({})",
-                loci.locus, loci.contig
+                "Mismatches rate and quality over the locus {} ({}-{})",
+                loci.locus, loci.contig,loci.haplotype
             ),
             ("sans-serif", 28),
         )
@@ -711,7 +935,6 @@ fn mismatchgraph<T>(
         .unwrap();
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
-    println!("Result has been saved to {}", outputfile.display());
 }
 fn readgraph<T>(
     outputfile: &std::path::Path,
@@ -730,8 +953,8 @@ fn readgraph<T>(
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         .caption(
             format!(
-                "Reads mapping quality over the locus {} ({})",
-                loci.locus, loci.contig
+                "Reads mapping quality over the locus {} ({}-{})",
+                loci.locus, loci.contig,loci.haplotype
             ),
             ("sans-serif", 28),
         )
@@ -850,8 +1073,9 @@ fn readgraph<T>(
         &args.species,
         &loci.locus,
         &loci.contig,
-        loci.haplotype == Haplotype::Primary,
+        loci.haplotype.isprimary(),
         "break.txt",
+        false,
     )))
     .unwrap();
     let mut result = Vec::new();
@@ -890,5 +1114,4 @@ fn readgraph<T>(
         .unwrap();
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
-    println!("Result has been saved to {}", outputfile.display());
 }
