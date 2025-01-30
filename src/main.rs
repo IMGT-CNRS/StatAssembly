@@ -1,11 +1,7 @@
-use bio_types::genome::AbstractInterval;
 use clap::{crate_authors, Parser};
-use core::num;
-use std::io::stderr;
 use csv;
-use noodles_core::Region;
 use plotters::coord::Shift;
-use serde::ser::SerializeMap;
+use std::io::stderr;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
@@ -15,7 +11,7 @@ use plotters::prelude::{
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
-use plotters::{self, coord};
+use plotters;
 use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam::{self, IndexedReader, Read};
 use serde::{de, Deserialize, Serialize};
@@ -24,8 +20,7 @@ use std::{
     collections::BTreeMap,
     fmt::Display,
     fs::File,
-    io::{BufReader, BufWriter, Write},
-    ops::{Range, RangeInclusive},
+    io::Write,
     path::PathBuf,
 };
 ///Assess quality of an assembly based on reads mapping
@@ -128,7 +123,7 @@ impl<'de> Deserialize<'de> for Strand {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct GeneInfosFinish {
     gene: String,
     chromosome: String,
@@ -136,11 +131,12 @@ struct GeneInfosFinish {
     start: i64,
     end: i64,
     length: i64,
+    coverageperc: f32,
     reads: usize,
     matchpos: String,
     reads100: usize,
     reads100m: usize,
-    coverage10x: usize,
+    coveragex: usize,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 struct LocusInfos {
@@ -179,6 +175,7 @@ impl Ord for HashMapinfo {
     }
 }
 impl HashMapinfo {
+    #[allow(dead_code)]
     fn new(
         map60: i64,
         map1: i64,
@@ -406,8 +403,11 @@ fn genelist(
     if records.is_empty() {
         panic!("Error with records1");
     }
-    let records: Vec<std::rc::Rc<rust_htslib::bam::Record>> =
-        records.into_iter().filter_map(Result::ok).filter(|p| !p.is_secondary()).collect();
+    let records: Vec<std::rc::Rc<rust_htslib::bam::Record>> = records
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|p| !p.is_secondary())
+        .collect();
     if records.is_empty() {
         panic!("Error with records");
     }
@@ -418,7 +418,7 @@ fn genelist(
         &loci.haplotype == &Haplotype::Primary,
         "geneanalysis.csv",
     ));
-    let mut lock: std::io::StderrLock<'_>= stderr().lock();
+    let mut lock: std::io::StderrLock<'_> = stderr().lock();
     let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
@@ -442,7 +442,7 @@ fn genelist(
         let mut hash: BTreeMap<i64, (usize, usize, usize)> = BTreeMap::new(); //Match and full match and total
         let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
         range.clone().into_iter().for_each(|p| {
-            hash.insert(p, (0, 0,0));
+            hash.insert(p, (0, 0, 0));
         });
         if records.is_empty() {
             panic!("Empty records");
@@ -453,12 +453,14 @@ fn genelist(
             !firstrange.intersect(range.clone()).is_empty()
         });
         if records.clone().count() == 0 {
-            writeln!(lock,"Empty records for gene {}",gene.gene).unwrap();
+            writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
             continue;
         }
+        let mut coverageperc = 0;
         for record in records {
             reads += 1;
-            for p in record.reference_start()+1..record.reference_end()+1 {
+            coverageperc += ranges::Ranges::from(record.reference_start() + 1..record.reference_end() + 1).into_iter().count();
+            for p in record.reference_start() + 1..record.reference_end() + 1 {
                 match hash.get_mut(&p) {
                     Some((.., d)) => *d += 1,
                     None => {
@@ -494,14 +496,14 @@ fn genelist(
             }
             if record
                 .aligned_blocks()
-                .any(|p| p[0]+1 <= gene.start && p[1]+1 > gene.end)
+                .any(|p| p[0] + 1 <= gene.start && p[1] + 1 > gene.end)
             {
                 reads100 += 1;
             }
             if record
                 .aligned_blocks_match()
                 .unwrap()
-                .any(|p| p[0]+1 <= gene.start && p[1]+1 > gene.end)
+                .any(|p| p[0] + 1 <= gene.start && p[1] + 1 > gene.end)
             {
                 reads100m += 1;
             }
@@ -532,7 +534,8 @@ fn genelist(
             matchpos: text,
             reads100,
             reads100m,
-            coverage10x: coverage,
+            coverageperc: ((coverageperc/reads/range.into_iter().count()) as f32*1000.0).round()/1000.0,
+            coveragex: coverage,
         };
         finale.push(elem);
     }
@@ -549,9 +552,14 @@ fn genelist(
     println!("Gene analysis has been saved to {}", outputfile.display());
 }
 fn givename(species: &str, locus: &Locus, contig: &str, haplo: bool, suffix: &str) -> String {
-    format!("{}_{}_{}_{}_{}", species, locus, contig, if haplo {
-        "primary" } else { "alternate"
-    }, suffix)
+    format!(
+        "{}_{}_{}_{}_{}",
+        species,
+        locus,
+        contig,
+        if haplo { "primary" } else { "alternate" },
+        suffix
+    )
 }
 fn createcsv(
     outputdir: &std::path::Path,
@@ -597,7 +605,7 @@ fn mismatchgraph<T>(
     outputfile: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
-    args: &Args,
+    _args: &Args,
     root: DrawingArea<T, Shift>,
 ) where
     T: DrawingBackend,
@@ -824,13 +832,20 @@ fn readgraph<T>(
             None
         }
     });
-    let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(&args.species,&loci.locus,&loci.contig,loci.haplotype == Haplotype::Primary,"break.txt"))).unwrap();
+    let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(
+        &args.species,
+        &loci.locus,
+        &loci.contig,
+        loci.haplotype == Haplotype::Primary,
+        "break.txt",
+    )))
+    .unwrap();
     let mut result = Vec::new();
     let mut prev = None;
-    breaks.clone().fold((), |_, (num,_)| {
+    breaks.clone().fold((), |_, (num, _)| {
         if let Some(prev_num) = prev {
             if num - prev_num != 1 {
-                result.push(format!("{}:{}..{}", loci.contig,prev_num, num));
+                result.push(format!("{}:{}..{}", loci.contig, prev_num, num));
             }
         } else {
             result.push(format!("{}:{}", loci.contig, num));
@@ -838,7 +853,7 @@ fn readgraph<T>(
         prev = Some(num);
     });
     let breakcode = result.into_iter().fold(String::new(), |mut acc, f| {
-        acc.push_str(&format!("Break: {}\n",f));
+        acc.push_str(&format!("Break: {}\n", f));
         acc
     });
     breakfile.write_all(breakcode.trim().as_bytes()).unwrap();
