@@ -721,11 +721,12 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
             .into_values()
             .filter(|p| p.0 >= args.coverage.try_into().unwrap())
             .count();
-        let text = hash.into_values().fold(String::new(), |mut acc, f| {
+        let text = hash.iter().fold(String::new(), |mut acc, (_,f)| {
             acc.push_str(&format!("{}/{}({})-", f.0, f.2, f.1));
             acc
         });
         let text = String::from(text.trim_end_matches('-'));
+        let genename = gene.gene.clone();
         let elem = GeneInfosFinish {
             gene: gene.gene,
             chromosome: gene.chromosome,
@@ -748,6 +749,57 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
             coveragex: coverage,
         };
         finale.push(elem);
+        let output = PathBuf::from("test").join(&genename);
+        let root = BitMapBackend::new(
+            &output,
+            (
+                500,
+                300,
+            ),
+        )
+        .into_drawing_area();
+        let _ = root.fill(&plotters::prelude::WHITE);
+    let max = hash.iter().map(|(_,p)| p.2).max().unwrap();
+    let mut chart = ChartBuilder::on(&root)
+        .set_label_area_size(LabelAreaPosition::Left, 60)
+        .right_y_label_area_size(60)
+        .set_label_area_size(LabelAreaPosition::Bottom, 60)
+        .caption(
+            format!(
+                "Reads alignment for {}",
+                genename
+            ),
+            ("sans-serif", 28),
+        )
+        .build_cartesian_2d(0..hash.len(), 0..max)
+        .unwrap();
+    chart
+        .draw_series(LineSeries::new(
+            hash.iter().enumerate().map(|(pos,(_,val))| (pos,val.0)),
+            full_palette::RED_200,
+        ))
+        .unwrap()
+        .label("Indels")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_200));
+    chart
+        .draw_series(LineSeries::new(
+            hash.iter().enumerate().map(|(pos,(_,val))| (pos,val.0)),
+            full_palette::GREEN_600,
+        ))
+        .unwrap()
+        .label("Indels")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600));
+    chart.configure_mesh()
+        .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
+        .x_desc("Genomic position (bp)")
+        .y_desc("Coverage")
+        .x_max_light_lines(10)
+        .y_max_light_lines(2)
+        //.disable_y_mesh()
+        .draw()
+        .unwrap();
+    // To avoid the IO failure being ignored silently, we manually call the present function
+    root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
     }
     let mut csv = csv::WriterBuilder::new()
         .has_headers(true)
