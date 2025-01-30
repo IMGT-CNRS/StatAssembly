@@ -1156,7 +1156,7 @@ fn readgraph<T>(
         });
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.secondary.len() as i64)),
+            pos.iter().map(|p| (*p.0, p.1.secondary)),
             full_palette::BLACK,
         ))
         .unwrap()
@@ -1164,7 +1164,7 @@ fn readgraph<T>(
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0, p.1.supplementary.len() as i64)),
+            pos.iter().map(|p| (*p.0, p.1.supplementary)),
             full_palette::BLUE_700,
         ))
         .unwrap()
