@@ -1,6 +1,7 @@
 use clap::{crate_authors, Parser};
-use colors::full_palette::GREY_300;
+use colors::full_palette::{GREY_300, GREY_900};
 use plotters::coord::Shift;
+use std::collections::HashMap;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::{RangeBounds, RangeInclusive};
@@ -172,7 +173,7 @@ impl Haplotype {
         self == &Haplotype::Primary
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 struct GeneInfos {
     gene: String,
     chromosome: String,
@@ -180,7 +181,7 @@ struct GeneInfos {
     start: i64,
     end: i64,
 }
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
 enum Strand {
     Plus,
     Minus,
@@ -534,13 +535,19 @@ fn main() {
                     continue;
                 }
                 let matched: Vec<RangeInclusive<i64>> = match p.aligned_blocks_match() {
-                    Some(a) => a.map(|[a, b]| a..=b).collect(),
+                    Some(a) => {
+                        if args.force {
+                            eprintln!("Force used but = CIGAR given. Remove force to have full results. Ctrl+C to quit or wait to continue.");
+                            std::thread::sleep(std::time::Duration::new(5,0));
+                        }
+                        a.map(|[a, b]| a..=b).collect()
+                    },
                     None => {
                         let text = "No = CIGAR given";
                         if !args.force {
-                            panic!("{}", text);
+                            panic!("{}. Add --force to force even without = (some results won't be available).", text);
                         } else if !message {
-                            eprintln!("{} but it was forced.", text);
+                            eprintln!("{} but it was forced...", text);
                             message = true
                         }
                         std::iter::empty::<IterAlignedPairs>()
@@ -717,6 +724,8 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         panic!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
+    //For each gene, list of alerting positions, bbool said suspicious or warning position
+    let mut alertingpositions: HashMap<GeneInfos, Vec<(bool, usize)>> = HashMap::new();
     for mut gene in genes {
         if gene.chromosome != loci.contig
             || !(loci.start..=loci.end).contains(&gene.start)
@@ -832,7 +841,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         output.set_extension("png");
         let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
         //Gene graph
-        genegraph(&hash, &gene, loci, root);
+        genegraph(&args,&hash, &gene, loci, root, &mut alertingpositions);
         let elem = GeneInfosFinish {
             gene: gene.gene,
             chromosome: gene.chromosome,
@@ -865,14 +874,52 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
     for gene in finale {
         csv.serialize(gene).unwrap();
     }
+    if !args.force {
+        printpossus(args, loci, outputdir, &alertingpositions);
+    }
     csv.flush().unwrap();
     println!("Gene analysis has been saved to {}", outputfile.display());
 }
+fn printpossus(
+    args: &Args,
+    loci: &LocusInfos,
+    outputdir: &std::path::Path,
+    data: &HashMap<GeneInfos, Vec<(bool, usize)>>,
+) {
+    let outputfile = outputdir.join(givename(
+        &args.species,
+        &loci.locus,
+        &loci.contig,
+        loci.haplotype.isprimary(),
+        "allele_confidence.csv",
+        false,
+    ));
+    let mut csv = csv::WriterBuilder::new()
+        .has_headers(true)
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .from_path(&outputfile)
+        .unwrap();
+    for (gene, vec) in data {
+        csv.write_field(&gene.gene).unwrap();
+        let infos = vec.iter().fold(String::new(), |mut acc, f| {
+            acc.push_str(&format!("-{}({})", f.1, if f.0 { "!" } else { "~" }));
+            acc
+        });
+        let infos = infos.trim_matches('-');
+        csv.write_field(&infos).unwrap();
+        csv.write_record(None::<&[u8]>).unwrap();
+    }
+    csv.flush().unwrap();
+    println!("Gene position has been saved to {}", outputfile.display());
+}
 fn genegraph<T>(
+    args: &Args,
     hash: &BTreeMap<i64, Posread>,
     gene: &GeneInfos,
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
+    alerting: &mut HashMap<GeneInfos, Vec<(bool, usize)>>,
 ) where
     T: DrawingBackend,
 {
@@ -888,38 +935,107 @@ fn genegraph<T>(
             format!("Reads alignment for {} ({})", genename, loci.haplotype),
             ("sans-serif", 22),
         )
-        .build_cartesian_2d(0..hash.len(), 0..max)
+        .build_cartesian_2d(1..hash.len(), 0..max)
         .unwrap();
     chart
         .draw_series(LineSeries::new(
             hash.iter()
                 .enumerate()
-                .map(|(pos, (_, val))| (pos, val.getmatch())),
+                .map(|(pos, (_, val))| (pos+1, val.getmatch())),
             full_palette::RED_200.mix(0.8),
         ))
         .unwrap()
         .label("Equal")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_200.mix(0.8)));
+        .legend(|(x, y)| {
+            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_200.mix(0.8))
+        });
     chart
         .draw_series(LineSeries::new(
             hash.iter()
                 .enumerate()
-                .map(|(pos, (_, val))| (pos, val.getindel())),
+                .map(|(pos, (_, val))| (pos+1, val.getindel())),
             full_palette::GREEN_600.mix(0.8),
         ))
         .unwrap()
         .label("Match")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600.mix(0.8)));
+        .legend(|(x, y)| {
+            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600.mix(0.8))
+        });
     chart
         .draw_series(LineSeries::new(
             hash.iter()
                 .enumerate()
-                .map(|(pos, (_, val))| (pos, val.gettotal())),
-            full_palette::LIGHTBLUE_300.mix(0.8),
+                .map(|(pos, (_, val))| (pos+1, val.gettotal())),
+            full_palette::BLUE_400.mix(0.8),
         ))
         .unwrap()
         .label("Total")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::LIGHTBLUE_300.mix(0.8)));
+        .legend(|(x, y)| {
+            PathElement::new(
+                vec![(x, y), (x + 15, y)],
+                full_palette::BLUE_400.mix(0.8),
+            )
+        });
+    //Three levels if not forced
+    if !args.force {
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(full_palette::ORANGE_300.mix(0.2).filled())
+                    .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
+                        let percent = val.r#match / val.total * 100;
+                        if percent < 80 && percent >= 60 && val.r#match > 15 && val.r#match <= 20 {
+                            match alerting.get_mut(&gene) {
+                                Some(d) => d.push((false, pos)),
+                                None => {
+                                    alerting.insert(gene.clone(), vec![(false, pos)]);
+                                }
+                            };
+                            Some((pos, max))
+                        } else {
+                            None
+                        }
+                    }))
+                    .margin(0),
+            )
+            .unwrap()
+            .label("Warning positions")
+            .legend(|(x, y)| {
+                plotters::element::Rectangle::new(
+                    [(x, y), (x + 15, y + 5)],
+                    full_palette::ORANGE_300.filled(),
+                )
+            });
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(full_palette::RED_400.mix(0.2).filled())
+                    .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
+                        let percent = val.r#match / val.total * 100;
+                        if percent < 60 && val.r#match <= 15 {
+                            match alerting.get_mut(&gene) {
+                                Some(d) => d.push((true, pos)),
+                                None => {
+                                    alerting.insert(gene.clone(), vec![(true, pos)]);
+                                }
+                            };
+                            Some((pos, max))
+                        } else {
+                            None
+                        }
+                    }))
+                    .margin(0),
+            )
+            .unwrap()
+            .label("Suspicious positions")
+            .legend(|(x, y)| {
+                plotters::element::Rectangle::new(
+                    [(x, y), (x + 15, y + 5)],
+                    full_palette::RED_400.filled(),
+                )
+            });
+    }
+    //Continue graph
     chart
         .configure_mesh()
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
@@ -927,7 +1043,7 @@ fn genegraph<T>(
         .y_desc("Reads count")
         .x_label_style(text_style.clone())
         .y_label_style(text_style)
-        .light_line_style(GREY_300.mix(0.4))
+        .light_line_style(GREY_900.mix(0.5))
         .x_max_light_lines(5)
         .y_max_light_lines(2)
         //.disable_y_mesh()
@@ -1006,7 +1122,8 @@ fn createcsv(
     ])
     .unwrap();
     for (pos, record) in pos.iter() {
-        csv.write_field(format!("{}", pos.saturating_add(1))).unwrap(); //Add +1
+        csv.write_field(format!("{}", pos.saturating_add(1)))
+            .unwrap(); //Add +1
         csv.serialize(record).unwrap();
     }
     csv.flush().unwrap();
