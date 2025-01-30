@@ -231,8 +231,8 @@ struct HashMapinfo {
     map1: i64,
     map0: i64,
     overlaps: i64,
-    secondary: Vec<String>,
-    supplementary: Vec<String>,
+    secondary: i64,
+    supplementary: i64,
     mismatches: i64,
     misalign: i64,
     qual: usize,
@@ -243,8 +243,8 @@ impl HashMapinfo {
             self.map0,
             self.map1,
             self.overlaps,
-            self.secondary.len() as i64,
-            self.supplementary.len() as i64,
+            self.secondary,
+            self.supplementary,
         ];
         *elem.iter().max().unwrap()
     }
@@ -265,8 +265,8 @@ impl HashMapinfo {
         map60: i64,
         map1: i64,
         map0: i64,
-        secondary: Vec<String>,
-        supplementary: Vec<String>,
+        secondary: i64,
+        supplementary: i64,
         overlaps: i64,
         mismatches: i64,
         misalign: i64,
@@ -289,8 +289,8 @@ impl HashMapinfo {
             map60: 0,
             map1: 0,
             map0: 0,
-            secondary: vec![],
-            supplementary: vec![],
+            secondary: 0,
+            supplementary: 0,
             overlaps: 0,
             mismatches: 0,
             misalign: 0,
@@ -514,12 +514,12 @@ fn main() {
                         let targeting = pos.get_mut(&i).unwrap();
                         if p.is_secondary() {
                             targeting
-                                .secondary
-                                .push(String::from_utf8_lossy(p.qname()).to_string());
+                                .secondary += 1;
                         } else {
-                            targeting
+                            targeting.supplementary += 1;
+                            /* targeting
                                 .supplementary
-                                .push(String::from_utf8_lossy(p.qname()).to_string());
+                                .push(String::from_utf8_lossy(p.qname()).to_string()); */
                         }
                     });
                     continue;
