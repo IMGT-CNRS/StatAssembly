@@ -1,81 +1,26 @@
-name: Deploy
+stages:
+  - build_and_upload
 
-on:
-  push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+variables:
+  VERSION: $CI_COMMIT_TAG
 
-permissions:
-  contents: write
-
-jobs:
-  build-and-upload:
-    name: Build and upload
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      matrix:
-        # You can add more, for any target you'd like!
-        include:
-          - build: linux
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-
-          - build: macos
-            os: macos-latest
-            target: x86_64-apple-darwin
-
-          - build: windows-gnu
-            os: windows-latest
-            target: x86_64-pc-windows-gnu
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Get the release version from the tag
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-
-      - name: Install Rust
-        # Or @nightly if you want
-        uses: dtolnay/rust-toolchain@stable
-        # Arguments to pass in
-        with:
-          # Make Rust compile to our target (defined in the matrix)
-          targets: ${{ matrix.target }}
-
-      - name: Build
-        uses: actions-rs/cargo@v1
-        with:
-          use-cross: true
-          command: build
-          args: --verbose --release --target ${{ matrix.target }}
-
-      - name: Build archive
-        shell: bash
-        run: |
-          # Replace with the name of your binary
-          binary_name="IMGT_StatAssembly"
-
-          dirname="$binary_name-${{ env.VERSION }}-${{ matrix.target }}"
-          mkdir "$dirname"
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv "target/${{ matrix.target }}/release/$binary_name.exe" "$dirname"
-          else
-            mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
-          fi
-
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            7z a "$dirname.zip" "$dirname"
-            echo "ASSET=$dirname.zip" >> $GITHUB_ENV
-          else
-            tar -czf "$dirname.tar.gz" "$dirname"
-            echo "ASSET=$dirname.tar.gz" >> $GITHUB_ENV
-          fi
-
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            ${{ env.ASSET }}
+build-and-upload:
+  stage: build_and_upload
+  script:
+    - echo "VERSION=${VERSION}" >> .env
+    - rustup update stable
+    - cargo build --verbose --release --target $TARGET
+    - mkdir "${BINARY_NAME}-${VERSION}-${TARGET}"
+    - mv "target/${TARGET}/release/${BINARY_NAME}" "${BINARY_NAME}-${VERSION}-${TARGET}"
+    - if [[ "$OS" == "windows-latest" ]]; then
+        7z a "${BINARY_NAME}-${VERSION}-${TARGET}.zip" "${BINARY_NAME}-${VERSION}-${TARGET}"
+      else
+        tar -czf "${BINARY_NAME}-${VERSION}-${TARGET}.tar.gz" "${BINARY_NAME}-${VERSION}-${TARGET}"
+      fi
+    - echo "ASSET=${BINARY_NAME}-${VERSION}-${TARGET}.${FILE_EXTENSION}" >> .env
+  artifacts:
+    paths:
+      - "${BINARY_NAME}-${VERSION}-${TARGET}.${FILE_EXTENSION}"
+    expire_in: 1 week
+  only:
+    - tags
