@@ -330,6 +330,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
+                &loci.haplotype == &Haplotype::Primary,
                 &format!("{}.svg", fgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -340,6 +341,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
+                &loci.haplotype == &Haplotype::Primary,
                 &format!("{}.png", fgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -353,6 +355,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
+                &loci.haplotype == &Haplotype::Primary,
                 &format!("{}.svg", sgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -363,6 +366,7 @@ fn main() {
                 &args.species,
                 &loci.locus,
                 &loci.contig,
+                &loci.haplotype == &Haplotype::Primary,
                 &format!("{}.png", sgraph),
             ));
             let outputfile = outputfile.as_path();
@@ -411,6 +415,7 @@ fn genelist(
         &args.species,
         &loci.locus,
         &loci.contig,
+        &loci.haplotype == &Haplotype::Primary,
         "geneanalysis.csv",
     ));
     let mut lock: std::io::StderrLock<'_>= stderr().lock();
@@ -543,8 +548,10 @@ fn genelist(
     csv.flush().unwrap();
     println!("Gene analysis has been saved to {}", outputfile.display());
 }
-fn givename(species: &str, locus: &Locus, contig: &str, suffix: &str) -> String {
-    format!("{}_{}_{}_{}", species, locus, contig, suffix)
+fn givename(species: &str, locus: &Locus, contig: &str, haplo: bool, suffix: &str) -> String {
+    format!("{}_{}_{}_{}_{}", species, locus, contig, if haplo {
+        "primary" } else { "alternate"
+    }, suffix)
 }
 fn createcsv(
     outputdir: &std::path::Path,
@@ -556,6 +563,7 @@ fn createcsv(
         &args.species,
         &loci.locus,
         &loci.contig,
+        &loci.haplotype == &Haplotype::Primary,
         "positionresult.csv",
     ));
     let outputfile = outputfile.as_path();
@@ -816,6 +824,24 @@ fn readgraph<T>(
             None
         }
     });
+    let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(&args.species,&loci.locus,&loci.contig,loci.haplotype == Haplotype::Primary,"break.txt"))).unwrap();
+    let mut result = Vec::new();
+    let mut prev = None;
+    breaks.clone().fold((), |_, (num,_)| {
+        if let Some(prev_num) = prev {
+            if num - prev_num != 1 {
+                result.push(format!("{}:{}..{}", loci.contig,prev_num, num));
+            }
+        } else {
+            result.push(format!("{}:{}", loci.contig, num));
+        }
+        prev = Some(num);
+    });
+    let breakcode = result.into_iter().fold(String::new(), |mut acc, f| {
+        acc.push_str(&format!("Break: {}\n",f));
+        acc
+    });
+    breakfile.write_all(breakcode.trim().as_bytes()).unwrap();
     chart
         .draw_series(
             Histogram::vertical(&chart)
@@ -825,7 +851,7 @@ fn readgraph<T>(
         )
         .unwrap()
         .label("Coverage break")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
     chart
         .configure_series_labels()
         .position(plotters::chart::SeriesLabelPosition::UpperRight)
