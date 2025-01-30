@@ -1206,7 +1206,7 @@ fn mismatchgraph<T>(
     _outputfile: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
-    _args: &Args,
+    args: &Args,
     root: DrawingArea<T, Shift>,
 ) where
     T: DrawingBackend,
@@ -1225,6 +1225,7 @@ fn mismatchgraph<T>(
         )
         .build_cartesian_2d(loci.start..loci.end, 0..100)
         .unwrap();
+    if !args.force {
     chart
         .draw_series(
             Histogram::vertical(&chart)
@@ -1241,6 +1242,7 @@ fn mismatchgraph<T>(
         .unwrap()
         .label("Mismatches (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_200));
+    }
     chart
         .draw_series(
             Histogram::vertical(&chart)
