@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>"]
 rust-version = "1.81"
-license = "GPL-3.0-only"
+license-file = "LICENSE.txt"
 keywords = ["immunogenetics", "reads", "assembly quality"]
 publish = false
 categories = ["science::bioinformatics::sequence-analysis"]
@@ -23,3 +23,5 @@ plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
 ranges = "0.4.0"
 rust-htslib = { git = "ssh://git@github.com/DorianCoding/bamanalysis.git", branch="master", features = ["bzip2","curl","lzma","static"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }
+[lints.rust]
+unsafe_code = "deny"

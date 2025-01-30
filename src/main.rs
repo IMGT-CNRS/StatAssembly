@@ -1,10 +1,15 @@
+/*
+This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
+It was created and used by IMGT Team (https://www.imgt.org).
+Available under X license
+*/
 use clap::{crate_authors, Parser};
 use colors::full_palette::GREY_400;
 use plotters::coord::Shift;
 use std::collections::HashMap;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
-use std::ops::{RangeBounds, RangeInclusive};
+use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use itertools::Itertools;
@@ -60,13 +65,13 @@ struct Args {
     /// Coverage to calculate on CSV
     #[arg(short, long, default_value_t = 10)]
     coverage: u32,
-    /// Minimum number of reads for warning positions
+    /// Minimum number of reads (included) for warning positions
     #[arg(long, default_value_t = 10)]
     minreads: u32,
-    /// Percent warning position for mismatch reads
+    /// Percent warning position for mismatch reads (included)
     #[arg(long, default_value_t = 80)]
     percentwarning: u8,
-    /// Percent warning position for mismatch reads
+    /// Percent warning position for mismatch reads (included)
     #[arg(long, default_value_t = 60)]
     percentalerting: u8,
     /// Force cigar even if no =. Some functionalities would be disabled
@@ -101,6 +106,7 @@ struct Posread {
     indel: usize,
     total: usize,
 }
+/* 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Position {
     zbased: bool,
@@ -128,6 +134,7 @@ impl Position {
         self.zbased
     }
 }
+*/
 impl Posread {
     #[allow(dead_code)]
     fn new(r#match: usize, indel: usize, total: usize) -> Result<Self, &'static str> {
@@ -228,8 +235,8 @@ impl<'de> Deserialize<'de> for Strand {
         let s: &str = de::Deserialize::deserialize(deserializer)?;
 
         match s {
-            "1" => Ok(Strand::Minus),
-            "0" => Ok(Strand::Plus),
+            "1" | "-" => Ok(Strand::Minus),
+            "0" | "+" => Ok(Strand::Plus),
             _ => Err(de::Error::unknown_variant(s, &["1", "0"])),
         }
     }
@@ -335,39 +342,53 @@ impl HashMapinfo {
     }
 }
 
-fn getreaderoffile(args: &Args) -> IndexedReader {
+fn getreaderoffile(args: &Args) -> Result<IndexedReader,rust_htslib::errors::Error> {
     let mut reader = match &args.index {
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
         None => bam::IndexedReader::from_path(&args.file),
-    }
-    .unwrap();
+    }?;
     let threads = match std::thread::available_parallelism() {
         Ok(d) => min(d, NonZero::new(12).unwrap()),
         Err(_) => NonZero::new(4).unwrap(),
     };
     reader.set_threads(threads.get()).unwrap();
-    reader
+    Ok(reader)
 }
 fn main() {
     let args = Args::parse();
     if args.percentalerting > 100 || args.percentwarning > 100 {
-        panic!("Percent of warning and alerting cannot be above 100.");
+        eprintln!("Percent of warning and alerting cannot be above 100.");
+        return;
     } else if args.percentalerting >= args.percentwarning {
-        panic!("Percent warning must be greater than percent alerting.")
+        eprintln!("Percent warning must be greater than percent alerting.");
+        return;
     }
-    let mut csv = csv::ReaderBuilder::new()
+    let csv = csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
         .delimiter(b'\t')
-        .from_path(&args.locuspos)
-        .unwrap();
+        .from_path(&args.locuspos);
+    let mut csv = match csv {
+        Ok(c)=> c,
+        Err(e) => {
+            eprintln!("CSV file of location position cannot be found. Error is {}",e);
+            return;
+        }
+    };
     let mut locus: Vec<LocusInfos> = Vec::new();
     for record in csv.deserialize() {
-        let record = record.expect("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
+        let record = match record {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
+                return;
+            }
+        };
         locus.push(record);
     }
     if locus.is_empty() {
-        panic!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
+        eprintln!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
+        return;
     }
     let outputdir = match args.outdir.is_dir() {
         true => &args.outdir,
@@ -376,7 +397,13 @@ fn main() {
                 "Folder {} does not exist, attempt to create.",
                 args.outdir.display()
             );
-            std::fs::create_dir(&args.outdir).unwrap();
+            match std::fs::create_dir(&args.outdir) {
+                Ok(_) => (),
+                Err(e) => {
+                    eprintln!("Cannot create folder {}. Error is {}",&args.outdir.display(),e);
+                    return;
+                }
+            };
             &args.outdir
         }
     };
@@ -390,7 +417,8 @@ fn main() {
         let floci = locus.first().unwrap();
         let haplotype = locus.len();
         if haplotype > 2 {
-            panic!("There is more than 2 haplotypes for {}", floci.locus);
+            eprintln!("There is more than 2 haplotypes for {}", floci.locus);
+            return;
         }
         let haplotypebool = haplotype == 1;
         println!(
@@ -527,18 +555,27 @@ fn main() {
         };
         let mut lock = stdout().lock();
         for loci in locus.iter() {
-            let mut reader = getreaderoffile(&args);
+            let mut reader = match getreaderoffile(&args) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Cannot read bam file. Error is {}. Exiting",e);
+                    return;
+                }
+            };
             //0-based
-            reader
-                .fetch((&loci.contig, loci.start - 1, loci.end + 1))
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "The region {}:{}-{} cannot be found, exiting.",
-                        loci.contig,
-                        loci.start - 1,
-                        loci.end + 1
-                    )
-                });
+            match reader
+                .fetch((&loci.contig, loci.start - 1, loci.end + 1)) {
+                    Ok(_) => (),
+                    Err(_) => {
+                        eprintln!(
+                            "The region {}:{}-{} cannot be found, exiting.",
+                            loci.contig,
+                            loci.start - 1,
+                            loci.end + 1
+                        );
+                        return;
+                    }
+                };
             let mut nocount = true;
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
             //let file = File::create(&filename).unwrap();
@@ -583,8 +620,9 @@ fn main() {
                 }
                 let matched: Vec<RangeInclusive<i64>> = match p.aligned_blocks_match() {
                     Some(a) => {
-                        if args.force {
+                        if args.force && !message {
                             eprintln!("Force used but = CIGAR given. Remove force to have full results. Ctrl+C to quit or wait to continue.");
+                            message = true;
                             std::thread::sleep(std::time::Duration::new(5, 0));
                         }
                         a.map(|[a, b]| a..=b).collect()
@@ -592,10 +630,11 @@ fn main() {
                     None => {
                         let text = "No = CIGAR given";
                         if !args.force {
-                            panic!("{}. Add --force to force even without = (some results won't be available).", text);
+                            eprintln!("{}. Add --force to force even without = (some results won't be available).", text);
+                            return;
                         } else if !message {
                             eprintln!("{} but it was forced... Continuing...", text);
-                            message = true
+                            message = true;
                         }
                         std::iter::empty::<IterAlignedPairs>()
                             .map(|_| 0..=0)
@@ -610,11 +649,14 @@ fn main() {
                         0 => targeting.map0 += 1,
                         1..=59 => targeting.map1 += 1,
                         60 => targeting.map60 += 1,
-                        _ => panic!(
+                        _ => {
+                            eprintln!(
                             "MAPQ score is invalid. Got {} for {}",
                             p.mapq(),
                             String::from_utf8_lossy(p.qname())
-                        ),
+                            );
+                            return;
+                        },
                     };
                     if i % sep == 0 {
                         //Get quality of reads depending on genomic position
@@ -658,23 +700,28 @@ fn main() {
                 )
             });
             if nocount {
-                panic!(
+                eprintln!(
                     "The region {}:{}-{} cannot be found, exiting.",
                     loci.contig,
                     loci.start + 1,
                     loci.end + 1
-                )
+                );
+                return;
             }
             println!("Making graphs");
             match (loci.haplotype.isprimary(), args.svg) {
                 (true, true) => {
-                    readgraph(
+                    let f = readgraph(
                         &outputfile1,
                         loci,
                         &pos,
                         &args,
                         readgraphtop.clone().unwrap(),
                     );
+                    if let Err(e) = f {
+                        eprintln!("Cannot create read graph. Error is {}",e);
+                        return;
+                    }
                     mismatchgraph(
                         &outputfile3,
                         loci,
@@ -684,13 +731,17 @@ fn main() {
                     );
                 }
                 (false, true) => {
-                    readgraph(
+                    let f = readgraph(
                         &outputfile1,
                         loci,
                         &pos,
                         &args,
                         readgraphbottom.clone().unwrap(),
                     );
+                    if let Err(e) = f {
+                        eprintln!("Cannot create read graph. Error is {}",e);
+                        return;
+                    }
                     mismatchgraph(
                         &outputfile3,
                         loci,
@@ -700,13 +751,17 @@ fn main() {
                     );
                 }
                 (true, false) => {
-                    readgraph(
+                    let f = readgraph(
                         &outputfile2,
                         loci,
                         &pos,
                         &args,
                         readgraphtop2.clone().unwrap(),
                     );
+                    if let Err(e) = f {
+                        eprintln!("Cannot create read graph. Error is {}",e);
+                        return;
+                    }
                     mismatchgraph(
                         &outputfile4,
                         loci,
@@ -716,13 +771,17 @@ fn main() {
                     );
                 }
                 (false, false) => {
-                    readgraph(
+                    let f = readgraph(
                         &outputfile2,
                         loci,
                         &pos,
                         &args,
                         readgraphbottom2.clone().unwrap(),
                     );
+                    if let Err(e) = f {
+                        eprintln!("Cannot create read graph. Error is {}",e);
+                        return;
+                    }
                     mismatchgraph(
                         &outputfile4,
                         loci,
@@ -733,20 +792,26 @@ fn main() {
                 }
             }
             //Create CSV from HashMap
-            createcsv(outputdir, loci, &pos, &args);
+            if let Err(e) = createcsv(outputdir, loci, &pos, &args) {
+                eprintln!("Cannot create csv file. Error is {}",e);
+                        return;
+            }
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
-                genelist(outputdir, loci, &args);
+                if let Err(e) = genelist(outputdir, loci, &args) {
+                    eprintln!("Cannot create gene list. Error is {}",e);
+                            return;
+                }
                 println!("Gene list finished");
             } else {
-                eprintln!("You have not provided a gene list, skipped.");
+                eprintln!("You have not provided a gene list, skipped. Provide one to get more datas.");
             }
         }
         println!("Locus {} is done!", &floci.locus);
     }
 }
-fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
+fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         &args.species,
         &loci.locus,
@@ -760,16 +825,21 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b',')
-        .from_path(args.geneloc.as_ref().unwrap())
-        .unwrap();
+        .from_path(args.geneloc.as_ref().unwrap())?;
     let mut genes: Vec<GeneInfos> = Vec::new();
     for record in csv.deserialize() {
-        let record = record
-            .expect("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
+        let record = match record {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
+                return Err(Box::new(e));
+            }
+        };
         genes.push(record);
     }
     if genes.is_empty() {
-        panic!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
+        eprintln!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "csv error")));
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
@@ -781,7 +851,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         {
             continue; //gene not on this loci
         }
-        let mut reader = getreaderoffile(args);
+        let mut reader = getreaderoffile(args)?;
         let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
@@ -789,8 +859,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
         //Add +1 because 0-based
         reader
-            .fetch((&gene.chromosome, gene.start + 1, gene.end + 1))
-            .unwrap();
+            .fetch((&gene.chromosome, gene.start + 1, gene.end + 1))?;
         let records = reader.records();
         let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
         range.clone().into_iter().for_each(|p| {
@@ -869,7 +938,7 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         //Merging data
         let text = hash.iter().fold(String::new(), |mut acc, (_, f)| {
             acc.push_str(&format!(
-                "{}/{}({})-",
+                "{}/{}(={})-",
                 f.getindel(),
                 f.gettotal(),
                 f.getmatch()
@@ -881,9 +950,9 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         let plots = outputdir
             .join(format!("gene_{}", args.species))
             .join(loci.haplotype.to_string().as_str().to_lowercase());
-        if !std::fs::exists(&plots).unwrap() {
+        if !std::fs::exists(&plots)? {
             println!("Creating the folder {}", plots.display());
-            std::fs::create_dir_all(&plots).unwrap();
+            std::fs::create_dir_all(&plots)?;
         };
         let mut output = plots.join(&genename);
         output.set_extension("png");
@@ -917,12 +986,11 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b'\t')
-        .from_path(&outputfile)
-        .unwrap();
+        .from_path(&outputfile)?;
     for gene in finale {
-        csv.serialize(gene).unwrap();
+        csv.serialize(gene)?;
     }
-    csv.flush().unwrap();
+    csv.flush()?;
     //Sorting the positions
     alertingpositions.iter_mut().for_each(|(_, vec)| {
         vec.sort_unstable_by(|a, b| match a.1.cmp(&b.1) {
@@ -931,16 +999,17 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) {
         });
     });
     if !args.force {
-        printpossus(args, loci, outputdir, &alertingpositions);
+        printpossus(args, loci, outputdir, &alertingpositions)?;
     }
     println!("Gene analysis has been saved to {}", outputfile.display());
+    Ok(())
 }
 fn printpossus(
     args: &Args,
     loci: &LocusInfos,
     outputdir: &std::path::Path,
     data: &HashMap<GeneInfos, Vec<(bool, usize)>>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         &args.species,
         &loci.locus,
@@ -953,25 +1022,24 @@ fn printpossus(
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b'\t')
-        .from_path(&outputfile)
-        .unwrap();
-    csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])
-        .unwrap();
+        .from_path(&outputfile)?;
+    csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])?;
     for (gene, vec) in data {
-        csv.write_field(&gene.gene).unwrap();
+        csv.write_field(&gene.gene)?;
         let infos = vec.iter().fold(String::new(), |mut acc, f| {
             acc.push_str(&format!("-{}({})", f.1, if f.0 { "!" } else { "~" }));
             acc
         });
         let infos = infos.trim_matches('-');
-        csv.write_field(infos).unwrap();
-        csv.write_record(None::<&[u8]>).unwrap();
+        csv.write_field(infos)?;
+        csv.write_record(None::<&[u8]>)?;
     }
-    csv.flush().unwrap();
+    csv.flush()?;
     println!(
         "Gene suspicious position has been saved to {}",
         outputfile.display()
     );
+    Ok(())
 }
 fn genegraph<T>(
     args: &Args,
@@ -1006,7 +1074,7 @@ fn genegraph<T>(
             full_palette::GREEN_600.mix(0.8).stroke_width(2),
         ))
         .unwrap()
-        .label("Match")
+        .label("Sequence match")
         .legend(|(x, y)| {
             PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600.mix(0.8))
         });
@@ -1032,7 +1100,7 @@ fn genegraph<T>(
                 full_palette::BLACK.mix(0.5).stroke_width(2),
             ))
             .unwrap()
-            .label("Equal")
+            .label("Sequence equal")
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK.mix(0.5))
             });
@@ -1163,7 +1231,7 @@ fn createcsv(
     loci: &LocusInfos,
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         &args.species,
         &loci.locus,
@@ -1179,8 +1247,7 @@ fn createcsv(
         .has_headers(false)
         .delimiter(b'\t')
         .flexible(true)
-        .from_path(outputfile)
-        .unwrap();
+        .from_path(outputfile)?;
     csv.write_record([
         "Position",
         "map60",
@@ -1192,15 +1259,14 @@ fn createcsv(
         "mismatches",
         "misalign",
         "qual",
-    ])
-    .unwrap();
+    ])?;
     for (pos, record) in pos.iter() {
-        csv.write_field(format!("{}", pos.saturating_add(1)))
-            .unwrap(); //Add +1 because 0-based
-        csv.serialize(record).unwrap();
+        csv.write_field(format!("{}", pos.saturating_add(1)))?; //Add +1 because 0-based
+        csv.serialize(record)?;
     }
-    csv.flush().unwrap();
+    csv.flush()?;
     println!("CSV analysis has been saved to {}", outputfile.display());
+    Ok(())
 }
 fn mismatchgraph<T>(
     _outputfile: &std::path::Path,
@@ -1223,8 +1289,7 @@ fn mismatchgraph<T>(
             ),
             ("sans-serif", 28),
         )
-        .build_cartesian_2d(loci.start..loci.end, 0..100)
-        .unwrap();
+        .build_cartesian_2d(loci.start..loci.end, 0..100).unwrap();
     if !args.force {
     chart
         .draw_series(
@@ -1308,7 +1373,7 @@ fn readgraph<T>(
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
     root: DrawingArea<T, Shift>,
-) where
+) -> Result<(), Box<dyn std::error::Error>> where
     T: DrawingBackend,
 {
     let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
@@ -1442,8 +1507,7 @@ fn readgraph<T>(
         loci.haplotype.isprimary(),
         "break.txt",
         false,
-    )))
-    .unwrap();
+    )))?;
     let mut first = None;
     let mut prev = None;
     let (finalpos, _) = pos.iter().last().unwrap();
@@ -1476,7 +1540,7 @@ fn readgraph<T>(
     if let Some(d) = first {
         acc.push_str(&format!("{}:{}\n", loci.contig, d + 1));
     }
-    breakfile.write_all(acc.trim().as_bytes()).unwrap();
+    breakfile.write_all(acc.trim().as_bytes())?;
     chart
         .draw_series(
             Histogram::vertical(&chart)
@@ -1496,4 +1560,5 @@ fn readgraph<T>(
         .unwrap();
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
+    Ok(())
 }
