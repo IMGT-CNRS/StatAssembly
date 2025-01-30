@@ -4,7 +4,6 @@ use plotters::coord::Shift;
 use std::collections::BTreeSet;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
-use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use itertools::Itertools;
@@ -502,7 +501,7 @@ fn main() {
             println!("Region {} fetched, analyzing all reads.", loci.locus);
             let mut count = 0;
             let time = Instant::now();
-            let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
+            //let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
             for p in reader.rc_records().filter_map(Result::ok) {
                 count += 1;
                 if count % 100 == 0 {
@@ -533,8 +532,8 @@ fn main() {
                 }
                 let overlaprange = max(p.reference_start() + 1, loci.start)
                     ..min(loci.end + 1, p.reference_end() - 1); //Remove 1 because does not overlap on borders
-                let matched: BTreeSet<(i64,i64)> = match p.aligned_pairs_match() {
-                    Some(a) => a.map(|[a, b]| (a,b)).collect(),
+                let matched: BTreeSet<(i64, i64)> = match p.aligned_pairs_match() {
+                    Some(a) => a.map(|[a, b]| (a, b)).collect(),
                     None => {
                         let text = "No = CIGAR given";
                         if !args.force {
@@ -544,12 +543,12 @@ fn main() {
                             message = true
                         }
                         std::iter::empty::<IterAlignedPairs>()
-                            .map(|_| (0,0))
+                            .map(|_| (0, 0))
                             .collect()
                     }
                 };
-                let aligned: BTreeSet<(i64,i64)> =
-                    p.aligned_pairs().map(|[a, b]| (a,b)).collect();
+                let aligned: BTreeSet<(i64, i64)> =
+                    p.aligned_pairs().map(|[a, b]| (a, b)).collect();
                 for (i, targeting) in pos.range_mut(newrange) {
                     match p.mapq() {
                         0 => targeting.map0 += 1,
@@ -561,38 +560,31 @@ fn main() {
                             String::from_utf8_lossy(p.qname())
                         ),
                     };
-                    if i % sep == 0 {
-                        //Check every x nt
-                        if let Some(d) = p.aligned_pairs().find(|p| p[1] == *i) {
-                            let index = d[0] as usize;
-                            targeting.qual += *p.qual().get(index).unwrap() as usize;
-                        }
+                    if let Some(d) = p.aligned_pairs().find(|p| p[1] == *i) {
+                        let index = d[0] as usize;
+                        targeting.qual += *p.qual().get(index).unwrap() as usize;
                     }
-                    if overlaprange.contains(i) {
-                        targeting.overlaps += 1;
-                    }
-                    if matched
-                        .iter()
-                        .skip_while(|f| f.1 < *i)
-                        .take_while(|f| f.0 <= *i)
-                        .any(|f| (f.0..=f.1).contains(i))
-                    {
-                        //Match skipped
-                    } else if aligned
-                        .iter()
-                        .skip_while(|f| f.1 < *i)
-                        .take_while(|f| f.0 <= *i)
-                        .any(|f| (f.0..=f.1).contains(i))
-                    {
+                    targeting.misalign += 1;
+                }
+                //Overlap
+                for (_, targeting) in pos.range_mut(overlaprange) {
+                    targeting.overlaps += 1;
+                }
+                //Remove misalign and mismatched
+                matched.iter().for_each(|p| {
+                    pos.range_mut(p.0..=p.1).for_each(|(_, f)| {
+                        f.misalign -= 1;
+                    })
+                });
+                aligned.difference(&matched).for_each(|p| {
+                    pos.range_mut(p.0..=p.1).for_each(|(_, f)| {
+                        f.misalign -= 1;
                         //Aligns but not correct nt
                         if !args.force {
-                            targeting.mismatches += 1
+                            f.mismatches += 1;
                         };
-                    } else {
-                        //No alignment (deletion in read probably)
-                        targeting.misalign += 1;
-                    }
-                }
+                    })
+                });
             }
             if nocount {
                 panic!(
@@ -673,7 +665,7 @@ fn main() {
         //Create gene CSV
         if args.geneloc.is_some() {
             println!("Gene list starting!");
-            genelist(outputdir,floci,&args);
+            genelist(outputdir, floci, &args);
             println!("Gene list finished");
         }
         println!("Locus {} is done!", &floci.locus);
@@ -728,7 +720,10 @@ fn genelist(outputdir: &std::path::Path, floci: &LocusInfos, args: &Args) {
         });
         let mut coverageperc = 0;
         let mut empty = true;
-        for record in records.filter_map(Result::ok).filter(|p| !p.is_secondary() && !p.is_supplementary()) {
+        for record in records
+            .filter_map(Result::ok)
+            .filter(|p| !p.is_secondary() && !p.is_supplementary())
+        {
             empty = false;
             reads += 1;
             coverageperc +=
