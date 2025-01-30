@@ -508,7 +508,7 @@ fn main() {
                     writeln!(
                         lock,
                         "Process {} reads in {} s",
-                        count,
+                        count.to_formatted_string(&Locale::en),
                         Instant::now().saturating_duration_since(time).as_secs_f32()
                     )
                     .unwrap();
@@ -560,6 +560,7 @@ fn main() {
                             String::from_utf8_lossy(p.qname())
                         ),
                     };
+                    //Get quality of reads depending on genomic position
                     if let Some(d) = p.aligned_pairs().find(|p| p[1] == *i) {
                         let index = d[0] as usize;
                         targeting.qual += *p.qual().get(index).unwrap() as usize;
@@ -576,6 +577,7 @@ fn main() {
                         f.misalign -= 1;
                     })
                 });
+                //Aligned reads but without matches ones
                 aligned.difference(&matched).for_each(|p| {
                     pos.range_mut(p.0..=p.1).for_each(|(_, f)| {
                         f.misalign -= 1;
