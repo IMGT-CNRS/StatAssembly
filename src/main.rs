@@ -1,6 +1,7 @@
 use bio_types::genome::AbstractInterval;
 use clap::{crate_authors, Parser};
 use plotters::coord::Shift;
+use serde::ser::SerializeMap;
 use core::num;
 use csv;
 use noodles_core::Region;
@@ -13,7 +14,7 @@ use plotters::style::*;
 use plotters::{self, coord};
 use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam::{self, IndexedReader, Read};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use std::{
     cmp::{max, min},
     collections::BTreeMap,
@@ -53,6 +54,9 @@ struct Args {
     /// Minimal number of reads (included) to declare a break in coverage
     #[arg(short,long, default_value_t=3)]
     breaks: u32,
+    /// Coverage to calculate on CSV
+    #[arg(short,long, default_value_t=10)]
+    coverage: u32,
     /// Save as SVG images
     #[arg(long)]
     svg: bool,
@@ -97,18 +101,38 @@ enum Haplotype {
 struct GeneInfos {
     gene: String,
     chromosome: String,
-    strand: bool,
+    strand: Strand,
     start: i64,
     end: i64,
+}
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+enum Strand {
+    Plus,
+    Minus
+}
+impl<'de> Deserialize<'de> for Strand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de> {
+            let s: &str = de::Deserialize::deserialize(deserializer)?;
+            
+                match s {
+                    "1" => Ok(Strand::Minus),
+                    "0" => Ok(Strand::Plus),
+                    _ => Err(de::Error::unknown_variant(s, &["1","0"])),
+                }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct GeneInfosFinish {
     gene: String,
     chromosome: String,
-    strand: bool,
+    strand: Strand,
     start: i64,
     end: i64,
+    length: i64,
     reads: usize,
+    matchpos: String,
     reads100: usize,
     reads100m: usize,
     coverage10x: usize
@@ -336,54 +360,95 @@ fn genelist(outputdir: &std::path::Path,
     loci: &LocusInfos,
     records: bam::RcRecords<'_, IndexedReader>,
     args: &Args) {
+        let records: Vec<Result<std::rc::Rc<rust_htslib::bam::Record>, rust_htslib::errors::Error>> = records.collect();
+        if records.is_empty() {
+            panic!("Error with records1");
+        }
+        let records: Vec<std::rc::Rc<rust_htslib::bam::Record>> = records.into_iter().filter_map(Result::ok).collect();
+        if records.is_empty() {
+            panic!("Error with records");
+        }
         let outputfile = outputdir.join(givename(
             &args.species, &loci.locus,&loci.contig,"geneanalysis.csv"
         ));
         let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
-        .delimiter(b'\t')
-        .from_path(&args.locuspos)
+        .delimiter(b',')
+        .from_path(&args.geneloc.as_ref().unwrap())
         .unwrap();
     let mut genes: Vec<GeneInfos> = Vec::new();
     for record in csv.deserialize() {
-        let record = record.expect("Invalid CSV format, waiting gene\tcontig\tstrand\tstart\tend");
+        let record = record.expect("Invalid CSV format, waiting gene,chromosome,strand,start,end");
         genes.push(record);
     }
     if genes.is_empty() {
-        panic!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
+        panic!("Invalid CSV format, waiting gene,chromosome,strand,start,end");
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     for mut gene in genes {
-        let (mut reads, mut reads100,mut reads100m, mut coverage10x) = (0,0,0,0);
+        let (mut reads, mut reads100,mut reads100m) = (0,0,0);
         if gene.start > gene.end {
             (gene.end,gene.start) = (gene.start,gene.end) //Swap position
         }
-        let range = gene.start..=gene.end;
-        let records: Vec<bam::Record> = records.filter_map(Result::ok).filter(|p| { 
-            range.contains(&(p.reference_start()+1)) || range.contains(&(p.reference_end()+1))
+        let mut hash: BTreeMap<i64,(usize,usize)> = BTreeMap::new(); //Match and full match
+        let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
+        range.clone().into_iter().for_each(|p| { hash.insert(p, (0,0)); });
+        let records = records.iter().filter(|p| { 
+            let firstrange = ranges::Ranges::from(vec![p.reference_start()+1..p.reference_end()+1]);
+            !firstrange.intersect(range.clone()).is_empty()
         });
-        let mut rangecov = vec![0; range];
-        for record in records {
-            let overlaprange = max(*p.reference_start()+1,*range.start())..=min(*p.reference_end()+1,*range.end());
-            reads += 1;
-            overlaprange.for_each(|p| {
-                let e = p.checked_sub(p.reference_start()+1).unwrap();
-                rangecov.get(e).unwrap() += 1;
-            });
-            let blocking = record.aligned_
-
+        if records.clone().count() == 0 {
+            panic!("Empty records");
         }
+        for record in records {
+            reads += 1;
+            'outer: for [start,end] in record.aligned_blocks() {
+                for p in start..end {
+                    match hash.get_mut(&p) {
+                        Some((d,_)) => { *d +=1 },
+                        None => { if start > gene.end {
+                            break 'outer;
+                        } } //Outside coverage of gene
+                    }
+                }
+            }
+            'outer: for [start,end] in record.aligned_blocks_match().unwrap() {
+                for p in start..end {
+                    match hash.get_mut(&p) {
+                        Some((d,_)) => { *d +=1 },
+                        None => { if start > gene.end {
+                            break 'outer;
+                        } } //Outside coverage of gene
+                    }
+                }
+            }
+            let range= gene.start..=gene.end;
+            if record.aligned_blocks().any(|p| p[0] <= *range.start() && p[1] >= *range.end()) {
+                reads100 += 1;
+            }
+            if record.aligned_blocks_match().unwrap().any(|p| p[0] <= *range.start() && p[1] >= *range.end()) {
+                reads100m += 1;
+            }
+        }
+        let coverage = hash.clone().into_values().filter(|p| p.0 >= args.coverage.try_into().unwrap()).count();
+        let text = hash.into_values().fold(String::new(), |mut acc, f| {
+                acc.push_str(&format!("{}({})-",f.0,f.1));
+                acc
+        });
+        let text = String::from(text.trim_end_matches('-'));
         let elem = GeneInfosFinish {
             gene: gene.gene,
             chromosome: gene.chromosome,
             strand: gene.strand,
             start: gene.start,
             end: gene.end,
+            length: gene.end.checked_sub(gene.start).unwrap().checked_add(1).unwrap(),
             reads,
+            matchpos: text,
             reads100,
             reads100m,
-            coverage10x
+            coverage10x: coverage
         };
         finale.push(elem);
     }
@@ -391,7 +456,7 @@ fn genelist(outputdir: &std::path::Path,
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b'\t')
-        .from_path(&outputdir)
+        .from_path(&outputfile)
         .unwrap();
     for gene in finale {
         csv.serialize(gene).unwrap();
