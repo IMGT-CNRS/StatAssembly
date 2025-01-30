@@ -563,9 +563,9 @@ fn main() {
                     if overlaprange.contains(i) {
                         targeting.overlaps += 1;
                     }
-                    if matched.iter().take_while(|f| f.start() > i).any(|f| f.contains(i)) {
+                    if matched.iter().skip_while(|f| f.end() < i).take_while(|f| f.start() <= i).any(|f| f.contains(i)) {
                         //Match skipped
-                    } else if aligned.iter().take_while(|f| f.start() > i).any(|f| f.contains(i)) {
+                    } else if aligned.iter().skip_while(|f| f.end() < i).take_while(|f| f.start() <= i).any(|f| f.contains(i)) {
                         //Aligns but not correct nt
                         if !args.force {
                             targeting.mismatches += 1
