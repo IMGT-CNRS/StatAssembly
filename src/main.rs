@@ -77,6 +77,9 @@ struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     force: bool,
+    /// Calculate total reads mismatch
+    #[arg(long)]
+    totalread: bool,
     /// Save as SVG images
     #[arg(long)]
     svg: bool,
@@ -244,8 +247,8 @@ impl<'de> Deserialize<'de> for Strand {
 impl Display for Strand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Plus => write!(f,"FWD"),
-            Self::Minus => write!(f,"RVD")
+            Self::Plus => write!(f, "FWD"),
+            Self::Minus => write!(f, "RVD"),
         }
     }
 }
@@ -277,6 +280,7 @@ struct HashMapinfo {
     map60: i64,
     map1: i64,
     map0: i64,
+    globalmismatch: usize,
     overlaps: i64,
     secondary: i64,
     supplementary: i64,
@@ -318,6 +322,7 @@ impl HashMapinfo {
         map0: i64,
         secondary: i64,
         supplementary: i64,
+        globalmismatch: usize,
         overlaps: i64,
         mismatches: i64,
         misalign: i64,
@@ -327,6 +332,7 @@ impl HashMapinfo {
             map60,
             map1,
             map0,
+            globalmismatch,
             secondary,
             supplementary,
             overlaps,
@@ -340,6 +346,7 @@ impl HashMapinfo {
             map60: 0,
             map1: 0,
             map0: 0,
+            globalmismatch: 0,
             secondary: 0,
             supplementary: 0,
             overlaps: 0,
@@ -657,8 +664,20 @@ fn main() {
                 };
                 let aligned: Vec<RangeInclusive<i64>> =
                     p.aligned_blocks().map(|[a, b]| a..=b).collect();
+                let globalmismatch = match (args.totalread, p.aux(b"NM")) {
+                    (true, Ok(rust_htslib::bam::record::Aux::U8(d))) => d,
+                    _ => 0,
+                };
+                let globalmismatch = if globalmismatch > 0 {
+                    (globalmismatch as usize * 10_000usize) / p.seq_len()
+                } else {
+                    0
+                };
                 for (i, targeting) in pos.range_mut(newrange.clone()) {
                     let _time = Instant::now();
+                    if globalmismatch > 0 {
+                        targeting.globalmismatch += globalmismatch;
+                    }
                     match p.mapq() {
                         0 => targeting.map0 += 1,
                         1..=59 => targeting.map1 += 1,
@@ -885,6 +904,7 @@ fn genelist(
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
         reader.fetch((&gene.chromosome, gene.start - 1, gene.end))?;
         let records = reader.records();
+        //Hash contains 1-based positions
         let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
         range.clone().into_iter().for_each(|p| {
             hash.insert(p, Posread::default());
@@ -1116,7 +1136,10 @@ fn genegraph<T>(
         .right_y_label_area_size(40)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption(
-            format!("Reads alignment for {} ({}-{})", genename, loci.haplotype,gene.strand),
+            format!(
+                "Reads alignment for {} ({}-{})",
+                genename, loci.haplotype, gene.strand
+            ),
             ("sans-serif", 22),
         )
         .build_cartesian_2d(1..hash.len(), 0..max)
@@ -1124,7 +1147,7 @@ fn genegraph<T>(
     //Reverse complement genes
     let hash: Vec<(&i64, &Posread)> = match gene.strand {
         Strand::Plus => hash.iter().collect(),
-        Strand::Minus => hash.iter().rev().collect()
+        Strand::Minus => hash.iter().rev().collect(),
     };
     //Enumerate to get position relative to the gene (+1 because 0-related)
     chart
@@ -1339,7 +1362,15 @@ fn mismatchgraph<T>(
     T: DrawingBackend,
 {
     let _ = root.fill(&plotters::prelude::WHITE);
-    let mut chart = ChartBuilder::on(&root)
+    let text_style = ("sans-serif", 14, &BLACK).into_text_style(&root);
+    let (top, bottom) = match args.totalread {
+        true => {
+            let (top, bottom) = root.split_vertically((50).percent_height());
+            (top, Some(bottom))
+        }
+        false => (root.clone(), None),
+    };
+    let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
@@ -1429,6 +1460,56 @@ fn mismatchgraph<T>(
         .border_style(BLACK.mix(0.8))
         .draw()
         .unwrap();
+    //Bottom graph
+    if let Some(bottom) = bottom {
+        let max = pos
+            .iter()
+            .map(|(_, p)| p.globalmismatch / max(1, p.map0 + p.map1 + p.map60) as usize)
+            .max()
+            .unwrap();
+        let mut chart = ChartBuilder::on(&bottom)
+            .set_label_area_size(LabelAreaPosition::Left, 60)
+            .set_label_area_size(LabelAreaPosition::Bottom, 60)
+            .right_y_label_area_size(60)
+            /*.caption(
+                format!(
+                    "Break in coverage {} ({})",
+                    loci.locus, loci.contig
+                ),
+                ("sans-serif", 40),
+            )  */
+            .build_cartesian_2d(loci.start..loci.end, 0.0..max as f64 * 1.1 / 10_000.0)
+            .unwrap();
+        let _ = chart
+            .configure_mesh()
+            .y_label_formatter(&|f| format!("{}%", (f * 10_000.0).round() / 100.0))
+            .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
+            .x_desc("Genomic position (bp)")
+            .y_desc("Mismatch full rate (%)")
+            .x_label_style(text_style)
+            .disable_x_mesh()
+            .y_max_light_lines(2)
+            .draw();
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(full_palette::DEEPORANGE_200.mix(0.8).filled())
+                    .margin(0)
+                    .data(pos.iter().map(|p| {
+                        (
+                            *p.0 + 1,
+                            ((p.1.globalmismatch as f64
+                                / (p.1.map0 + p.1.map1 + p.1.map60) as f64)
+                                / 10_000f64),
+                        )
+                    })),
+            )
+            .unwrap()
+            .label("Mismatch full rate (%)")
+            .legend(|(x, y)| {
+                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPORANGE_200)
+            });
+    }
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
