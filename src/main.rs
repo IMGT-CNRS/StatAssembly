@@ -106,7 +106,7 @@ struct Posread {
     indel: usize,
     total: usize,
 }
-/* 
+/*
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Position {
     zbased: bool,
@@ -241,6 +241,14 @@ impl<'de> Deserialize<'de> for Strand {
         }
     }
 }
+impl Display for Strand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plus => write!(f,"FWD"),
+            Self::Minus => write!(f,"RVD")
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 struct GeneInfosFinish {
     gene: String,
@@ -342,7 +350,7 @@ impl HashMapinfo {
     }
 }
 
-fn getreaderoffile(args: &Args) -> Result<IndexedReader,rust_htslib::errors::Error> {
+fn getreaderoffile(args: &Args) -> Result<IndexedReader, rust_htslib::errors::Error> {
     let mut reader = match &args.index {
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
         None => bam::IndexedReader::from_path(&args.file),
@@ -369,9 +377,12 @@ fn main() {
         .delimiter(b'\t')
         .from_path(&args.locuspos);
     let mut csv = match csv {
-        Ok(c)=> c,
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("CSV file of location position cannot be found. Error is {}",e);
+            eprintln!(
+                "CSV file of location position cannot be found. Error is {}",
+                e
+            );
             return;
         }
     };
@@ -400,7 +411,11 @@ fn main() {
             match std::fs::create_dir(&args.outdir) {
                 Ok(_) => (),
                 Err(e) => {
-                    eprintln!("Cannot create folder {}. Error is {}",&args.outdir.display(),e);
+                    eprintln!(
+                        "Cannot create folder {}. Error is {}",
+                        &args.outdir.display(),
+                        e
+                    );
                     return;
                 }
             };
@@ -558,24 +573,23 @@ fn main() {
             let mut reader = match getreaderoffile(&args) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("Cannot read bam file. Error is {}. Exiting",e);
+                    eprintln!("Cannot read bam file. Error is {}. Exiting", e);
                     return;
                 }
             };
             //0-based
-            match reader
-                .fetch((&loci.contig, loci.start - 1, loci.end + 1)) {
-                    Ok(_) => (),
-                    Err(_) => {
-                        eprintln!(
-                            "The region {}:{}-{} cannot be found, exiting.",
-                            loci.contig,
-                            loci.start - 1,
-                            loci.end + 1
-                        );
-                        return;
-                    }
-                };
+            match reader.fetch((&loci.contig, loci.start - 1, loci.end + 1)) {
+                Ok(_) => (),
+                Err(_) => {
+                    eprintln!(
+                        "The region {}:{}-{} cannot be found, exiting.",
+                        loci.contig,
+                        loci.start - 1,
+                        loci.end + 1
+                    );
+                    return;
+                }
+            };
             let mut nocount = true;
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
             //let file = File::create(&filename).unwrap();
@@ -651,12 +665,12 @@ fn main() {
                         60 => targeting.map60 += 1,
                         _ => {
                             eprintln!(
-                            "MAPQ score is invalid. Got {} for {}",
-                            p.mapq(),
-                            String::from_utf8_lossy(p.qname())
+                                "MAPQ score is invalid. Got {} for {}",
+                                p.mapq(),
+                                String::from_utf8_lossy(p.qname())
                             );
                             return;
-                        },
+                        }
                     };
                     if i % sep == 0 {
                         //Get quality of reads depending on genomic position
@@ -719,7 +733,7 @@ fn main() {
                         readgraphtop.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}",e);
+                        eprintln!("Cannot create read graph. Error is {}", e);
                         return;
                     }
                     mismatchgraph(
@@ -739,7 +753,7 @@ fn main() {
                         readgraphbottom.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}",e);
+                        eprintln!("Cannot create read graph. Error is {}", e);
                         return;
                     }
                     mismatchgraph(
@@ -759,7 +773,7 @@ fn main() {
                         readgraphtop2.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}",e);
+                        eprintln!("Cannot create read graph. Error is {}", e);
                         return;
                     }
                     mismatchgraph(
@@ -779,7 +793,7 @@ fn main() {
                         readgraphbottom2.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}",e);
+                        eprintln!("Cannot create read graph. Error is {}", e);
                         return;
                     }
                     mismatchgraph(
@@ -793,25 +807,31 @@ fn main() {
             }
             //Create CSV from HashMap
             if let Err(e) = createcsv(outputdir, loci, &pos, &args) {
-                eprintln!("Cannot create csv file. Error is {}",e);
-                        return;
+                eprintln!("Cannot create csv file. Error is {}", e);
+                return;
             }
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
                 if let Err(e) = genelist(outputdir, loci, &args) {
-                    eprintln!("Cannot create gene list. Error is {}",e);
-                            return;
+                    eprintln!("Cannot create gene list. Error is {}", e);
+                    return;
                 }
                 println!("Gene list finished");
             } else {
-                eprintln!("You have not provided a gene list, skipped. Provide one to get more datas.");
+                eprintln!(
+                    "You have not provided a gene list, skipped. Provide one to get more datas."
+                );
             }
         }
         println!("Locus {} is done!", &floci.locus);
     }
 }
-fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn genelist(
+    outputdir: &std::path::Path,
+    loci: &LocusInfos,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         &args.species,
         &loci.locus,
@@ -831,7 +851,9 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Resu
         let record = match record {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
+                eprintln!(
+                    "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive"
+                );
                 return Err(Box::new(e));
             }
         };
@@ -839,7 +861,10 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Resu
     }
     if genes.is_empty() {
         eprintln!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "csv error")));
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "csv error",
+        )));
     }
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
@@ -857,9 +882,8 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Resu
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
         let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
-        //Add +1 because 0-based
-        reader
-            .fetch((&gene.chromosome, gene.start + 1, gene.end + 1))?;
+        //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
+        reader.fetch((&gene.chromosome, gene.start - 1, gene.end))?;
         let records = reader.records();
         let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
         range.clone().into_iter().for_each(|p| {
@@ -928,6 +952,27 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Resu
         }
         if empty {
             writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
+            //PUT 0 value on the CSV
+            let elem = GeneInfosFinish {
+                gene: gene.gene,
+                chromosome: gene.chromosome,
+                strand: gene.strand,
+                start: gene.start,
+                end: gene.end,
+                length: gene
+                    .end
+                    .checked_sub(gene.start)
+                    .unwrap()
+                    .checked_add(1)
+                    .unwrap(), //Calculate the length
+                reads,
+                matchpos: String::from("0"),
+                reads100,
+                reads100m,
+                coverageperc: 0.0,
+                coveragex: 0,
+            };
+            finale.push(elem);
             continue;
         }
         //Coverage calculus
@@ -936,15 +981,26 @@ fn genelist(outputdir: &std::path::Path, loci: &LocusInfos, args: &Args) -> Resu
             .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap())
             .count();
         //Merging data
-        let text = hash.iter().fold(String::new(), |mut acc, (_, f)| {
-            acc.push_str(&format!(
-                "{}/{}(={})-",
-                f.getindel(),
-                f.gettotal(),
-                f.getmatch()
-            ));
-            acc
-        });
+        let text = match gene.strand {
+            Strand::Plus => hash.iter().fold(String::new(), |mut acc, (_, f)| {
+                acc.push_str(&format!(
+                    "{}/{}(={})-",
+                    f.getindel(),
+                    f.gettotal(),
+                    f.getmatch()
+                ));
+                acc
+            }),
+            Strand::Minus => hash.iter().rev().fold(String::new(), |mut acc, (_, f)| {
+                acc.push_str(&format!(
+                    "{}/{}(={})-",
+                    f.getindel(),
+                    f.gettotal(),
+                    f.getmatch()
+                ));
+                acc
+            }),
+        };
         let text = String::from(text.trim_end_matches('-'));
         let genename = gene.gene.clone();
         let plots = outputdir
@@ -1060,11 +1116,16 @@ fn genegraph<T>(
         .right_y_label_area_size(40)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption(
-            format!("Reads alignment for {} ({})", genename, loci.haplotype),
+            format!("Reads alignment for {} ({}-{})", genename, loci.haplotype,gene.strand),
             ("sans-serif", 22),
         )
         .build_cartesian_2d(1..hash.len(), 0..max)
         .unwrap();
+    //Reverse complement genes
+    let hash: Vec<(&i64, &Posread)> = match gene.strand {
+        Strand::Plus => hash.iter().collect(),
+        Strand::Minus => hash.iter().rev().collect()
+    };
     //Enumerate to get position relative to the gene (+1 because 0-related)
     chart
         .draw_series(LineSeries::new(
@@ -1289,24 +1350,28 @@ fn mismatchgraph<T>(
             ),
             ("sans-serif", 28),
         )
-        .build_cartesian_2d(loci.start..loci.end, 0..100).unwrap();
+        .build_cartesian_2d(loci.start..loci.end, 0..100)
+        .unwrap();
     if !args.force {
-    chart
-        .draw_series(
-            Histogram::vertical(&chart)
-                .style(full_palette::DEEPPURPLE_200.mix(0.8).filled())
-                .margin(0)
-                .data(pos.iter().map(|p| {
-                    (
-                        *p.0 + 1,
-                        (p.1.mismatches as f64 / (p.1.map0 + p.1.map1 + p.1.map60) as f64 * 100.0)
-                            .round() as i32,
-                    )
-                })),
-        )
-        .unwrap()
-        .label("Mismatches (%)")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_200));
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(full_palette::DEEPPURPLE_200.mix(0.8).filled())
+                    .margin(0)
+                    .data(pos.iter().map(|p| {
+                        (
+                            *p.0 + 1,
+                            (p.1.mismatches as f64 / (p.1.map0 + p.1.map1 + p.1.map60) as f64
+                                * 100.0)
+                                .round() as i32,
+                        )
+                    })),
+            )
+            .unwrap()
+            .label("Mismatches (%)")
+            .legend(|(x, y)| {
+                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_200)
+            });
     }
     chart
         .draw_series(
@@ -1373,7 +1438,8 @@ fn readgraph<T>(
     pos: &BTreeMap<i64, HashMapinfo>,
     args: &Args,
     root: DrawingArea<T, Shift>,
-) -> Result<(), Box<dyn std::error::Error>> where
+) -> Result<(), Box<dyn std::error::Error>>
+where
     T: DrawingBackend,
 {
     let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
