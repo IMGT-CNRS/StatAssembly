@@ -19,6 +19,7 @@ itertools = "0.14.0"
 #noodles-fasta = "0.46.0"
 num-format = "0.4.4"
 openssl-sys = { version = "0.9.104", features = ["vendored"] }
+ordered-float = "4.6.0"
 plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
 ranges = "0.4.0"
 rust-htslib = { git = "ssh://git@github.com/DorianCoding/bamanalysis.git", branch="master", features = ["bzip2","curl","lzma","static"] }
