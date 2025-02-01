@@ -12,7 +12,6 @@ use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
-use itertools::Itertools;
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
@@ -56,7 +55,7 @@ struct Args {
     /// Index file if not default
     #[arg(short, long)]
     index: Option<PathBuf>,
-    ///CSV containing locus infos
+    ///CSV containing locus infos. See example file for blueprint.
     #[arg(short, long)]
     locuspos: PathBuf,
     /// Minimal number of reads (included) to declare a break in coverage
@@ -69,10 +68,10 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     minreads: u32,
     /// Percent warning position for mismatch reads (included)
-    #[arg(long, default_value_t = 80)]
+    #[arg(long, default_value_t = 80, value_parser=less_than_100)]
     percentwarning: u8,
     /// Percent warning position for mismatch reads (included)
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 60, value_parser=less_than_100)]
     percentalerting: u8,
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
@@ -86,12 +85,18 @@ struct Args {
     ///Species
     #[arg(short, long)]
     species: String,
-    ///Gene location (csv file)
+    ///Gene location (csv file). See example file for blueprint.
     #[arg(short, long)]
     geneloc: Option<PathBuf>,
-    ///Output directory
+    ///Output directory (create or overwritten)
     #[arg(short, long)]
     outdir: PathBuf,
+}
+fn less_than_100(s: &str) -> Result<u8, String> {
+    match s.parse::<u8>() {
+        Ok(s) if (0..=100).contains(&s) => Ok(s),
+        _ => Err(String::from("Bad number, must be between 0 and 100.")),
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
@@ -369,12 +374,58 @@ fn getreaderoffile(args: &Args) -> Result<IndexedReader, rust_htslib::errors::Er
     reader.set_threads(threads.get()).unwrap();
     Ok(reader)
 }
+fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
+    locus.sort_unstable_by(|a, b| a.locus.to_string().cmp(&b.locus.to_string()));
+    let mut elem: Vec<Vec<LocusInfos>> = Vec::with_capacity(locus.len());
+    let mut alternate = false;
+    let mut actual: Vec<LocusInfos> = Vec::new();
+    for loci in locus {
+        match elem
+            .iter()
+            .find(|p| p.iter().any(|f| f.locus == loci.locus))
+        {
+            Some(d) if d != elem.last().unwrap() => {
+                eprintln!("Locus {} is splited! Aborted.",loci.locus);
+                return None;
+            }
+            _ => (),
+        };
+        if !loci.haplotype.isprimary() {
+            if actual.is_empty() {
+                eprintln!("Empty without a corresponding primary!");
+                return None;
+            } else {
+                alternate = true;
+            }
+        }
+        match actual.first() {
+            Some(e) if e.locus == loci.locus && alternate && actual.len() >= 2 => {
+                eprintln!("Only one alternate is allowed!");
+                return None;
+            }
+            Some(e) if e.locus == loci.locus && alternate => actual.push(loci),
+            Some(e) if e.locus != loci.locus && !loci.haplotype.isprimary() => {
+                eprintln!("Alternate without a corresponding primary!");
+                return None;
+            }
+            _ => {
+                if !actual.is_empty() {
+                    elem.push(actual.clone())
+                };
+                actual.clear();
+                actual.push(loci);
+                alternate = false;
+            }
+        }
+    }
+    if !actual.is_empty() {
+        elem.push(actual)
+    };
+    Some(elem)
+}
 fn main() {
     let args = Args::parse();
-    if args.percentalerting > 100 || args.percentwarning > 100 {
-        eprintln!("Percent of warning and alerting cannot be above 100.");
-        return;
-    } else if args.percentalerting >= args.percentwarning {
+    if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater than percent alerting.");
         return;
     }
@@ -408,8 +459,22 @@ fn main() {
         eprintln!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
         return;
     }
+    //Check bam file exists
+    let _ = match getreaderoffile(&args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Cannot read bam file. Error is {}. Exiting.", e);
+            return;
+        }
+    };
     let outputdir = match args.outdir.is_dir() {
-        true => &args.outdir,
+        true => {
+            eprintln!(
+                "Output folder exists: {}. Will be overwritten.",
+                &args.outdir.display()
+            );
+            &args.outdir
+        }
         false => {
             eprintln!(
                 "Folder {} does not exist, attempt to create.",
@@ -429,13 +494,15 @@ fn main() {
             &args.outdir
         }
     };
-    locus.sort_unstable_by(|a, b| match a.locus.to_string().cmp(&b.locus.to_string()) {
-        std::cmp::Ordering::Equal => a.haplotype.cmp(&b.haplotype),
-        o => o,
-    });
     //Group between primary and alternate
-    let grouped = locus.into_iter().into_group_map_by(|f| f.locus.to_string());
-    for (_, locus) in grouped {
+    let grouped = match mergelocus(locus) {
+        Some(g) => g,
+        None => {
+            eprintln!("Check order of loci as well in the file.");
+            return;
+        }
+    };
+    for locus in grouped {
         let floci = locus.first().unwrap();
         let haplotype = locus.len();
         if haplotype > 2 {
@@ -1509,12 +1576,13 @@ fn mismatchgraph<T>(
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPORANGE_200)
             });
-        chart.configure_series_labels()
-        .position(plotters::chart::SeriesLabelPosition::UpperRight)
-        .background_style(WHITE)
-        .border_style(BLACK.mix(0.8))
-        .draw()
-        .unwrap();
+        chart
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperRight)
+            .background_style(WHITE)
+            .border_style(BLACK.mix(0.8))
+            .draw()
+            .unwrap();
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
