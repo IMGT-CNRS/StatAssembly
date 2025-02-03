@@ -1123,7 +1123,7 @@ fn genelist(
             matchpos: text,
             reads100,
             reads100m,
-            coverageperc: ((coverageperc / reads / range.into_iter().count()) as f32 * 1_000.0)
+            coverageperc: ((coverageperc * 1_000 / reads / range.into_iter().count()) as f32)
                 .round()
                 / 1000.0,
             coveragex: coverage,
