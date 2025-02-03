@@ -311,6 +311,9 @@ impl HashMapinfo {
         ];
         *elem.iter().max().unwrap()
     }
+    fn gettotalmap(&self) -> i64 {
+        self.map0 + self.map1 + self.map60
+    }
 }
 impl PartialOrd for HashMapinfo {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -801,7 +804,7 @@ fn main() {
             //Quality is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
                 p.qual /= max(
-                    std::convert::TryInto::<usize>::try_into(p.map0 + p.map1 + p.map60).unwrap(),
+                    std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
                     1,
                 )
             });
@@ -1462,10 +1465,9 @@ fn mismatchgraph<T>(
         chart
             .draw_series(AreaSeries::new(
                 pos.iter().filter_map(|p| {
-                    let val = (p.1.mismatches as f64 * 100.0
-                        / max(1, p.1.map0 + p.1.map1 + p.1.map60) as f64)
-                        .round() as i32;
-                    if val > 0 {
+                    let val: i32 = (p.1.mismatches * 100
+                        / max(1, p.1.gettotalmap())) as i32;
+                    if val > 0 && p.1.gettotalmap() > 0 {
                         Some((*p.0 + 1, val))
                     } else {
                         None
@@ -1483,10 +1485,9 @@ fn mismatchgraph<T>(
     chart
         .draw_series(AreaSeries::new(
             pos.iter().filter_map(|p| {
-                let val = (p.1.misalign as f64 * 100.0
-                    / max(1, p.1.map0 + p.1.map1 + p.1.map60) as f64)
-                    .round() as i32;
-                if val > 0 {
+                let val = (p.1.misalign * 100
+                    / max(1, p.1.gettotalmap())) as i32;
+                if val > 0 && p.1.gettotalmap() > 0 {
                     Some((*p.0 + 1, val))
                 } else {
                     None
@@ -1542,7 +1543,7 @@ fn mismatchgraph<T>(
     if let Some(bottom) = bottom {
         let max = pos
             .iter()
-            .map(|(_, p)| p.globalmismatch / max(1, p.map0 + p.map1 + p.map60) as usize)
+            .map(|(_, p)| p.globalmismatch / max(1, p.gettotalmap()) as usize)
             .max()
             .unwrap();
         let mut chart = ChartBuilder::on(&bottom)
@@ -1575,9 +1576,9 @@ fn mismatchgraph<T>(
                     .margin(0)
                     .data(pos.iter().filter_map(|p| {
                         let score = p.1.globalmismatch as f64
-                            / (std::cmp::max(1,p.1.map0 + p.1.map1 + p.1.map60) as f64)
+                            / (std::cmp::max(1,p.1.gettotalmap()) as f64)
                             / 10_000f64;
-                        if score.is_finite() && score != 0.0 {
+                        if score.is_finite() && score != 0.0 && p.1.gettotalmap() > 0 {
                         Some((
                             *p.0 + 1,
                             score
@@ -1613,7 +1614,7 @@ fn readgraph<T>(
 where
     T: DrawingBackend,
 {
-    let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
+    let max = pos.values().map(|max| max.gettotalmap()).max().unwrap() + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let mut chart = ChartBuilder::on(&top)
