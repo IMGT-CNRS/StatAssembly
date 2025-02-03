@@ -924,21 +924,13 @@ fn genelist(
     loci: &LocusInfos,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let outputfile = outputdir.join(givename(
-        &args.species,
-        &loci.locus,
-        &loci.contig,
-        loci.haplotype.isprimary(),
-        "geneanalysis.csv",
-        false,
-    ));
+    let mut genes: Vec<GeneInfos> = Vec::new();
     let mut lock: std::io::StderrLock<'_> = stderr().lock();
     let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b',')
         .from_path(args.geneloc.as_ref().unwrap())?;
-    let mut genes: Vec<GeneInfos> = Vec::new();
     for record in csv.deserialize() {
         let record = match record {
             Ok(r) => r,
@@ -958,16 +950,27 @@ fn genelist(
             "csv error",
         )));
     }
+    genes.retain(|gene| {
+        gene.chromosome == loci.contig
+        && (loci.start..=loci.end).contains(&gene.start)
+        && (loci.start..=loci.end).contains(&gene.end)
+    });
+    if genes.is_empty() {
+        println!("No gene identified for locus {}",loci.locus);
+        return Ok(());
+    }
+    let outputfile = outputdir.join(givename(
+        &args.species,
+        &loci.locus,
+        &loci.contig,
+        loci.haplotype.isprimary(),
+        "geneanalysis.csv",
+        false,
+    ));
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
     let mut alertingpositions: HashMap<GeneInfos, Vec<(bool, usize)>> = HashMap::new();
     for mut gene in genes {
-        if gene.chromosome != loci.contig
-            || !(loci.start..=loci.end).contains(&gene.start)
-            || !(loci.start..=loci.end).contains(&gene.end)
-        {
-            continue; //gene not on this loci
-        }
         let mut reader = getreaderoffile(args)?;
         let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
         if gene.start > gene.end {
