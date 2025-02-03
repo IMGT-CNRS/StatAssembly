@@ -12,6 +12,8 @@ use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
+use extended_hstlib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
+use extended_hstlib::bam::{self, IndexedReader, Read};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
@@ -20,8 +22,6 @@ use plotters::prelude::{
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
-use rust_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
-use rust_htslib::bam::{self, IndexedReader, Read};
 use serde::{de, Deserialize, Serialize};
 use std::{
     cmp::{max, min},
@@ -365,7 +365,7 @@ impl HashMapinfo {
     }
 }
 
-fn getreaderoffile(args: &Args) -> Result<IndexedReader, rust_htslib::errors::Error> {
+fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_hstlib::errors::Error> {
     let mut reader = match &args.index {
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
         None => bam::IndexedReader::from_path(&args.file),
@@ -388,7 +388,7 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
             .find(|p| p.iter().any(|f| f.locus == loci.locus))
         {
             Some(d) if d != elem.last().unwrap() => {
-                eprintln!("Locus {} is splited! Aborted.",loci.locus);
+                eprintln!("Locus {} is splited! Aborted.", loci.locus);
                 return None;
             }
             _ => (),
@@ -738,7 +738,7 @@ fn main() {
                 let aligned: Vec<RangeInclusive<i64>> =
                     p.aligned_blocks().map(|[a, b]| a..=b).collect();
                 let globalmismatch = match (args.totalread, p.aux(b"NM")) {
-                    (true, Ok(rust_htslib::bam::record::Aux::U8(d))) => d,
+                    (true, Ok(extended_hstlib::bam::record::Aux::U8(d))) => d,
                     _ => 0,
                 };
                 let globalmismatch = if globalmismatch > 0 {
@@ -984,10 +984,9 @@ fn genelist(
         });
         let mut coverageperc = 0;
         let mut empty = true;
-        for record in records
-            .filter_map(Result::ok)
-            .filter(|p| !(p.is_secondary() || p.is_supplementary() || (args.forward && p.is_reverse())))
-        {
+        for record in records.filter_map(Result::ok).filter(|p| {
+            !(p.is_secondary() || p.is_supplementary() || (args.forward && p.is_reverse()))
+        }) {
             empty = false;
             reads += 1;
             let range = record.reference_start() + 1..record.reference_end() + 1;
@@ -1458,19 +1457,20 @@ fn mismatchgraph<T>(
         .unwrap();
     if !args.force {
         chart
-            .draw_series(
-                Histogram::vertical(&chart)
-                    .style(full_palette::DEEPPURPLE_200.mix(0.8).filled())
-                    .margin(0)
-                    .data(pos.iter().map(|p| {
-                        (
-                            *p.0 + 1,
-                            (p.1.mismatches as f64 / (p.1.map0 + p.1.map1 + p.1.map60) as f64
-                                * 100.0)
-                                .round() as i32,
-                        )
-                    })),
-            )
+            .draw_series(AreaSeries::new(
+                pos.iter().filter_map(|p| {
+                    let val = (p.1.mismatches as f64 * 100.0
+                        / max(1, p.1.map0 + p.1.map1 + p.1.map60) as f64)
+                        .round() as i32;
+                    if val > 0 {
+                        Some((*p.0 + 1, val))
+                    } else {
+                        None
+                    }
+                }),
+                0,
+                full_palette::DEEPPURPLE_200.mix(0.6),
+            ))
             .unwrap()
             .label("Mismatches (%)")
             .legend(|(x, y)| {
@@ -1478,18 +1478,20 @@ fn mismatchgraph<T>(
             });
     }
     chart
-        .draw_series(
-            Histogram::vertical(&chart)
-                .style(full_palette::RED_400.mix(0.8).filled())
-                .margin(0)
-                .data(pos.iter().map(|p| {
-                    (
-                        *p.0 + 1,
-                        (p.1.misalign as f64 / (p.1.map0 + p.1.map1 + p.1.map60) as f64 * 100.0)
-                            .round() as i32,
-                    )
-                })),
-        )
+        .draw_series(AreaSeries::new(
+            pos.iter().filter_map(|p| {
+                let val = (p.1.misalign as f64 * 100.0
+                    / max(1, p.1.map0 + p.1.map1 + p.1.map60) as f64)
+                    .round() as i32;
+                if val > 0 {
+                    Some((*p.0 + 1, val))
+                } else {
+                    None
+                }
+            }),
+            0,
+            full_palette::RED_400.mix(0.6),
+        ))
         .unwrap()
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
@@ -1568,13 +1570,18 @@ fn mismatchgraph<T>(
                 Histogram::vertical(&chart)
                     .style(full_palette::DEEPORANGE_200.mix(0.8).filled())
                     .margin(0)
-                    .data(pos.iter().map(|p| {
-                        (
+                    .data(pos.iter().filter_map(|p| {
+                        let score = p.1.globalmismatch as f64
+                            / (std::cmp::max(1,p.1.map0 + p.1.map1 + p.1.map60) as f64)
+                            / 10_000f64;
+                        if score.is_finite() && score != 0.0 {
+                        Some((
                             *p.0 + 1,
-                            ((p.1.globalmismatch as f64
-                                / (p.1.map0 + p.1.map1 + p.1.map60) as f64)
-                                / 10_000f64),
-                        )
+                            score
+                        ))
+                    } else {
+                        None
+                    }
                     })),
             )
             .unwrap()
