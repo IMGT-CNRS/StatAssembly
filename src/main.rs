@@ -76,6 +76,9 @@ struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     force: bool,
+    /// Only forward strand
+    #[arg(long)]
+    forward: bool,
     /// Calculate total reads mismatch
     #[arg(long)]
     totalread: bool,
@@ -678,6 +681,9 @@ fn main() {
             let time = Instant::now();
             let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
             for p in reader.rc_records().filter_map(Result::ok) {
+                if args.forward && p.is_reverse() {
+                    continue;
+                }
                 count += 1;
                 //Print every 100 reads done
                 if count % 100 == 0 {
@@ -980,7 +986,7 @@ fn genelist(
         let mut empty = true;
         for record in records
             .filter_map(Result::ok)
-            .filter(|p| !p.is_secondary() && !p.is_supplementary())
+            .filter(|p| !(p.is_secondary() || p.is_supplementary() || (args.forward && p.is_reverse())))
         {
             empty = false;
             reads += 1;
