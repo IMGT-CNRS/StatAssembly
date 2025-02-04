@@ -79,6 +79,9 @@ struct Args {
     /// Only forward strand
     #[arg(long)]
     forward: bool,
+    /// Query full quality
+    #[arg(long)]
+    fullquality: bool,
     /// Calculate total reads mismatch
     #[arg(long)]
     totalread: bool,
@@ -288,6 +291,7 @@ struct HashMapinfo {
     map60: i64,
     map1: i64,
     map0: i64,
+    #[serde(serialize_with="globalmismatch")]
     globalmismatch: usize,
     overlaps: i64,
     secondary: i64,
@@ -299,6 +303,10 @@ struct HashMapinfo {
 }
 fn iszero(num: &usize) -> bool {
     *num == 0
+}
+fn globalmismatch<S>(num: &usize, s: S) -> Result<S::Ok, S::Error> where S: serde::Serializer {
+    let val = *num as f32 / 10_000.0;
+    s.collect_str(&format!("{}",val))
 }
 impl HashMapinfo {
     fn getmaxvalue(&self) -> i64 {
@@ -682,7 +690,11 @@ fn main() {
             println!("Region {} fetched, analyzing all reads.", loci.locus);
             let mut count = 0;
             let time = Instant::now();
-            let sep = max((loci.end - loci.start + 1) / 250, 100); //250 points for quality point
+            let sep = if args.fullquality {
+                1
+            } else {
+                max((loci.end - loci.start + 1) / 250, 100) //250 points for quality point
+            };
             for p in reader.rc_records().filter_map(Result::ok) {
                 if args.forward && p.is_reverse() {
                     continue;
@@ -803,10 +815,13 @@ fn main() {
             }
             //Quality is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
+                if p.qual > 0 {
                 p.qual /= max(
                     std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
                     1,
                 )
+            }
+            p.globalmismatch /= max(std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),1);
             });
             if nocount {
                 eprintln!(
@@ -955,11 +970,11 @@ fn genelist(
     }
     genes.retain(|gene| {
         gene.chromosome == loci.contig
-        && (loci.start..=loci.end).contains(&gene.start)
-        && (loci.start..=loci.end).contains(&gene.end)
+            && (loci.start..=loci.end).contains(&gene.start)
+            && (loci.start..=loci.end).contains(&gene.end)
     });
     if genes.is_empty() {
-        println!("No gene identified for locus {}",loci.locus);
+        println!("No gene identified for locus {}", loci.locus);
         return Ok(());
     }
     let outputfile = outputdir.join(givename(
@@ -979,9 +994,10 @@ fn genelist(
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        let range = ranges::Ranges::from(vec![gene.start..=gene.end]);
+        let genericrange = gene.start - 1..gene.end;
+        let range = ranges::Ranges::from(genericrange.clone());
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
-        reader.fetch((&gene.chromosome, gene.start - 1, gene.end))?;
+        reader.fetch((&gene.chromosome, genericrange.start, genericrange.end))?;
         let records = reader.records();
         //Hash contains 1-based positions
         let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
@@ -995,7 +1011,7 @@ fn genelist(
         }) {
             empty = false;
             reads += 1;
-            let range = record.reference_start() + 1..record.reference_end() + 1;
+            let range = record.reference_start()..record.reference_end();
             coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
             for p in range {
                 match hash.get_mut(&p) {
@@ -1271,7 +1287,7 @@ fn genegraph<T>(
                 Histogram::vertical(&chart)
                     .style(full_palette::ORANGE_300.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
-                        let pos = pos + 1;
+                        let pos1 = pos + 1;
                         let percent = if val.total > 0 {
                             val.r#match * 100 / val.total
                         } else {
@@ -1283,12 +1299,12 @@ fn genegraph<T>(
                                 && percent > usize::from(args.percentalerting))
                         {
                             match alerting.get_mut(gene) {
-                                Some(d) => d.push((false, pos)),
+                                Some(d) => d.push((false, pos1)),
                                 None => {
-                                    alerting.insert(gene.clone(), vec![(false, pos)]);
+                                    alerting.insert(gene.clone(), vec![(false, pos1)]);
                                 }
                             };
-                            Some((pos, max))
+                            Some((pos1, max))
                         } else {
                             None
                         }
@@ -1308,7 +1324,7 @@ fn genegraph<T>(
                 Histogram::vertical(&chart)
                     .style(full_palette::RED_400.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
-                        let pos = pos + 1;
+                        let pos1 = pos + 1;
                         let percent = if val.total > 0 {
                             val.r#match * 100 / val.total
                         } else {
@@ -1316,12 +1332,12 @@ fn genegraph<T>(
                         };
                         if percent <= args.percentalerting.into() {
                             match alerting.get_mut(gene) {
-                                Some(d) => d.push((true, pos)),
+                                Some(d) => d.push((true, pos1)),
                                 None => {
-                                    alerting.insert(gene.clone(), vec![(true, pos)]);
+                                    alerting.insert(gene.clone(), vec![(true, pos1)]);
                                 }
                             };
-                            Some((pos, max))
+                            Some((pos1, max))
                         } else {
                             None
                         }
@@ -1415,12 +1431,13 @@ fn createcsv(
         "map60",
         "map1",
         "map0",
+        "globalmismatch (could be uncomputed)",
         "overlaps",
         "secondary",
         "supplementary",
         "mismatches",
         "misalign",
-        "qual",
+        "qual (could be uncomputed)",
     ])?;
     for (pos, record) in pos.iter() {
         csv.write_field(format!("{}", pos.saturating_add(1)))?; //Add +1 because 0-based
@@ -1465,8 +1482,7 @@ fn mismatchgraph<T>(
         chart
             .draw_series(AreaSeries::new(
                 pos.iter().filter_map(|p| {
-                    let val: i32 = (p.1.mismatches * 100
-                        / max(1, p.1.gettotalmap())) as i32;
+                    let val: i32 = (p.1.mismatches * 100 / max(1, p.1.gettotalmap())) as i32;
                     if val > 0 && p.1.gettotalmap() > 0 {
                         Some((*p.0 + 1, val))
                     } else {
@@ -1485,8 +1501,7 @@ fn mismatchgraph<T>(
     chart
         .draw_series(AreaSeries::new(
             pos.iter().filter_map(|p| {
-                let val = (p.1.misalign * 100
-                    / max(1, p.1.gettotalmap())) as i32;
+                let val = (p.1.misalign * 100 / max(1, p.1.gettotalmap())) as i32;
                 if val > 0 && p.1.gettotalmap() > 0 {
                     Some((*p.0 + 1, val))
                 } else {
@@ -1542,8 +1557,7 @@ fn mismatchgraph<T>(
     //Bottom graph
     if let Some(bottom) = bottom {
         let max = pos
-            .iter()
-            .map(|(_, p)| p.globalmismatch / max(1, p.gettotalmap()) as usize)
+            .iter().map(|(_,f)| f.globalmismatch)
             .max()
             .unwrap();
         let mut chart = ChartBuilder::on(&bottom)
@@ -1576,16 +1590,12 @@ fn mismatchgraph<T>(
                     .margin(0)
                     .data(pos.iter().filter_map(|p| {
                         let score = p.1.globalmismatch as f64
-                            / (std::cmp::max(1,p.1.gettotalmap()) as f64)
                             / 10_000f64;
                         if score.is_finite() && score != 0.0 && p.1.gettotalmap() > 0 {
-                        Some((
-                            *p.0 + 1,
-                            score
-                        ))
-                    } else {
-                        None
-                    }
+                            Some((*p.0 + 1, score))
+                        } else {
+                            None
+                        }
                     })),
             )
             .unwrap()
