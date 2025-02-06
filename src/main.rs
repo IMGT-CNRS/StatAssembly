@@ -7,6 +7,7 @@ use clap::{crate_authors, Parser};
 use colors::full_palette::GREY_400;
 use plotters::coord::Shift;
 use std::collections::HashMap;
+use std::intrinsics::nearbyintf128;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
@@ -70,16 +71,16 @@ struct Args {
     /// Percent warning position for mismatch reads (included)
     #[arg(long, default_value_t = 80, value_parser=less_than_100)]
     percentwarning: u8,
-    /// Percent warning position for mismatch reads (included)
+    /// Percent alerting position for mismatch reads (included)
     #[arg(long, default_value_t = 60, value_parser=less_than_100)]
     percentalerting: u8,
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     force: bool,
-    /// Only forward strand
+    /// Only strand-specific alignments to reference
     #[arg(long)]
     forward: bool,
-    /// Query full quality
+    /// Query full quality (script will be longer to execute)
     #[arg(long)]
     fullquality: bool,
     /// Calculate total reads mismatch
@@ -94,7 +95,7 @@ struct Args {
     ///Gene location (csv file). See example file for blueprint.
     #[arg(short, long)]
     geneloc: Option<PathBuf>,
-    ///Output directory (create or overwritten)
+    ///Output directory (created or overwritten)
     #[arg(short, long)]
     outdir: PathBuf,
 }
@@ -475,7 +476,7 @@ fn main() {
     }
     //Check bam file exists
     let _ = match getreaderoffile(&args) {
-        Ok(r) => r,
+        Ok(_) => (),
         Err(e) => {
             eprintln!("Cannot read bam file. Error is {}. Exiting.", e);
             return;
@@ -813,6 +814,15 @@ fn main() {
                     }
                 }
             }
+            if nocount {
+                eprintln!(
+                    "The region {}:{}-{} cannot be found, exiting.",
+                    loci.contig,
+                    loci.start + 1,
+                    loci.end + 1
+                );
+                return;
+            }
             //Quality is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
                 if p.qual > 0 {
@@ -823,15 +833,6 @@ fn main() {
             }
             p.globalmismatch /= max(std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),1);
             });
-            if nocount {
-                eprintln!(
-                    "The region {}:{}-{} cannot be found, exiting.",
-                    loci.contig,
-                    loci.start + 1,
-                    loci.end + 1
-                );
-                return;
-            }
             println!("Making graphs");
             match (loci.haplotype.isprimary(), args.svg) {
                 (true, true) => {
@@ -1231,7 +1232,7 @@ fn genegraph<T>(
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption(
             format!(
-                "Reads alignment for {} ({}-{})",
+                "Reads coverage for {} ({}-{})",
                 genename, loci.haplotype, gene.strand
             ),
             ("sans-serif", 22),
@@ -1264,7 +1265,7 @@ fn genegraph<T>(
             full_palette::BLUE_400.mix(0.8).stroke_width(2),
         ))
         .unwrap()
-        .label("Total")
+        .label("Total reads")
         .legend(|(x, y)| {
             PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_400.mix(0.8))
         });
@@ -1278,7 +1279,7 @@ fn genegraph<T>(
                 full_palette::BLACK.mix(0.5).stroke_width(2),
             ))
             .unwrap()
-            .label("Sequence equal")
+            .label("Sequence align")
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK.mix(0.5))
             });
