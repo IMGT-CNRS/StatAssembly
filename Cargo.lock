@@ -485,7 +485,7 @@ checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
 [[package]]
 name = "extended-htslib"
 version = "0.1.0"
-source = "git+https://src.koda.cnrs.fr/imgt-igh/extended-rustlib.git#3d8e438c?branch=main#3d8e438cc72874097f547a537f0de593b10d4df5"
+source = "git+https://src.koda.cnrs.fr/imgt-igh/extended-rustlib.git?branch=main#3d8e438cc72874097f547a537f0de593b10d4df5"
 dependencies = [
  "bio-types",
  "byteorder",

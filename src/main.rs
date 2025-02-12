@@ -7,7 +7,6 @@ use clap::{crate_authors, Parser};
 use colors::full_palette::GREY_400;
 use plotters::coord::Shift;
 use std::collections::HashMap;
-use std::intrinsics::nearbyintf128;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
@@ -475,7 +474,7 @@ fn main() {
         return;
     }
     //Check bam file exists
-    let _ = match getreaderoffile(&args) {
+    match getreaderoffile(&args) {
         Ok(_) => (),
         Err(e) => {
             eprintln!("Cannot read bam file. Error is {}. Exiting.", e);
