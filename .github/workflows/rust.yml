@@ -43,6 +43,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Installer les dépendances
+      	if: runner.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get -y install \
