@@ -32,9 +32,10 @@ jobs:
           echo "ASSET=${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}" >> .env
 
       - name: Setup Rust
-        uses: rust-lang/setup-rust@v2
+        uses: actions-rs/toolchain@v1
         with:
-          rust-version: stable
+          profile: minimal
+          toolchain: stable
 
       - name: Build binary
         run: cargo build --verbose --release --target ${target}
