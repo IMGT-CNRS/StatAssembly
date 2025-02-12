@@ -1,8 +1,5 @@
 name: Release
 
-permissions:
-  contents: write
-
 on:
   workflow_dispatch:
     inputs:
@@ -10,12 +7,17 @@ on:
         description: 'Software version'
         required: true
       prerelease:
-        description: 'Software pre-release'
+        description: 'Pre-release?'
         required: false
         default: false
   push:
     tags:
       - v[0-9]+.*
+
+permissions:
+  contents: write
+  actions: read
+  id-token: write
 
 jobs:
   create-release:
@@ -42,8 +44,8 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Installer les dépendances
-      	if: runner.os == 'ubuntu-latest'
+      - name: Install dependencies
+        if: runner.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get -y install \
