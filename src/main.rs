@@ -13,8 +13,8 @@ use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
-use extended_hstlib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
-use extended_hstlib::bam::{self, IndexedReader, Read};
+use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
+use extended_htslib::bam::{self, IndexedReader, Read};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
@@ -377,7 +377,7 @@ impl HashMapinfo {
     }
 }
 
-fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_hstlib::errors::Error> {
+fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
     let mut reader = match &args.index {
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
         None => bam::IndexedReader::from_path(&args.file),
@@ -754,7 +754,7 @@ fn main() {
                 let aligned: Vec<RangeInclusive<i64>> =
                     p.aligned_blocks().map(|[a, b]| a..=b).collect();
                 let globalmismatch = match (args.totalread, p.aux(b"NM")) {
-                    (true, Ok(extended_hstlib::bam::record::Aux::U8(d))) => d,
+                    (true, Ok(extended_htslib::bam::record::Aux::U8(d))) => d,
                     _ => 0,
                 };
                 let globalmismatch = if globalmismatch > 0 {
