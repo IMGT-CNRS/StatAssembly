@@ -1,61 +1,57 @@
-name: IMGT_StatAssembly Build
+name: Release
+
+permissions:
+  contents: write
 
 on:
   push:
     tags:
-      - '*'
+      - v[0-9]+.*
 
 jobs:
-  build-and-upload:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # (optional) Path to changelog.
+          changelog: CHANGELOG.md
+          # (required) GitHub token for creating GitHub Releases.
+          token: ${{ secrets.TOKEN }}
+
+  upload-assets:
+    needs: create-release
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-apple-darrosn
-          - x86_64-pc-windows-gnu
-      fail-fast: false
-
-    runs-on: ubuntu-latest
-
-    env:
-      VERSION: ${{ github.event.release.tag }}
-      BINARY_NAME: IMGT_StatAssembly
-      FILE_EXTENSION: tar.gz
-
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set environment variables
-        run: |
-          echo "VERSION=${VERSION}" >> .env
-          echo "ASSET=${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}" >> .env
-
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: taiki-e/upload-rust-binary-action@v1
         with:
-          profile: minimal
-          toolchain: stable
-
-      - name: Build binary
-        run: cargo build --verbose --release --target ${target}
-
-      - name: Prepare artifact
-        run: |
-          mkdir "${BINARY_NAME}-${VERSION}-${target}"
-          mv "target/${target}/release/${BINARY_NAME}" "${BINARY_NAME}-${VERSION}-${target}"
-
-      - name: Package artifact
-        run: |
-          if [[ "${target}" == *"windows"* ]]; then
-              zip -r "${BINARY_NAME}-${VERSION}-${target}.zip" "${BINARY_NAME}-${VERSION}-${target}"
-              echo "FILE_EXTENSION=zip" >> .env
-          else
-              tar -czf "${BINARY_NAME}-${VERSION}-${target}.tar.gz" "${BINARY_NAME}-${VERSION}-${target}"
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: "${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}"
-          path: "${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}"
+          # (required) Comma-separated list of binary names (non-extension portion of filename) to build and upload.
+          # Note that glob pattern is not supported yet.
+          bin: ...
+          # (optional) Target triple, default is host triple.
+          # This is optional but it is recommended that this always be set to
+          # clarify which target you are building for if macOS is included in
+          # the matrix because GitHub Actions changed the default architecture
+          # of macos-latest since macos-14.
+          target: ${{ matrix.target }}
+          # (optional) On which platform to distribute the `.tar.gz` file.
+          # [default value: unix]
+          # [possible values: all, unix, windows, none]
+          tar: unix
+          # (optional) On which platform to distribute the `.zip` file.
+          # [default value: windows]
+          # [possible values: all, unix, windows, none]
+          zip: windows
+          # (required) GitHub token for uploading assets to GitHub Releases.
+          token: ${{ secrets.GITHUB_TOKEN }}
