@@ -23,7 +23,7 @@ ordered-float = "4.6.0"
 plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
 ranges = "0.4.0"
 #extended-htslib = { version = "*", features = ["bzip2","curl","lzma","static"] }
-extended-htslib = { git = "https://src.koda.cnrs.fr/imgt-igh/extended-rustlib.git#3d8e438c", branch="main", features = ["bzip2","curl","lzma","static"] }
+extended-htslib = { git = "https://src.koda.cnrs.fr/imgt-igh/extended-rustlib.git", rev = "3d8e438c", branch="main", features = ["bzip2","curl","lzma","static"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }
 [lints.rust]
 unsafe_code = "deny"
