@@ -45,7 +45,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Setup OpenSSL
-        if: runner.os == 'windows-latest'
+        if: runner.os == 'windows'
         run: |
           # Download OpenSSL installer
           Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL_Light-3_0_10.msi" -OutFile openssl.msi
