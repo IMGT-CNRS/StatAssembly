@@ -44,6 +44,27 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
+    - name: Setup OpenSSL
+      if: runner.os == 'windows-latest'
+        run: |
+          # Download OpenSSL installer
+          Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL_Light-3_0_10.msi" -OutFile openssl.msi
+          
+          # Install OpenSSL silently
+          Start-Process -FilePath "msiexec.exe" -Args "/package openssl.msi /quiet" -Wait
+          
+          # Set environment variables
+          $env:OPENSSL_DIR = "C:\Program Files\OpenSSL-Win64"
+          $env:OPENSSL_NO_VENDOR = "1"
+          $env:RUSTFLAGS = "-Ctarget-feature=+crt-static"
+          
+          # Add OpenSSL bin directory to PATH
+          $env:PATH += ";$env:OPENSSL_DIR\bin"
+          
+          # Download root certificates
+          New-Item -ItemType Directory -Force -Path "$env:OPENSSL_DIR\certs"
+          Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile "$env:OPENSSL_DIR\certs\cacert.pem"
+          $env:SSL_CERT_FILE = "$env:OPENSSL_DIR\certs\cacert.pem"
       - name: Install dependencies
         if: runner.os == 'linux'
         run: |
