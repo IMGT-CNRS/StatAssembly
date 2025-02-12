@@ -1,0 +1,61 @@
+name: IMGT_StatAssembly Build
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-and-upload:
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-apple-darrosn
+          - x86_64-pc-windows-gnu
+      fail-fast: false
+
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: ${{ github.event.release.tag }}
+      BINARY_NAME: IMGT_StatAssembly
+      FILE_EXTENSION: tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment variables
+        run: |
+          echo "VERSION=${VERSION}" >> .env
+          echo "ASSET=${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}" >> .env
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+
+      - name: Build binary
+        run: cargo build --verbose --release --target ${target}
+
+      - name: Prepare artifact
+        run: |
+          mkdir "${BINARY_NAME}-${VERSION}-${target}"
+          mv "target/${target}/release/${BINARY_NAME}" "${BINARY_NAME}-${VERSION}-${target}"
+
+      - name: Package artifact
+        run: |
+          if [[ "${target}" == *"windows"* ]]; then
+              zip -r "${BINARY_NAME}-${VERSION}-${target}.zip" "${BINARY_NAME}-${VERSION}-${target}"
+              echo "FILE_EXTENSION=zip" >> .env
+          else
+              tar -czf "${BINARY_NAME}-${VERSION}-${target}.tar.gz" "${BINARY_NAME}-${VERSION}-${target}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}"
+          path: "${BINARY_NAME}-${VERSION}-${target}.${FILE_EXTENSION}"
