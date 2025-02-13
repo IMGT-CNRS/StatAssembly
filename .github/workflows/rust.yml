@@ -65,7 +65,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:OPENSSL_DIR\certs"
           Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile "$env:OPENSSL_DIR\certs\cacert.pem"
           $env:SSL_CERT_FILE = "$env:OPENSSL_DIR\certs\cacert.pem"
-      - name: Install dependencies
+    - name: Install dependencies
       if: runner.os == 'linux'
       run: |
           sudo apt-get update
@@ -75,11 +75,11 @@ jobs:
             libtiff-dev \
             libconfig++-dev \
             libconfig-dev
-      - uses: actions/checkout@v4
-      - uses: taiki-e/upload-rust-binary-action@v1
-        with:
-          bin: IMGT_StatAssembly
-          target: ${{ matrix.target }}
-          tar: unix
-          zip: windows
-          token: ${{ secrets.GITHUB_TOKEN }}
+    - uses: actions/checkout@v4
+    - uses: taiki-e/upload-rust-binary-action@v1
+      with:
+        bin: IMGT_StatAssembly
+        target: ${{ matrix.target }}
+        tar: unix
+        zip: windows
+        token: ${{ secrets.GITHUB_TOKEN }}
