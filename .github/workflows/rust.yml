@@ -52,7 +52,7 @@ jobs:
         vcpkg install openssl:x64-windows-static-md
         vcpkg integrate install
         set VCPKGRS_DYNAMIC=1
-        $env:OPENSSL_DIR:"<vcpkg>\installed\x64-windows-static"
+        $env:OPENSSL_DIR="<vcpkg>\installed\x64-windows-static"
     - name: Install dependencies
       if: runner.os == 'linux'
       run: |
