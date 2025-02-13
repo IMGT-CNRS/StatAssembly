@@ -48,12 +48,8 @@ jobs:
       if: runner.os == 'windows'
       shell: powershell
       run: |
-        echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-        vcpkg install openssl:x64-windows-static-md
-        vcpkg integrate install
-        set VCPKGRS_DYNAMIC=1
-        $env:OPENSSL_DIR="<vcpkg>\installed\x64-windows-static"
-        $env:OPENSSL_STATIC="true"
+        echo "PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        echo "OPENSSL_SRC_PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     - name: Install dependencies
       if: runner.os == 'linux'
       run: |
@@ -68,7 +64,9 @@ jobs:
     - uses: taiki-e/upload-rust-binary-action@v1
       with:
         bin: IMGT_StatAssembly
+        include: LICENSE,README.md
         target: ${{ matrix.target }}
+        archive: $bin-$tag-$target
         tar: unix
         zip: windows
         token: ${{ secrets.GITHUB_TOKEN }}
