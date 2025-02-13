@@ -46,7 +46,7 @@ jobs:
     steps:
     - name: Setup OpenSSL
       if: runner.os == 'windows'
-        run: |
+      run: |
           # Download OpenSSL installer
           Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL_Light-3_0_10.msi" -OutFile openssl.msi
           
@@ -66,8 +66,8 @@ jobs:
           Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile "$env:OPENSSL_DIR\certs\cacert.pem"
           $env:SSL_CERT_FILE = "$env:OPENSSL_DIR\certs\cacert.pem"
       - name: Install dependencies
-        if: runner.os == 'linux'
-        run: |
+      if: runner.os == 'linux'
+      run: |
           sudo apt-get update
           sudo apt-get -y install \
             libfontconfig1-dev \
