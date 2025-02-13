@@ -12,7 +12,7 @@ use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
-use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
+use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, IndexedReader, Read};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
@@ -240,6 +240,26 @@ struct GeneInfos {
 enum Strand {
     Plus,
     Minus,
+}
+fn iterblock(record: &bam::Record) -> Option<Vec<[i64;2]>> {
+    match (record.getcsaligned(),record.aligned_blocks_match()) {
+        (_,Some(d)) => {
+            Some(d.collect())
+        },
+        (Some(d),None) => {
+            Some(d.into_iter().filter_map(|p| {
+                if let CsValue::Same(d) = p.state {
+                    let pos = p.getgenomepos().unwrap();
+                    Some([pos,pos.checked_add(d.try_into().unwrap()).unwrap().checked_sub(1).unwrap()])
+                } else {
+                    None
+                }
+            }).collect())
+        },
+        (None,None) => {
+            None
+        }
+    }
 }
 impl<'de> Deserialize<'de> for Strand {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -727,19 +747,19 @@ fn main() {
                     }
                     continue;
                 }
-                let matched: Vec<RangeInclusive<i64>> = match p.aligned_blocks_match() {
+                let matched: Vec<RangeInclusive<i64>> = match iterblock(&p) {
                     Some(a) => {
                         if args.force && !message {
-                            eprintln!("Force used but = CIGAR given. Remove force to have full results. Ctrl+C to quit or wait to continue.");
+                            eprintln!("Force used but = CIGAR or MD/CS given. Remove force to have full results. Ctrl+C to quit or wait to continue.");
                             message = true;
                             std::thread::sleep(std::time::Duration::new(5, 0));
                         }
-                        a.map(|[a, b]| a..=b).collect()
+                        a.into_iter().map(|[a, b]| a..=b).collect()
                     }
                     None => {
                         let text = "No = CIGAR given";
                         if !args.force {
-                            eprintln!("{}. Add --force to force even without = (some results won't be available).", text);
+                            eprintln!("{}. Add --force to force even without = or MD/CS tag (some results won't be available).", text);
                             return;
                         } else if !message {
                             eprintln!("{} but it was forced... Continuing...", text);
@@ -1036,7 +1056,7 @@ fn genelist(
                 }
             }
             if !args.force {
-                'outer: for [start, end] in record.aligned_blocks_match().unwrap() {
+                'outer: for [start, end] in iterblock(&record).unwrap() {
                     for p in start..end {
                         match hash.get_mut(&p) {
                             Some(d) => d.addmatch(1),
@@ -1056,10 +1076,9 @@ fn genelist(
                 reads100 += 1;
             }
             if !args.force
-                && record
-                    .aligned_blocks_match()
+                && iterblock(&record)
                     .unwrap()
-                    .any(|p| p[0] <= gene.start && p[1] >= gene.end)
+                    .into_iter().any(|p| p[0] <= gene.start && p[1] >= gene.end)
             {
                 reads100m += 1;
             }
