@@ -9,7 +9,7 @@ The script was made by <a href="//www.imgt.org">IMGT team</a>.
 </p>
 
 ## Script input files and data
-* The BAM file from analysis, the presence of a cigar with `=`/`X` (match; substitution) is compulsory.
+* The BAM file from analysis, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
 * A CSV file with the following information, separated by a tabular:
 ```
 Locus Haplotype contig  start end
