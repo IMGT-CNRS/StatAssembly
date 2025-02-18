@@ -6,7 +6,6 @@ Available under X license
 use clap::{crate_authors, Parser};
 use colors::full_palette::GREY_400;
 use plotters::coord::Shift;
-use std::collections::HashMap;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
@@ -234,7 +233,7 @@ impl Haplotype {
         self == &Haplotype::Primary
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
+#[derive(Clone, Debug, Deserialize)]
 struct GeneInfos {
     gene: String,
     chromosome: String,
@@ -242,6 +241,33 @@ struct GeneInfos {
     start: i64,
     end: i64,
 }
+impl PartialEq for GeneInfos {
+    fn eq(&self, other: &Self) -> bool {
+        self.gene == other.gene
+    }
+}
+impl std::hash::Hash for GeneInfos {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.gene.hash(state);
+    }
+}
+impl PartialOrd for GeneInfos {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for GeneInfos {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.chromosome.cmp(&other.chromosome) {
+            std::cmp::Ordering::Equal => match self.start.cmp(&other.start) {
+                std::cmp::Ordering::Equal => self.end.cmp(&other.end).reverse(),
+                ord => ord
+            },
+            e => e
+        }
+    }
+}
+impl Eq for GeneInfos {}
 #[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
 enum Strand {
     Plus,
@@ -1022,7 +1048,7 @@ fn genelist(
     ));
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
-    let mut alertingpositions: HashMap<GeneInfos, Vec<(bool, usize)>> = HashMap::new();
+    let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
     for mut gene in genes {
         let mut reader = getreaderoffile(args)?;
         let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
@@ -1210,7 +1236,7 @@ fn printpossus(
     args: &Args,
     loci: &LocusInfos,
     outputdir: &std::path::Path,
-    data: &HashMap<GeneInfos, Vec<(bool, usize)>>,
+    data: &BTreeMap<GeneInfos, Vec<(bool, usize)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         &args.species,
@@ -1249,7 +1275,7 @@ fn genegraph<T>(
     gene: &GeneInfos,
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
-    alerting: &mut HashMap<GeneInfos, Vec<(bool, usize)>>,
+    alerting: &mut BTreeMap<GeneInfos, Vec<(bool, usize)>>,
 ) where
     T: DrawingBackend,
 {
