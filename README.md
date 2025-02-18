@@ -14,7 +14,23 @@ The script was made by <a href="//www.imgt.org">IMGT team</a>.
 ```
 Locus Haplotype contig  start end
 ```
-Locus must be IGH,IGK,IGL,TRA,TRB or TRG. Haplotype must be primary or alternate (case sensitive). Contig, start and end should match SAM regions.
+Locus must be one of the following:
+* IGH
+* IGK
+* IGL
+* TRA[^1]
+* TRB
+* TRG
+
+[^1]: TRD is inside TRA locus and so both loci are analyzed together.
+
+Haplotype must be one of the following:
+* Primary
+* Alternate
+
+It is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared in graph.
+
+Contig, start and end should match SAM regions.
 Example in test files.
 
 ## How to install
