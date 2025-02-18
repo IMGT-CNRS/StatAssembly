@@ -76,6 +76,9 @@ struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     force: bool,
+    /// Number of threads to decrypt bgzf files (0 for number of threads up to 12)
+    #[arg(long, default_value_t = 0)]
+    threads: u16,
     /// Only strand-specific alignments to reference
     #[arg(long)]
     forward: bool,
@@ -85,6 +88,9 @@ struct Args {
     /// Calculate total reads mismatch
     #[arg(long)]
     totalread: bool,
+    /// Get supplementary and secondary alignments on gene graphs
+    #[arg(long)]
+    allreads: bool,
     /// Save as SVG images
     #[arg(long)]
     svg: bool,
@@ -395,15 +401,24 @@ impl HashMapinfo {
         }
     }
 }
-
+fn filterread(args: &Args, record: &bam::Record) -> bool {
+    if args.forward && record.is_reverse() {
+        return false;
+    }
+    if !args.allreads && (record.is_supplementary() || record.is_secondary()) {
+        return false;
+    }
+    true
+}
 fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
     let mut reader = match &args.index {
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
         None => bam::IndexedReader::from_path(&args.file),
     }?;
-    let threads = match std::thread::available_parallelism() {
-        Ok(d) => min(d, NonZero::new(12).unwrap()),
-        Err(_) => NonZero::new(4).unwrap(),
+    let threads = match (args.threads,std::thread::available_parallelism()) {
+        (d,_) if d != 0 => NonZero::new(usize::from(d)).unwrap(),
+        (_,Ok(d)) => min(d, NonZero::new(12).unwrap()),
+        _ => NonZero::new(4).unwrap(),
     };
     reader.set_threads(threads.get()).unwrap();
     Ok(reader)
@@ -1026,9 +1041,7 @@ fn genelist(
         });
         let mut coverageperc = 0;
         let mut empty = true;
-        for record in records.filter_map(Result::ok).filter(|p| {
-            !(p.is_secondary() || p.is_supplementary() || (args.forward && p.is_reverse()))
-        }) {
+        for record in records.filter_map(Result::ok).filter(|p| filterread(args, p)) {
             empty = false;
             reads += 1;
             let range = record.reference_start()..record.reference_end();
