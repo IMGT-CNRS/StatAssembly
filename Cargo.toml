@@ -2,9 +2,9 @@
 name = "IMGT_StatAssembly"
 description = "Assess quality of assemblies on IG and TR loci"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>"]
-rust-version = "1.81"
+rust-version = "1.85"
 license-file = "LICENSE.txt"
 keywords = ["immunogenetics", "reads", "assembly quality"]
 publish = false
