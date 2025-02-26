@@ -3,7 +3,8 @@ This software allows the analysis of BAM files to identify the confidence on a l
 It was created and used by IMGT Team (https://www.imgt.org).
 Available under X license
 */
-use clap::{crate_authors, Parser};
+///Assess quality of an assembly based on reads mapping
+use clap::Parser;
 use colors::full_palette::GREY_400;
 use plotters::coord::Shift;
 use std::io::{stderr, stdout};
@@ -11,422 +12,83 @@ use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
+use crate::r#struct::*;
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, IndexedReader, Read};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
-    full_palette, AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea,
-    IntoSegmentedCoord, PathElement, SVGBackend,
+    AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord,
+    PathElement, SVGBackend, full_palette,
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
-use serde::{de, Deserialize, Serialize};
 use std::{
     cmp::{max, min},
     collections::BTreeMap,
-    fmt::Display,
     fs::File,
     io::Write,
     path::PathBuf,
 };
-///Assess quality of an assembly based on reads mapping
-#[derive(Parser, Debug)]
-#[clap(
-    author = crate_authors!("\n"),
-    before_help = "This script analyzes BAM files coming from reads assembled on an assembly.",
-    after_help = "This code was made by and for IMGT (the international ImMunoGeneTics information system).",
-    help_template = "\
-    {name} {version}
-    Authors: {author-section}
-    {before-help}
-    About: {about-with-newline}
-    {usage-heading} {usage}
-
-    {all-args}{after-help}
-    "
-)]
-#[command(version, author, about, long_about = None)]
-struct Args {
-    /// Input file (SAM or BAM)
-    #[arg(short, long)]
-    file: PathBuf,
-    /// Index file if not default
-    #[arg(short, long)]
-    index: Option<PathBuf>,
-    ///CSV containing locus infos. See example file for blueprint.
-    #[arg(short, long)]
-    locuspos: PathBuf,
-    /// Minimal number of reads (included) to declare a break in coverage
-    #[arg(short, long, default_value_t = 3)]
-    breaks: u32,
-    /// Coverage to calculate on CSV
-    #[arg(short, long, default_value_t = 10)]
-    coverage: u32,
-    /// Minimum number of reads (included) for warning positions
-    #[arg(long, default_value_t = 10)]
-    minreads: u32,
-    /// Percent warning position for mismatch reads (included)
-    #[arg(long, default_value_t = 80, value_parser=less_than_100)]
-    percentwarning: u8,
-    /// Percent alerting position for mismatch reads (included)
-    #[arg(long, default_value_t = 60, value_parser=less_than_100)]
-    percentalerting: u8,
-    /// Force cigar even if no =. Some functionalities would be disabled
-    #[arg(long)]
-    force: bool,
-    /// Number of threads to decrypt bgzf files (0 for number of threads up to 12)
-    #[arg(long, default_value_t = 0)]
-    threads: u16,
-    /// Only strand-specific alignments to reference
-    #[arg(long)]
-    forward: bool,
-    /// Query full quality (script will be longer to execute)
-    #[arg(long)]
-    fullquality: bool,
-    /// Calculate total reads mismatch
-    #[arg(long)]
-    totalread: bool,
-    /// Get supplementary and secondary alignments on gene graphs
-    #[arg(long)]
-    allreads: bool,
-    /// Save as SVG images
-    #[arg(long)]
-    svg: bool,
-    ///Species
-    #[arg(short, long)]
-    species: String,
-    ///Gene location (csv file). See example file for blueprint.
-    #[arg(short, long)]
-    geneloc: Option<PathBuf>,
-    ///Output directory (created or overwritten)
-    #[arg(short, long)]
-    outdir: PathBuf,
-}
-fn less_than_100(s: &str) -> Result<u8, String> {
-    match s.parse::<u8>() {
-        Ok(s) if (0..=100).contains(&s) => Ok(s),
-        _ => Err(String::from("Bad number, must be between 0 and 100.")),
+mod r#struct;
+//Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
+fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
+    match (record.getcsaligned(), record.aligned_blocks_match()) {
+        (_, Some(d)) => Some(d.collect()),
+        (Some(d), None) => Some(
+            d.into_iter()
+                .filter_map(|p| {
+                    if let CsValue::Same(d) = p.state {
+                        let pos = p.getgenomepos().unwrap();
+                        Some([
+                            pos,
+                            pos.checked_add(d.try_into().unwrap())
+                                .unwrap()
+                                .checked_sub(1)
+                                .unwrap(),
+                        ])
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        ),
+        (None, None) => None,
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[allow(clippy::upper_case_acronyms)]
-enum Locus {
-    IGH,
-    IGK,
-    IGL,
-    TRA,
-    TRB,
-    TRG,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Copy, Default)]
-struct Posread {
-    r#match: usize,
-    indel: usize,
-    total: usize,
-}
-/*
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Position {
-    zbased: bool,
-    position: i64,
-}
-impl Position {
-    fn new(zbased: bool, position: i64) -> Self {
-        Position { zbased, position }
-    }
-    fn getzbasedpos(&self) -> i64 {
-        if self.zbased {
-            self.position
-        } else {
-            self.position.saturating_sub(1)
+#[allow(clippy::type_complexity)]
+fn iteralert(args: &Args, mut message: bool, record: &bam::Record) -> (bool,Option<Vec<RangeInclusive<i64>>>,Vec<RangeInclusive<i64>>) {
+    let aligned: Vec<RangeInclusive<i64>> = record.aligned_blocks().map(|[a, b]| a..=b).collect();
+    match iterblock(record) {
+        Some(a) => {
+            if args.force && !message {
+                eprintln!(
+                    "Force used but = CIGAR or MD/CS given. Remove force to have full results. Ctrl+C to quit or wait to continue."
+                );
+                message = true;
+                std::thread::sleep(std::time::Duration::new(5, 0));
+            }
+            (message,Some(a.into_iter().map(|[a, b]| a..=b).collect()),aligned)
         }
-    }
-    fn getobasedpos(&self) -> i64 {
-        if self.zbased {
-            self.position.saturating_add(1)
-        } else {
-            self.position
-        }
-    }
-    fn iszbased(&self) -> bool {
-        self.zbased
-    }
-}
-*/
-impl Posread {
-    #[allow(dead_code)]
-    fn new(r#match: usize, indel: usize, total: usize) -> Result<Self, &'static str> {
-        if r#match + indel > total {
-            return Err("Invalid total");
-        }
-        Ok(Self {
-            r#match,
-            indel,
-            total,
-        })
-    }
-    fn gettotal(&self) -> usize {
-        self.total
-    }
-    fn addtotal(&mut self, count: usize) {
-        self.total += count
-    }
-    fn getmatch(&self) -> usize {
-        self.r#match
-    }
-    fn addmatch(&mut self, count: usize) {
-        self.r#match += count
-    }
-    fn getindel(&self) -> usize {
-        self.indel
-    }
-    fn addindel(&mut self, count: usize) {
-        self.indel += count
-    }
-}
-impl Display for Locus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Locus::IGH => write!(f, "IGH"),
-            Locus::IGK => write!(f, "IGK"),
-            Locus::IGL => write!(f, "IGL"),
-            Locus::TRA => write!(f, "TRA"),
-            Locus::TRB => write!(f, "TRB"),
-            Locus::TRG => write!(f, "TRG"),
+        None => {
+            let text = "No = CIGAR given";
+            if !args.force {
+                eprintln!(
+                    "{}. Add --force to force even without = or MD/CS tag (some results won't be available).",
+                    text
+                );
+                return (false,None,aligned);
+            } else if !message {
+                eprintln!("{} but it was forced... Continuing...", text);
+                message = true;
+            }
+            (message,Some(std::iter::empty::<IterAlignedPairs>()
+                .map(|_| 0..=0)
+                .collect()),aligned)
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-enum Haplotype {
-    Primary,
-    Alternate,
-}
-impl Ord for Haplotype {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self == other {
-            std::cmp::Ordering::Equal
-        } else if self == &Haplotype::Primary {
-            std::cmp::Ordering::Less
-        } else if other == &Haplotype::Primary {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    }
-}
-impl Display for Haplotype {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Primary => write!(f, "Primary"),
-            Self::Alternate => write!(f, "Alternate"),
-        }
-    }
-}
-impl PartialOrd for Haplotype {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Haplotype {
-    fn isprimary(&self) -> bool {
-        self == &Haplotype::Primary
-    }
-}
-#[derive(Clone, Debug, Deserialize)]
-struct GeneInfos {
-    gene: String,
-    chromosome: String,
-    strand: Strand,
-    start: i64,
-    end: i64,
-}
-impl PartialEq for GeneInfos {
-    fn eq(&self, other: &Self) -> bool {
-        self.gene == other.gene
-    }
-}
-impl std::hash::Hash for GeneInfos {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.gene.hash(state);
-    }
-}
-impl PartialOrd for GeneInfos {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for GeneInfos {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.chromosome.cmp(&other.chromosome) {
-            std::cmp::Ordering::Equal => match self.start.cmp(&other.start) {
-                std::cmp::Ordering::Equal => self.end.cmp(&other.end).reverse(),
-                ord => ord
-            },
-            e => e
-        }
-    }
-}
-impl Eq for GeneInfos {}
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
-enum Strand {
-    Plus,
-    Minus,
-}
-fn iterblock(record: &bam::Record) -> Option<Vec<[i64;2]>> {
-    match (record.getcsaligned(),record.aligned_blocks_match()) {
-        (_,Some(d)) => {
-            Some(d.collect())
-        },
-        (Some(d),None) => {
-            Some(d.into_iter().filter_map(|p| {
-                if let CsValue::Same(d) = p.state {
-                    let pos = p.getgenomepos().unwrap();
-                    Some([pos,pos.checked_add(d.try_into().unwrap()).unwrap().checked_sub(1).unwrap()])
-                } else {
-                    None
-                }
-            }).collect())
-        },
-        (None,None) => {
-            None
-        }
-    }
-}
-impl<'de> Deserialize<'de> for Strand {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        let s: &str = de::Deserialize::deserialize(deserializer)?;
-
-        match s {
-            "1" | "-" => Ok(Strand::Minus),
-            "0" | "+" => Ok(Strand::Plus),
-            _ => Err(de::Error::unknown_variant(s, &["1", "0"])),
-        }
-    }
-}
-impl Display for Strand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Plus => write!(f, "FWD"),
-            Self::Minus => write!(f, "RVD"),
-        }
-    }
-}
-#[derive(Clone, Debug, PartialEq, Serialize)]
-struct GeneInfosFinish {
-    gene: String,
-    chromosome: String,
-    strand: Strand,
-    start: i64,
-    end: i64,
-    length: i64,
-    coverageperc: f32,
-    reads: usize,
-    matchpos: String,
-    reads100: usize,
-    reads100m: usize,
-    coveragex: usize,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-struct LocusInfos {
-    locus: Locus,
-    haplotype: Haplotype,
-    contig: String,
-    start: i64,
-    end: i64,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct HashMapinfo {
-    map60: i64,
-    map1: i64,
-    map0: i64,
-    #[serde(serialize_with="globalmismatch")]
-    globalmismatch: usize,
-    overlaps: i64,
-    secondary: i64,
-    supplementary: i64,
-    mismatches: i64,
-    misalign: i64,
-    #[serde(skip_serializing_if = "iszero")]
-    qual: usize,
-}
-fn iszero(num: &usize) -> bool {
-    *num == 0
-}
-fn globalmismatch<S>(num: &usize, s: S) -> Result<S::Ok, S::Error> where S: serde::Serializer {
-    let val = *num as f32 / 10_000.0;
-    s.collect_str(&format!("{}",val))
-}
-impl HashMapinfo {
-    fn getmaxvalue(&self) -> i64 {
-        let elem = [
-            self.map0,
-            self.map1,
-            self.overlaps,
-            self.secondary,
-            self.supplementary,
-        ];
-        *elem.iter().max().unwrap()
-    }
-    fn gettotalmap(&self) -> i64 {
-        self.map0 + self.map1 + self.map60
-    }
-}
-impl PartialOrd for HashMapinfo {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for HashMapinfo {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.getmaxvalue().cmp(&other.getmaxvalue())
-    }
-}
-impl HashMapinfo {
-    #[allow(dead_code, clippy::too_many_arguments)]
-    fn new(
-        map60: i64,
-        map1: i64,
-        map0: i64,
-        secondary: i64,
-        supplementary: i64,
-        globalmismatch: usize,
-        overlaps: i64,
-        mismatches: i64,
-        misalign: i64,
-        qual: usize,
-    ) -> Self {
-        HashMapinfo {
-            map60,
-            map1,
-            map0,
-            globalmismatch,
-            secondary,
-            supplementary,
-            overlaps,
-            mismatches,
-            misalign,
-            qual,
-        }
-    }
-    fn default() -> Self {
-        HashMapinfo {
-            map60: 0,
-            map1: 0,
-            map0: 0,
-            globalmismatch: 0,
-            secondary: 0,
-            supplementary: 0,
-            overlaps: 0,
-            mismatches: 0,
-            misalign: 0,
-            qual: 0,
-        }
-    }
-}
+//Filter reads thanks to args provided, remove reverse or supplementary/secondary alignments
 fn filterread(args: &Args, record: &bam::Record) -> bool {
     if args.forward && record.is_reverse() {
         return false;
@@ -441,16 +103,20 @@ fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
         None => bam::IndexedReader::from_path(&args.file),
     }?;
-    let threads = match (args.threads,std::thread::available_parallelism()) {
-        (d,_) if d != 0 => NonZero::new(usize::from(d)).unwrap(),
-        (_,Ok(d)) => min(d, NonZero::new(12).unwrap()),
+    //Set threads if given or thanks to parralelism. If nothing available, set to 4 by default.
+    let threads = match (
+        NonZero::new(args.threads),
+        std::thread::available_parallelism(),
+    ) {
+        (Some(d), _) => d,
+        (_, Ok(d)) => min(d, NonZero::new(12).unwrap()),
         _ => NonZero::new(4).unwrap(),
     };
     reader.set_threads(threads.get()).unwrap();
     Ok(reader)
 }
-fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
-    locus.sort_unstable_by(|a, b| a.locus.to_string().cmp(&b.locus.to_string()));
+//Check there is one alternate for one primary.
+fn mergelocus(locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     let mut elem: Vec<Vec<LocusInfos>> = Vec::with_capacity(locus.len());
     let mut alternate = false;
     let mut actual: Vec<LocusInfos> = Vec::new();
@@ -498,25 +164,32 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     };
     Some(elem)
 }
-fn main() {
-    let args = Args::parse();
-    if args.percentalerting >= args.percentwarning {
-        eprintln!("Percent warning must be greater than percent alerting.");
-        return;
+fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
+    let length = if record.seq_len() != 0 { record.seq_len()  } else { 1};
+    match (args.totalread, record.aux(b"NM")) {
+        (true, Ok(extended_htslib::bam::record::Aux::U8(d))) => {
+            if d == 0 {
+                0
+            } else {
+                (d as usize * 10_000usize) / length
+            }
+        },
+        _ => 0,
     }
-    let csv = csv::ReaderBuilder::new()
+}
+fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
+    let mut csv = match csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
         .delimiter(b'\t')
-        .from_path(&args.locuspos);
-    let mut csv = match csv {
+        .from_path(&args.locuspos)
+    {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "CSV file of location position cannot be found. Error is {}",
-                e
-            );
-            return;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("CSV file of location position cannot be found. Error is {}",e)
+            ));
         }
     };
     let mut locus: Vec<LocusInfos> = Vec::new();
@@ -524,22 +197,31 @@ fn main() {
         let record = match record {
             Ok(r) => r,
             Err(_) => {
-                eprintln!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
-                return;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend",
+                ));
             }
         };
         locus.push(record);
     }
     if locus.is_empty() {
-        eprintln!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend",
+        ));
     }
+    Ok(locus)
+}
+fn checkbamandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     //Check bam file exists
-    match getreaderoffile(&args) {
+    match getreaderoffile(args) {
         Ok(_) => (),
         Err(e) => {
-            eprintln!("Cannot read bam file. Error is {}. Exiting.", e);
-            return;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Cannot read bam file. Error is {}. Exiting.", e),
+            ));
         }
     };
     let outputdir = match args.outdir.is_dir() {
@@ -555,19 +237,81 @@ fn main() {
                 "Folder {} does not exist, attempt to create.",
                 args.outdir.display()
             );
-            match std::fs::create_dir(&args.outdir) {
-                Ok(_) => (),
-                Err(e) => {
-                    eprintln!(
-                        "Cannot create folder {}. Error is {}",
-                        &args.outdir.display(),
-                        e
-                    );
-                    return;
-                }
-            };
+            std::fs::create_dir(&args.outdir)?;
             &args.outdir
         }
+    };
+    Ok(outputdir)
+}
+//Process countings for each read
+fn processcounting(args: &Args, pos: &mut BTreeMap<i64, HashMapinfo>, newrange: std::ops::Range<i64>, record: &bam::Record, sep: i64, matched: &[RangeInclusive<i64>],aligned: &[RangeInclusive<i64>]) {
+    for (i, targeting) in pos.range_mut(newrange) {
+        let _time = Instant::now();
+        targeting.globalmismatch += getglobalmismatch(args, record);
+        match record.mapq() {
+            0 => targeting.map0 += 1,
+            1..=59 => targeting.map1 += 1,
+            60 => targeting.map60 += 1,
+            _ => {
+                eprintln!(
+                    "MAPQ score is invalid. Got {} for {}",
+                    record.mapq(),
+                    String::from_utf8_lossy(record.qname())
+                );
+                return;
+            }
+        };
+        if i % sep == 0 {
+            //Get quality of reads depending on genomic position
+            if let Some(d) = record.aligned_pairs().find(|p| p[1] == *i) {
+                let index = d[0] as usize;
+                targeting.qual += *record.qual().get(index).unwrap() as usize;
+            }
+        }
+        if matched
+            .iter()
+            .skip_while(|p| p.end() <= i)
+            .take_while(|p| p.start() <= i)
+            .any(|s| s.contains(i))
+        {
+            //Match skipped
+        } else if aligned
+            .iter()
+            .skip_while(|p| p.end() <= i)
+            .take_while(|p| p.start() <= i)
+            .any(|s| s.contains(i))
+        {
+            //Aligns but not correct nt
+            if !args.force {
+                targeting.mismatches += 1;
+            };
+        } else {
+            //No alignment (deletion in read probably)
+            targeting.misalign += 1;
+        }
+        //Overlap reads
+        if record.reference_start() != *i && record.reference_end() != *i {
+            targeting.overlaps += 1;
+        }
+    }
+}
+fn main() {
+    let args = Args::parse();
+    if args.percentalerting >= args.percentwarning {
+        eprintln!("Percent warning must be greater than percent alerting.");
+        return;
+    }
+    //Get locus and outputdir
+    let (outputdir, locus) = match (checkbamandoutput(&args), locusposparser(&args)) {
+        (Err(e), _) => {
+            eprintln!("{}", e);
+            return;
+        }
+        (_, Err(f)) => {
+            eprintln!("{}", f);
+            return;
+        }
+        (Ok(a), Ok(b)) => (a, b),
     };
     //Group between primary and alternate
     let grouped = match mergelocus(locus) {
@@ -718,6 +462,7 @@ fn main() {
             )
         };
         let mut lock = stdout().lock();
+        //For each individual haplotype inside locus
         for loci in locus.iter() {
             let mut reader = match getreaderoffile(&args) {
                 Ok(r) => r,
@@ -726,25 +471,32 @@ fn main() {
                     return;
                 }
             };
-            //0-based
-            match reader.fetch((&loci.contig, loci.start - 1, loci.end + 1)) {
-                Ok(_) => (),
-                Err(_) => {
-                    eprintln!(
-                        "The region {}:{}-{} cannot be found, exiting.",
-                        loci.contig,
-                        loci.start - 1,
-                        loci.end + 1
-                    );
-                    return;
-                }
+            let locusstart = Position::new(false, loci.start);
+            let locusend = Position::new(false, loci.end);
+            //0-based except end because end is exclusive
+            if reader
+                .fetch((
+                    &loci.contig,
+                    locusstart.getzbasedpos(),
+                    locusend.getobasedpos(),
+                ))
+                .is_err()
+            {
+                eprintln!(
+                    "The region {}:{}-{} cannot be found, exiting.",
+                    loci.contig,
+                    loci.start - 1,
+                    loci.end + 1
+                );
+                return;
             };
             let mut nocount = true;
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
             //let file = File::create(&filename).unwrap();
             //let mut writer = BufWriter::new(file);
             let mut pos: BTreeMap<i64, HashMapinfo> = BTreeMap::new();
-            (loci.start..=loci.end).for_each(|p| {
+            //Populate all B-Tree position
+            (locusstart.getobasedpos()..=locusend.getobasedpos()).for_each(|p| {
                 pos.insert(p, HashMapinfo::default());
             });
             let mut message = false;
@@ -756,10 +508,7 @@ fn main() {
             } else {
                 max((loci.end - loci.start + 1) / 250, 100) //250 points for quality point
             };
-            for p in reader.rc_records().filter_map(Result::ok) {
-                if args.forward && p.is_reverse() {
-                    continue;
-                }
+            for p in reader.rc_records().filter_map(Result::ok).filter(|p| !(args.forward && p.is_reverse())) {
                 count += 1;
                 //Print every 100 reads done
                 if count % 100 == 0 {
@@ -774,7 +523,7 @@ fn main() {
                 nocount = false;
                 //Get range to put the reads inclusive pos
                 let newrange =
-                    max(p.reference_start(), loci.start)..min(loci.end + 1, p.reference_end());
+                    max(p.reference_start(), locusstart.getzbasedpos())..min(locusend.getobasedpos(), p.reference_end());
                 if p.is_secondary() || p.is_supplementary() {
                     for (_, targeting) in pos.range_mut(newrange) {
                         if p.is_secondary() {
@@ -788,110 +537,36 @@ fn main() {
                     }
                     continue;
                 }
-                let matched: Vec<RangeInclusive<i64>> = match iterblock(&p) {
-                    Some(a) => {
-                        if args.force && !message {
-                            eprintln!("Force used but = CIGAR or MD/CS given. Remove force to have full results. Ctrl+C to quit or wait to continue.");
-                            message = true;
-                            std::thread::sleep(std::time::Duration::new(5, 0));
-                        }
-                        a.into_iter().map(|[a, b]| a..=b).collect()
-                    }
-                    None => {
-                        let text = "No = CIGAR given";
-                        if !args.force {
-                            eprintln!("{}. Add --force to force even without = or MD/CS tag (some results won't be available).", text);
-                            return;
-                        } else if !message {
-                            eprintln!("{} but it was forced... Continuing...", text);
-                            message = true;
-                        }
-                        std::iter::empty::<IterAlignedPairs>()
-                            .map(|_| 0..=0)
-                            .collect()
+                let (matched,aligned) = match iteralert(&args,message,&p) {
+                    (_,None,_) => return, //Kill software, errors sent by iteralert
+                    (newmessage,Some(p), aligned) => {
+                        message = newmessage;
+                        (p,aligned)
                     }
                 };
-                let aligned: Vec<RangeInclusive<i64>> =
-                    p.aligned_blocks().map(|[a, b]| a..=b).collect();
-                let globalmismatch = match (args.totalread, p.aux(b"NM")) {
-                    (true, Ok(extended_htslib::bam::record::Aux::U8(d))) => d,
-                    _ => 0,
-                };
-                let globalmismatch = if globalmismatch > 0 {
-                    (globalmismatch as usize * 10_000usize) / p.seq_len()
-                } else {
-                    0
-                };
-                for (i, targeting) in pos.range_mut(newrange.clone()) {
-                    let _time = Instant::now();
-                    if globalmismatch > 0 {
-                        targeting.globalmismatch += globalmismatch;
-                    }
-                    match p.mapq() {
-                        0 => targeting.map0 += 1,
-                        1..=59 => targeting.map1 += 1,
-                        60 => targeting.map60 += 1,
-                        _ => {
-                            eprintln!(
-                                "MAPQ score is invalid. Got {} for {}",
-                                p.mapq(),
-                                String::from_utf8_lossy(p.qname())
-                            );
-                            return;
-                        }
-                    };
-                    if i % sep == 0 {
-                        //Get quality of reads depending on genomic position
-                        if let Some(d) = p.aligned_pairs().find(|p| p[1] == *i) {
-                            let index = d[0] as usize;
-                            targeting.qual += *p.qual().get(index).unwrap() as usize;
-                        }
-                    }
-                    if matched
-                        .iter()
-                        .skip_while(|p| p.end() <= i)
-                        .take_while(|p| p.start() <= i)
-                        .any(|s| s.contains(i))
-                    {
-                        //Match skipped
-                    } else if aligned
-                        .iter()
-                        .skip_while(|p| p.end() <= i)
-                        .take_while(|p| p.start() <= i)
-                        .any(|s| s.contains(i))
-                    {
-                        //Aligns but not correct nt
-                        if !args.force {
-                            targeting.mismatches += 1;
-                        };
-                    } else {
-                        //No alignment (deletion in read probably)
-                        targeting.misalign += 1;
-                    }
-                    //Overlap reads
-                    if p.reference_start() != *i && p.reference_end() != *i {
-                        targeting.overlaps += 1;
-                    }
-                }
+                processcounting(&args,&mut pos,newrange,&p,sep,&matched,&aligned);
             }
             if nocount {
                 eprintln!(
                     "The region {}:{}-{} cannot be found, exiting.",
                     loci.contig,
-                    loci.start + 1,
-                    loci.end + 1
+                    locusstart.getobasedpos(),
+                    locusend.getobasedpos()
                 );
                 return;
             }
             //Quality is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
                 if p.qual > 0 {
-                p.qual /= max(
+                    p.qual /= max(
+                        std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
+                        1,
+                    )
+                }
+                p.globalmismatch /= max(
                     std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
                     1,
-                )
-            }
-            p.globalmismatch /= max(std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),1);
+                );
             });
             println!("Making graphs");
             match (loci.haplotype.isprimary(), args.svg) {
@@ -1013,26 +688,27 @@ fn genelist(
     for record in csv.deserialize() {
         let record = match record {
             Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive"
-                );
-                return Err(Box::new(e));
+            Err(_) => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive",
+                )));
             }
         };
         genes.push(record);
     }
     if genes.is_empty() {
-        eprintln!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive");
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "csv error",
+            "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive",
         )));
     }
+    let (locstart,locend) = (Position::new(false,loci.start),Position::new(false,loci.end));
+    //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig
-            && (loci.start..=loci.end).contains(&gene.start)
-            && (loci.start..=loci.end).contains(&gene.end)
+            && (locstart.getobasedpos()..=locend.getobasedpos()).contains(&gene.start)
+            && (locstart.getobasedpos()..=locend.getobasedpos()).contains(&gene.end)
     });
     if genes.is_empty() {
         println!("No gene identified for locus {}", loci.locus);
@@ -1055,7 +731,8 @@ fn genelist(
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        let genericrange = gene.start - 1..gene.end;
+        //O position is exclusive
+        let genericrange = locstart.getzbasedpos()..locend.getobasedpos();
         let range = ranges::Ranges::from(genericrange.clone());
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
         reader.fetch((&gene.chromosome, genericrange.start, genericrange.end))?;
@@ -1067,7 +744,10 @@ fn genelist(
         });
         let mut coverageperc = 0;
         let mut empty = true;
-        for record in records.filter_map(Result::ok).filter(|p| filterread(args, p)) {
+        for record in records
+            .filter_map(Result::ok)
+            .filter(|p| filterread(args, p))
+        {
             empty = false;
             reads += 1;
             let range = record.reference_start()..record.reference_end();
@@ -1117,7 +797,8 @@ fn genelist(
             if !args.force
                 && iterblock(&record)
                     .unwrap()
-                    .into_iter().any(|p| p[0] <= gene.start && p[1] >= gene.end)
+                    .into_iter()
+                    .any(|p| p[0] <= gene.start && p[1] >= gene.end)
             {
                 reads100m += 1;
             }
@@ -1351,7 +1032,7 @@ fn genegraph<T>(
                         } else {
                             0
                         };
-                        if (usize::from(args.percentalerting + 1)..usize::from(args.percentwarning))
+                        if (usize::from(args.percentalerting + 1)..=usize::from(args.percentwarning))
                             .contains(&percent)
                             || (val.r#match <= usize::try_from(args.minreads).unwrap()
                                 && percent > usize::from(args.percentalerting))
@@ -1614,10 +1295,7 @@ fn mismatchgraph<T>(
         .unwrap();
     //Bottom graph
     if let Some(bottom) = bottom {
-        let max = pos
-            .iter().map(|(_,f)| f.globalmismatch)
-            .max()
-            .unwrap();
+        let max = pos.iter().map(|(_, f)| f.globalmismatch).max().unwrap();
         let mut chart = ChartBuilder::on(&bottom)
             .set_label_area_size(LabelAreaPosition::Left, 60)
             .set_label_area_size(LabelAreaPosition::Bottom, 60)
@@ -1647,8 +1325,7 @@ fn mismatchgraph<T>(
                     .style(full_palette::DEEPORANGE_200.mix(0.8).filled())
                     .margin(0)
                     .data(pos.iter().filter_map(|p| {
-                        let score = p.1.globalmismatch as f64
-                            / 10_000f64;
+                        let score = p.1.globalmismatch as f64 / 10_000f64;
                         if score.is_finite() && score != 0.0 && p.1.gettotalmap() > 0 {
                             Some((*p.0 + 1, score))
                         } else {
