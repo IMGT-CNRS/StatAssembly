@@ -731,8 +731,9 @@ fn genelist(
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
+        let (genestart, geneend) = (Position::new(false,gene.start),Position::new(false,gene.end));
         //O position is exclusive
-        let genericrange = locstart.getzbasedpos()..locend.getobasedpos();
+        let genericrange = genestart.getobasedpos()..geneend.getobasedpos();
         let range = ranges::Ranges::from(genericrange.clone());
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
         reader.fetch((&gene.chromosome, genericrange.start, genericrange.end))?;
@@ -810,11 +811,10 @@ fn genelist(
                 gene: gene.gene,
                 chromosome: gene.chromosome,
                 strand: gene.strand,
-                start: gene.start,
-                end: gene.end,
-                length: gene
-                    .end
-                    .checked_sub(gene.start)
+                start: genestart.getobasedpos(),
+                end: geneend.getobasedpos(),
+                length: geneend.getobasedpos()
+                    .checked_sub(genestart.getobasedpos())
                     .unwrap()
                     .checked_add(1)
                     .unwrap(), //Calculate the length
@@ -872,11 +872,10 @@ fn genelist(
             gene: genename,
             chromosome: gene.chromosome,
             strand: gene.strand,
-            start: gene.start,
-            end: gene.end,
-            length: gene
-                .end
-                .checked_sub(gene.start)
+            start: genestart.getobasedpos(),
+            end: geneend.getobasedpos(),
+            length: geneend.getobasedpos()
+                .checked_sub(genestart.getobasedpos())
                 .unwrap()
                 .checked_add(1)
                 .unwrap(), //Calculate the length
