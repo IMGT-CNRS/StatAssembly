@@ -34,7 +34,9 @@ mod r#struct;
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
     match (record.getcsaligned(), record.aligned_blocks_match()) {
+        //There is a CIGAR =
         (_, Some(d)) => Some(d.collect()),
+        //There is a MD/CS tag
         (Some(d), None) => Some(
             d.into_iter()
                 .filter_map(|p| {
@@ -53,11 +55,20 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
                 })
                 .collect(),
         ),
+        //We have nothing
         (None, None) => None,
     }
 }
 #[allow(clippy::type_complexity)]
-fn iteralert(args: &Args, mut message: bool, record: &bam::Record) -> (bool,Option<Vec<RangeInclusive<i64>>>,Vec<RangeInclusive<i64>>) {
+fn iteralert(
+    args: &Args,
+    mut message: bool,
+    record: &bam::Record,
+) -> (
+    bool,
+    Option<Vec<RangeInclusive<i64>>>,
+    Vec<RangeInclusive<i64>>,
+) {
     let aligned: Vec<RangeInclusive<i64>> = record.aligned_blocks().map(|[a, b]| a..=b).collect();
     match iterblock(record) {
         Some(a) => {
@@ -68,8 +79,13 @@ fn iteralert(args: &Args, mut message: bool, record: &bam::Record) -> (bool,Opti
                 message = true;
                 std::thread::sleep(std::time::Duration::new(5, 0));
             }
-            (message,Some(a.into_iter().map(|[a, b]| a..=b).collect()),aligned)
+            (
+                message,
+                Some(a.into_iter().map(|[a, b]| a..=b).collect()),
+                aligned,
+            )
         }
+        //Check if forced or not, if yes, force software
         None => {
             let text = "No = CIGAR given";
             if !args.force {
@@ -77,14 +93,20 @@ fn iteralert(args: &Args, mut message: bool, record: &bam::Record) -> (bool,Opti
                     "{}. Add --force to force even without = or MD/CS tag (some results won't be available).",
                     text
                 );
-                return (false,None,aligned);
+                return (false, None, aligned);
             } else if !message {
                 eprintln!("{} but it was forced... Continuing...", text);
                 message = true;
             }
-            (message,Some(std::iter::empty::<IterAlignedPairs>()
-                .map(|_| 0..=0)
-                .collect()),aligned)
+            (
+                message,
+                Some(
+                    std::iter::empty::<IterAlignedPairs>()
+                        .map(|_| 0..=0)
+                        .collect(),
+                ),
+                aligned,
+            )
         }
     }
 }
@@ -98,6 +120,7 @@ fn filterread(args: &Args, record: &bam::Record) -> bool {
     }
     true
 }
+//Check we can read BAM file and return the reader with desired threads
 fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
     let mut reader = match &args.index {
         Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
@@ -164,8 +187,13 @@ fn mergelocus(locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     };
     Some(elem)
 }
+//Get number of mismatches for the record (x 10_000 to get as an integer)
 fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
-    let length = if record.seq_len() != 0 { record.seq_len()  } else { 1};
+    let length = if record.seq_len() != 0 {
+        record.seq_len()
+    } else {
+        1
+    };
     match (args.totalread, record.aux(b"NM")) {
         (true, Ok(extended_htslib::bam::record::Aux::U8(d))) => {
             if d == 0 {
@@ -173,10 +201,11 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
             } else {
                 (d as usize * 10_000usize) / length
             }
-        },
+        }
         _ => 0,
     }
 }
+//Parse the location csv with locus infos
 fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     let mut csv = match csv::ReaderBuilder::new()
         .has_headers(false)
@@ -188,7 +217,10 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
         Err(e) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("CSV file of location position cannot be found. Error is {}",e)
+                format!(
+                    "CSV file of location position cannot be found. Error is {}",
+                    e
+                ),
             ));
         }
     };
@@ -213,17 +245,15 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     }
     Ok(locus)
 }
+//Check BAM file exists and outputdir is created and return it
 fn checkbamandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     //Check bam file exists
-    match getreaderoffile(args) {
-        Ok(_) => (),
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Cannot read bam file. Error is {}. Exiting.", e),
-            ));
-        }
-    };
+    if let Err(e) = getreaderoffile(args) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Cannot read bam file. Error is {}. Exiting.", e),
+        ));
+    }
     let outputdir = match args.outdir.is_dir() {
         true => {
             eprintln!(
@@ -244,7 +274,15 @@ fn checkbamandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     Ok(outputdir)
 }
 //Process countings for each read
-fn processcounting(args: &Args, pos: &mut BTreeMap<i64, HashMapinfo>, newrange: std::ops::Range<i64>, record: &bam::Record, sep: i64, matched: &[RangeInclusive<i64>],aligned: &[RangeInclusive<i64>]) {
+fn processcounting(
+    args: &Args,
+    pos: &mut BTreeMap<i64, HashMapinfo>,
+    newrange: std::ops::Range<i64>,
+    record: &bam::Record,
+    sep: i64,
+    matched: &[RangeInclusive<i64>],
+    aligned: &[RangeInclusive<i64>],
+) {
     for (i, targeting) in pos.range_mut(newrange) {
         let _time = Instant::now();
         targeting.globalmismatch += getglobalmismatch(args, record);
@@ -268,26 +306,27 @@ fn processcounting(args: &Args, pos: &mut BTreeMap<i64, HashMapinfo>, newrange: 
                 targeting.qual += *record.qual().get(index).unwrap() as usize;
             }
         }
-        if matched
+        //If not a match, add to mismatches or misalign (if none is found)
+        if !matched
             .iter()
             .skip_while(|p| p.end() <= i)
             .take_while(|p| p.start() <= i)
             .any(|s| s.contains(i))
         {
-            //Match skipped
-        } else if aligned
-            .iter()
-            .skip_while(|p| p.end() <= i)
-            .take_while(|p| p.start() <= i)
-            .any(|s| s.contains(i))
-        {
-            //Aligns but not correct nt
-            if !args.force {
-                targeting.mismatches += 1;
-            };
-        } else {
-            //No alignment (deletion in read probably)
-            targeting.misalign += 1;
+            if aligned
+                .iter()
+                .skip_while(|p| p.end() <= i)
+                .take_while(|p| p.start() <= i)
+                .any(|s| s.contains(i))
+            {
+                //Aligns but not correct nt
+                if !args.force {
+                    targeting.mismatches += 1;
+                };
+            } else {
+                //No alignment (deletion in read probably)
+                targeting.misalign += 1;
+            }
         }
         //Overlap reads
         if record.reference_start() != *i && record.reference_end() != *i {
@@ -296,12 +335,13 @@ fn processcounting(args: &Args, pos: &mut BTreeMap<i64, HashMapinfo>, newrange: 
     }
 }
 fn main() {
+    let firstinstant = Instant::now();
     let args = Args::parse();
     if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater than percent alerting.");
         return;
     }
-    //Get locus and outputdir
+    //Get locus and outputdir, print errors if we have
     let (outputdir, locus) = match (checkbamandoutput(&args), locusposparser(&args)) {
         (Err(e), _) => {
             eprintln!("{}", e);
@@ -317,7 +357,7 @@ fn main() {
     let grouped = match mergelocus(locus) {
         Some(g) => g,
         None => {
-            eprintln!("Check order of loci as well in the file.");
+            eprintln!("Check order of loci in the file.");
             return;
         }
     };
@@ -328,7 +368,7 @@ fn main() {
             eprintln!("There is more than 2 haplotypes for {}", floci.locus);
             return;
         }
-        let haplotypebool = haplotype == 1;
+        let haplotypebool = haplotype == 1; //IS there one or two haplotypes?
         println!(
             "Going for {} locus - {}",
             floci.locus,
@@ -485,8 +525,8 @@ fn main() {
                 eprintln!(
                     "The region {}:{}-{} cannot be found, exiting.",
                     loci.contig,
-                    loci.start - 1,
-                    loci.end + 1
+                    locusstart.getobasedpos(),
+                    locusend.getobasedpos()
                 );
                 return;
             };
@@ -495,8 +535,8 @@ fn main() {
             //let file = File::create(&filename).unwrap();
             //let mut writer = BufWriter::new(file);
             let mut pos: BTreeMap<i64, HashMapinfo> = BTreeMap::new();
-            //Populate all B-Tree position
-            (locusstart.getobasedpos()..=locusend.getobasedpos()).for_each(|p| {
+            //Populate all B-Tree position, 0-based
+            (locusstart.getzbasedpos()..=locusend.getzbasedpos()).for_each(|p| {
                 pos.insert(p, HashMapinfo::default());
             });
             let mut message = false;
@@ -506,9 +546,13 @@ fn main() {
             let sep = if args.fullquality {
                 1
             } else {
-                max((loci.end - loci.start + 1) / 250, 100) //250 points for quality point
+                max((locusend.getobasedpos() - locusstart.getobasedpos() + 1) / 250, 100) //250 points for quality point
             };
-            for p in reader.rc_records().filter_map(Result::ok).filter(|p| !(args.forward && p.is_reverse())) {
+            for p in reader
+                .rc_records()
+                .filter_map(Result::ok)
+                .filter(|p| !(args.forward && p.is_reverse()))
+            {
                 count += 1;
                 //Print every 100 reads done
                 if count % 100 == 0 {
@@ -522,8 +566,8 @@ fn main() {
                 }
                 nocount = false;
                 //Get range to put the reads inclusive pos
-                let newrange =
-                    max(p.reference_start(), locusstart.getzbasedpos())..min(locusend.getobasedpos(), p.reference_end());
+                let newrange = max(p.reference_start(), locusstart.getzbasedpos())
+                    ..min(locusend.getobasedpos(), p.reference_end());
                 if p.is_secondary() || p.is_supplementary() {
                     for (_, targeting) in pos.range_mut(newrange) {
                         if p.is_secondary() {
@@ -537,14 +581,14 @@ fn main() {
                     }
                     continue;
                 }
-                let (matched,aligned) = match iteralert(&args,message,&p) {
-                    (_,None,_) => return, //Kill software, errors sent by iteralert
-                    (newmessage,Some(p), aligned) => {
+                let (matched, aligned) = match iteralert(&args, message, &p) {
+                    (_, None, _) => return, //Kill software, errors sent by iteralert
+                    (newmessage, Some(p), aligned) => {
                         message = newmessage;
-                        (p,aligned)
+                        (p, aligned)
                     }
                 };
-                processcounting(&args,&mut pos,newrange,&p,sep,&matched,&aligned);
+                processcounting(&args, &mut pos, newrange, &p, sep, &matched, &aligned);
             }
             if nocount {
                 eprintln!(
@@ -672,6 +716,7 @@ fn main() {
         }
         println!("Locus {} is done!", &floci.locus);
     }
+    println!("Process done in {} s",firstinstant.elapsed().as_secs_f32());
 }
 fn genelist(
     outputdir: &std::path::Path,
@@ -703,7 +748,10 @@ fn genelist(
             "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive",
         )));
     }
-    let (locstart,locend) = (Position::new(false,loci.start),Position::new(false,loci.end));
+    let (locstart, locend) = (
+        Position::new(false, loci.start),
+        Position::new(false, loci.end),
+    );
     //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig
@@ -731,16 +779,19 @@ fn genelist(
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        let (genestart, geneend) = (Position::new(false,gene.start),Position::new(false,gene.end));
+        let (genestart, geneend) = (
+            Position::new(false, gene.start),
+            Position::new(false, gene.end),
+        );
         //O position is exclusive
-        let genericrange = genestart.getobasedpos()..geneend.getobasedpos();
-        let range = ranges::Ranges::from(genericrange.clone());
+        let genegenericrange = genestart.getobasedpos()..geneend.getobasedpos();
+        let generange = ranges::Ranges::from(genegenericrange.clone());
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
-        reader.fetch((&gene.chromosome, genericrange.start, genericrange.end))?;
+        reader.fetch((&gene.chromosome, genegenericrange.start, genegenericrange.end))?;
         let records = reader.records();
         //Hash contains 1-based positions
         let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
-        range.clone().into_iter().for_each(|p| {
+        genegenericrange.for_each(|p| {
             hash.insert(p, Posread::default());
         });
         let mut coverageperc = 0;
@@ -813,7 +864,8 @@ fn genelist(
                 strand: gene.strand,
                 start: genestart.getobasedpos(),
                 end: geneend.getobasedpos(),
-                length: geneend.getobasedpos()
+                length: geneend
+                    .getobasedpos()
                     .checked_sub(genestart.getobasedpos())
                     .unwrap()
                     .checked_add(1)
@@ -874,7 +926,8 @@ fn genelist(
             strand: gene.strand,
             start: genestart.getobasedpos(),
             end: geneend.getobasedpos(),
-            length: geneend.getobasedpos()
+            length: geneend
+                .getobasedpos()
                 .checked_sub(genestart.getobasedpos())
                 .unwrap()
                 .checked_add(1)
@@ -883,7 +936,7 @@ fn genelist(
             matchpos: text,
             reads100,
             reads100m,
-            coverageperc: ((coverageperc * 1_000 / reads / range.into_iter().count()) as f32)
+            coverageperc: ((coverageperc * 1_000 / reads / generange.into_iter().count()) as f32)
                 .round()
                 / 1000.0,
             coveragex: coverage,
@@ -906,6 +959,7 @@ fn genelist(
             ord => ord,
         });
     });
+    //Print position if nothing was forced
     if !args.force {
         printpossus(args, loci, outputdir, &alertingpositions)?;
     }
@@ -1031,7 +1085,8 @@ fn genegraph<T>(
                         } else {
                             0
                         };
-                        if (usize::from(args.percentalerting + 1)..=usize::from(args.percentwarning))
+                        if (usize::from(args.percentalerting + 1)
+                            ..=usize::from(args.percentwarning))
                             .contains(&percent)
                             || (val.r#match <= usize::try_from(args.minreads).unwrap()
                                 && percent > usize::from(args.percentalerting))
@@ -1358,7 +1413,7 @@ fn readgraph<T>(
 where
     T: DrawingBackend,
 {
-    let max = pos.values().map(|max| max.gettotalmap()).max().unwrap() + 5;
+    let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let mut chart = ChartBuilder::on(&top)
@@ -1493,6 +1548,7 @@ where
     let mut first = None;
     let mut prev = None;
     let (finalpos, _) = pos.iter().last().unwrap();
+    //Get a range of numbers
     let mut acc = breaks.clone().fold(String::new(), |mut acc, (num, _)| {
         if first.is_none() {
             first = Some(num);

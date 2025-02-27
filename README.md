@@ -9,7 +9,7 @@ The script was made by <a href="//www.imgt.org">IMGT team</a>.
 </p>
 
 ## Script input files and data
-* The BAM file from analysis, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
+* The BAM file from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
 * A CSV file with the following information, separated by a tabular:
 ```
 Locus Haplotype contig  start end
@@ -46,10 +46,19 @@ to access the help.
 ### Source code
 
 - [ ] Install rust if not installed.
-- [ ] Check Rust version, should be >= 1.81.
+- [ ] Check Rust version, should be >= 1.85.
 - [ ] Do a git clone and then `cargo build --release` to compile the software.
 
+## Execution
+
+Here is the command to execute with example files from the repo folder on linux 64bits:
+```bash
+binaries/IMGT_StatAssembly_linux_x64_x86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
+```
+
 ## Output
+
+
 
 ### Memory consumption
 The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
