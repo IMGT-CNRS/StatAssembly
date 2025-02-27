@@ -1,5 +1,10 @@
 # IMGT/StatAssembly
-IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. It is a script written in Rust, compiled as a optimized binary.
+IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. 
+<p align="middle">
+<img src = "images/logo_software.png" width ="200" />
+</p>
+## Source
+It is a script written in Rust, compiled as a optimized binary.
 <p align="middle">
 <img src = "images/rust.png" width ="50" />
 </p>
