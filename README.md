@@ -3,6 +3,7 @@ IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including
 <p align="middle">
 <img src = "images/logo_software.png" width ="200" />
 </p>
+
 ## Source
 It is a script written in Rust, compiled as a optimized binary.
 <p align="middle">
