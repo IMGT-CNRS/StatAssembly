@@ -5,7 +5,7 @@ Available under X license
 */
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
-use std::{fmt::Display, path::PathBuf};
+use std::{fmt::Display, hash::Hash, path::PathBuf};
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
@@ -96,48 +96,76 @@ pub(crate) enum Locus {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
-pub(crate) enum Alertpos {
+pub enum Alertpos {
     Valid,
     Warning,
     Suspicious
 }
+pub(crate) trait Alerting {
+    ///Is a warning position
+    fn iswarning(&self) -> bool;
+    ///Is a suspicious position
+    fn issuspicious(&self) -> bool;
+    #[allow(dead_code)]
+    /// Is a non-suspicious nor warning position
+    fn isvalid(&self) -> bool;
+}
 impl Alertpos {
-    pub(crate) fn new(record: &Posread, args: &Args) -> Self {
+    fn new(record: &Posread) -> Self {
         let percent = if record.total > 0 {
             record.r#match * 100 / record.total
         } else {
             0
         };
-        match (args.percentalerting,args.percentwarning,args.minreads)  {
+        match (record.percentalerting,record.percentwarning,record.minreads)  {
             (d,..) if percent <= d.into() => Alertpos::Suspicious,
             (_,d,e) if record.r#match <= e.try_into().unwrap() || percent <= d.into() => Alertpos::Warning,
             _ => Alertpos::Valid
         }
     }
+}
+impl Alerting for Alertpos {
     ///Is a warning position
-    pub(crate) fn iswarning(&self) -> bool {
+    fn iswarning(&self) -> bool {
         matches!(self,Alertpos::Warning)
     }
     ///Is a suspicious position
-    pub(crate) fn issuspicious(&self) -> bool {
+    fn issuspicious(&self) -> bool {
         matches!(self,Alertpos::Suspicious)
     }
     /// Is a non-suspicious nor warning position
     #[allow(dead_code)]
-    pub(crate) fn isvalid(&self) -> bool {
+    fn isvalid(&self) -> bool {
         matches!(self,Alertpos::Valid)
     }
-}
-#[derive(Clone, Debug, Eq, PartialEq, Copy, Default)]
-pub(crate) struct Posread {
-    pub(crate) r#match: usize,
-    pub(crate) indel: usize,
-    pub(crate) total: usize,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Position {
     zbased: bool,
     position: i64,
+}
+impl PartialOrd for Position {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Position {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.getzbasedpos().cmp(&other.getzbasedpos())
+    }
+}
+///Serialize as a 1-based position
+impl Serialize for Position {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        serializer.serialize_i64(self.getobasedpos())
+    }
+}
+impl Default for Position {
+    fn default() -> Self {
+        Self { zbased: true, position: 0 }
+    }
 }
 impl Position {
     pub(crate) fn new(zbased: bool, position: i64) -> Self {
@@ -162,17 +190,55 @@ impl Position {
         self.zbased
     }
 }
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub(crate) struct Posread {
+    pub(crate) r#match: usize,
+    pub(crate) indel: usize,
+    pub(crate) total: usize,
+    pub(crate) minreads: u32,
+    pub(crate) percentwarning: u8,
+    pub(crate) percentalerting: u8,
+}
+impl Alerting for Posread {
+    fn iswarning(&self) -> bool {
+        self.getstate().iswarning()
+    }
+
+    fn issuspicious(&self) -> bool {
+        self.getstate().issuspicious()
+    }
+
+    fn isvalid(&self) -> bool {
+        self.getstate().isvalid()
+    }
+}
+#[derive(Debug)]
+pub(crate) struct MyError(String);
+
+impl std::fmt::Display for MyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for MyError {}
 impl Posread {
     #[allow(dead_code)]
-    pub(crate) fn new(r#match: usize, indel: usize, total: usize) -> Result<Self, &'static str> {
+    pub(crate) fn new(r#match: usize, indel: usize, total: usize, args: &Args) -> Result<Self, MyError> {
         if r#match + indel > total {
-            return Err("Invalid total");
+            return Err(MyError(String::from("Invalid total")));
         }
         Ok(Self {
             r#match,
             indel,
             total,
+            minreads: args.minreads,
+            percentwarning: args.percentwarning,
+            percentalerting: args.percentalerting
         })
+    }
+    ///Get the state of the position
+    fn getstate(&self) -> Alertpos {
+        Alertpos::new(self)
     }
     pub(crate) fn gettotal(&self) -> usize {
         self.total
@@ -315,6 +381,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) coverageperc: f32,
     pub(crate) reads: usize,
     pub(crate) matchpos: String,
+    pub(crate) readsfull: usize,
     pub(crate) reads100: usize,
     pub(crate) reads100m: usize,
     pub(crate) coveragex: usize,
@@ -327,8 +394,9 @@ pub(crate) struct LocusInfos {
     pub(crate) start: i64,
     pub(crate) end: i64,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct HashMapinfo {
+    pub(crate) position: Position,
     pub(crate) map60: i64,
     pub(crate) map1: i64,
     pub(crate) map0: i64,
@@ -342,6 +410,12 @@ pub(crate) struct HashMapinfo {
     #[serde(skip_serializing_if = "iszero")]
     pub(crate) qual: usize,
 }
+impl PartialEq for HashMapinfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.position == other.position
+    }
+}
+impl Eq for HashMapinfo {}
 impl HashMapinfo {
     pub(crate) fn getmaxvalue(&self) -> i64 {
         let elem = [
@@ -370,6 +444,7 @@ impl Ord for HashMapinfo {
 impl HashMapinfo {
     #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn new(
+        position: Position,
         map60: i64,
         map1: i64,
         map0: i64,
@@ -382,6 +457,7 @@ impl HashMapinfo {
         qual: usize,
     ) -> Self {
         HashMapinfo {
+            position,
             map60,
             map1,
             map0,
@@ -392,20 +468,6 @@ impl HashMapinfo {
             mismatches,
             misalign,
             qual,
-        }
-    }
-    pub(crate) fn default() -> Self {
-        HashMapinfo {
-            map60: 0,
-            map1: 0,
-            map0: 0,
-            globalmismatch: 0,
-            secondary: 0,
-            supplementary: 0,
-            overlaps: 0,
-            mismatches: 0,
-            misalign: 0,
-            qual: 0,
         }
     }
 }
