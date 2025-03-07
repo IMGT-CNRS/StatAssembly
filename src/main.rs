@@ -919,7 +919,7 @@ fn genelist(
         output.set_extension("png");
         let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
         //Gene graph
-        genegraph(args, &hash, &gene, loci, root, &mut alertingpositions);
+        genegraph(args, &hash, &gene, loci, root, &mut alertingpositions, reads100m);
         let elem = GeneInfosFinish {
             gene: genename,
             chromosome: gene.chromosome,
@@ -1010,6 +1010,7 @@ fn genegraph<T>(
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
     alerting: &mut BTreeMap<GeneInfos, Vec<(bool, usize)>>,
+    reads100m: usize
 ) where
     T: DrawingBackend,
 {
@@ -1059,6 +1060,19 @@ fn genegraph<T>(
         .label("Total reads")
         .legend(|(x, y)| {
             PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_400.mix(0.8))
+        });
+    //Line of all full reads
+    chart
+        .draw_series(LineSeries::new(
+            hash.iter()
+                .enumerate()
+                .map(|(pos, ..)| (pos + 1, reads100m)),
+            BLACK.mix(0.8).stroke_width(2),
+        ))
+        .unwrap()
+        .label("Reads 100% match")
+        .legend(|(x, y)| {
+            PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.8))
         });
     //Three levels if not forced
     if !args.force {
