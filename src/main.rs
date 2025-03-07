@@ -1036,43 +1036,30 @@ fn genegraph<T>(
         Strand::Plus => hash.iter().collect(),
         Strand::Minus => hash.iter().rev().collect(),
     };
+    chart
+    .draw_series(LineSeries::new(
+        hash.iter()
+            .enumerate()
+            .map(|(pos, (_, val))| (pos + 1, val.gettotal())),
+        full_palette::BLUE_600.mix(0.8).stroke_width(2),
+    ))
+    .unwrap()
+    .label("Total reads")
+    .legend(|(x, y)| {
+        PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_600.mix(0.8))
+    });
     //Enumerate to get position relative to the gene (+1 because 0-related)
     chart
         .draw_series(LineSeries::new(
             hash.iter()
                 .enumerate()
                 .map(|(pos, (_, val))| (pos + 1, val.getindel())),
-            full_palette::GREEN_600.mix(0.8).stroke_width(2),
+            full_palette::ORANGE_300.mix(0.8).stroke_width(2),
         ))
         .unwrap()
         .label("Sequence match")
         .legend(|(x, y)| {
-            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_600.mix(0.8))
-        });
-    chart
-        .draw_series(LineSeries::new(
-            hash.iter()
-                .enumerate()
-                .map(|(pos, (_, val))| (pos + 1, val.gettotal())),
-            full_palette::BLUE_400.mix(0.8).stroke_width(2),
-        ))
-        .unwrap()
-        .label("Total reads")
-        .legend(|(x, y)| {
-            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_400.mix(0.8))
-        });
-    //Line of all full reads
-    chart
-        .draw_series(LineSeries::new(
-            hash.iter()
-                .enumerate()
-                .map(|(pos, ..)| (pos + 1, reads100m)),
-            BLACK.mix(0.8).stroke_width(2),
-        ))
-        .unwrap()
-        .label("Reads 100% match")
-        .legend(|(x, y)| {
-            PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.8))
+            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300.mix(0.8))
         });
     //Three levels if not forced
     if !args.force {
@@ -1081,29 +1068,33 @@ fn genegraph<T>(
                 hash.iter()
                     .enumerate()
                     .map(|(pos, (_, val))| (pos + 1, val.getmatch())),
-                full_palette::BLACK.mix(0.5).stroke_width(2),
+                full_palette::GREEN_400.mix(0.6).stroke_width(2),
             ))
             .unwrap()
             .label("Sequence align")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK.mix(0.5))
+                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_400.mix(0.6))
             });
+                //Line of all full reads
+    chart
+    .draw_series(LineSeries::new(
+        hash.iter()
+            .enumerate()
+            .map(|(pos, ..)| (pos + 1, reads100m)),
+        BLACK.mix(0.7).stroke_width(3),
+    ))
+    .unwrap()
+    .label("Reads 100% match")
+    .legend(|(x, y)| {
+        PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7))
+    });
         chart
             .draw_series(
                 Histogram::vertical(&chart)
                     .style(full_palette::ORANGE_300.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
                         let pos1 = pos + 1;
-                        let percent = if val.total > 0 {
-                            val.r#match * 100 / val.total
-                        } else {
-                            0
-                        };
-                        if (usize::from(args.percentalerting + 1)
-                            ..=usize::from(args.percentwarning))
-                            .contains(&percent)
-                            || (val.r#match <= usize::try_from(args.minreads).unwrap()
-                                && percent > usize::from(args.percentalerting))
+                        if Alertpos::new(val, args).iswarning()
                         {
                             match alerting.get_mut(gene) {
                                 Some(d) => d.push((false, pos1)),
@@ -1132,12 +1123,7 @@ fn genegraph<T>(
                     .style(full_palette::RED_400.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
                         let pos1 = pos + 1;
-                        let percent = if val.total > 0 {
-                            val.r#match * 100 / val.total
-                        } else {
-                            0
-                        };
-                        if percent <= args.percentalerting.into() {
+                        if Alertpos::new(val,args).issuspicious() {
                             match alerting.get_mut(gene) {
                                 Some(d) => d.push((true, pos1)),
                                 None => {

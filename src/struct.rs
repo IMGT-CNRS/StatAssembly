@@ -94,6 +94,40 @@ pub(crate) enum Locus {
     TRB,
     TRG,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[allow(clippy::upper_case_acronyms)]
+pub(crate) enum Alertpos {
+    Valid,
+    Warning,
+    Suspicious
+}
+impl Alertpos {
+    pub(crate) fn new(record: &Posread, args: &Args) -> Self {
+        let percent = if record.total > 0 {
+            record.r#match * 100 / record.total
+        } else {
+            0
+        };
+        match (args.percentalerting,args.percentwarning,args.minreads)  {
+            (d,..) if percent <= d.into() => Alertpos::Suspicious,
+            (_,d,e) if record.r#match <= e.try_into().unwrap() || percent <= d.into() => Alertpos::Warning,
+            _ => Alertpos::Valid
+        }
+    }
+    ///Is a warning position
+    pub(crate) fn iswarning(&self) -> bool {
+        matches!(self,Alertpos::Warning)
+    }
+    ///Is a suspicious position
+    pub(crate) fn issuspicious(&self) -> bool {
+        matches!(self,Alertpos::Suspicious)
+    }
+    /// Is a non-suspicious nor warning position
+    #[allow(dead_code)]
+    pub(crate) fn isvalid(&self) -> bool {
+        matches!(self,Alertpos::Valid)
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq, Copy, Default)]
 pub(crate) struct Posread {
     pub(crate) r#match: usize,
