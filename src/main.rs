@@ -6,6 +6,7 @@ Available under X license
 ///Assess quality of an assembly based on reads mapping
 use clap::Parser;
 use colors::full_palette::GREY_400;
+use itertools::Itertools;
 use plotters::coord::Shift;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
@@ -31,6 +32,9 @@ use std::{
     path::PathBuf,
 };
 mod r#struct;
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const NAME: &str = env!("CARGO_PKG_NAME");
+const AUTHOR: &str = "IMGT";
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
     match (record.getcsaligned(), record.aligned_blocks_match()) {
@@ -246,7 +250,7 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     Ok(locus)
 }
 //Check BAM file exists and outputdir is created and return it
-fn checkbamandoutput(args: &Args) -> std::io::Result<&PathBuf> {
+fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     //Check bam file exists
     if let Err(e) = getreaderoffile(args) {
         return Err(std::io::Error::new(
@@ -276,14 +280,15 @@ fn checkbamandoutput(args: &Args) -> std::io::Result<&PathBuf> {
 //Process countings for each read
 fn processcounting(
     args: &Args,
-    pos: &mut BTreeMap<i64, HashMapinfo>,
-    newrange: std::ops::Range<i64>,
+    pos: &mut BTreeMap<Position,HashMapinfo>,
+    newrange: std::ops::Range<Position>,
     record: &bam::Record,
     sep: i64,
     matched: &[RangeInclusive<i64>],
     aligned: &[RangeInclusive<i64>],
 ) {
-    for (i, targeting) in pos.range_mut(newrange) {
+    for (i,targeting) in pos.range_mut(newrange) {
+        let i = &i.getzbasedpos();
         let _time = Instant::now();
         targeting.globalmismatch += getglobalmismatch(args, record);
         match record.mapq() {
@@ -341,8 +346,8 @@ fn main() {
         eprintln!("Percent warning must be greater than percent alerting.");
         return;
     }
-    //Get locus and outputdir, print errors if we have
-    let (outputdir, locus) = match (checkbamandoutput(&args), locusposparser(&args)) {
+    //Get locus, geneloc and outputdir, print errors if we have
+    let (outputdir, locus) = match (checklocusandoutput(&args), locusposparser(&args)) {
         (Err(e), _) => {
             eprintln!("{}", e);
             return;
@@ -534,10 +539,12 @@ fn main() {
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
             //let file = File::create(&filename).unwrap();
             //let mut writer = BufWriter::new(file);
-            let mut pos: BTreeMap<i64, HashMapinfo> = BTreeMap::new();
+            let locusrange = locusstart.getzbasedpos()..=locusend.getzbasedpos();
+            let mut pos: BTreeMap<Position,HashMapinfo> = BTreeMap::new();
             //Populate all B-Tree position, 0-based
-            (locusstart.getzbasedpos()..=locusend.getzbasedpos()).for_each(|p| {
-                pos.insert(p, HashMapinfo::default());
+            locusrange.for_each(|p| {
+                let default = HashMapinfo { position: Position::new(true,p), ..Default::default() };
+                pos.insert(Position::new(true,p),default);
             });
             let mut message = false;
             println!("Region {} fetched, analyzing all reads.", loci.locus);
@@ -546,7 +553,10 @@ fn main() {
             let sep = if args.fullquality {
                 1
             } else {
-                max((locusend.getobasedpos() - locusstart.getobasedpos() + 1) / 250, 100) //250 points for quality point
+                max(
+                    (locusend.getobasedpos() - locusstart.getobasedpos() + 1) / 250,
+                    100,
+                ) //250 points for quality point
             };
             for p in reader
                 .rc_records()
@@ -566,10 +576,10 @@ fn main() {
                 }
                 nocount = false;
                 //Get range to put the reads inclusive pos
-                let newrange = max(p.reference_start(), locusstart.getzbasedpos())
-                    ..min(locusend.getobasedpos(), p.reference_end());
+                let newrange = Position::new(true,max(p.reference_start(), locusstart.getzbasedpos()))
+                    ..Position::new(true,min(locusend.getobasedpos(), p.reference_end()));
                 if p.is_secondary() || p.is_supplementary() {
-                    for (_, targeting) in pos.range_mut(newrange) {
+                    for (_,targeting) in pos.range_mut(newrange) {
                         if p.is_secondary() {
                             targeting.secondary += 1;
                         } else {
@@ -600,7 +610,7 @@ fn main() {
                 return;
             }
             //Quality is the sum of reads so dividing to get real results
-            pos.iter_mut().for_each(|(_, p)| {
+            pos.iter_mut().for_each(|(_,p)| {
                 if p.qual > 0 {
                     p.qual /= max(
                         std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
@@ -618,7 +628,7 @@ fn main() {
                     let f = readgraph(
                         &outputfile1,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphtop.clone().unwrap(),
                     );
@@ -629,7 +639,7 @@ fn main() {
                     mismatchgraph(
                         &outputfile3,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         mismatchgraphtop.clone().unwrap(),
                     );
@@ -638,7 +648,7 @@ fn main() {
                     let f = readgraph(
                         &outputfile1,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphbottom.clone().unwrap(),
                     );
@@ -649,7 +659,7 @@ fn main() {
                     mismatchgraph(
                         &outputfile3,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         mismatchgraphbottom.clone().unwrap(),
                     );
@@ -658,7 +668,7 @@ fn main() {
                     let f = readgraph(
                         &outputfile2,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphtop2.clone().unwrap(),
                     );
@@ -669,7 +679,7 @@ fn main() {
                     mismatchgraph(
                         &outputfile4,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         mismatchgraphtop2.clone().unwrap(),
                     );
@@ -678,7 +688,7 @@ fn main() {
                     let f = readgraph(
                         &outputfile2,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphbottom2.clone().unwrap(),
                     );
@@ -689,14 +699,14 @@ fn main() {
                     mismatchgraph(
                         &outputfile4,
                         loci,
-                        &pos,
+                        pos.values().collect_vec().as_slice(),
                         &args,
                         mismatchgraphbottom2.clone().unwrap(),
                     );
                 }
             }
             //Create CSV from HashMap
-            if let Err(e) = createcsv(outputdir, loci, &pos, &args) {
+            if let Err(e) = createcsv(outputdir, loci, pos.values().collect_vec().as_slice(), &args) {
                 eprintln!("Cannot create csv file. Error is {}", e);
                 return;
             }
@@ -716,7 +726,7 @@ fn main() {
         }
         println!("Locus {} is done!", &floci.locus);
     }
-    println!("Process done in {} s",firstinstant.elapsed().as_secs_f32());
+    println!("Process done in {} s", firstinstant.elapsed().as_secs_f32());
 }
 fn genelist(
     outputdir: &std::path::Path,
@@ -775,7 +785,7 @@ fn genelist(
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
     for mut gene in genes {
         let mut reader = getreaderoffile(args)?;
-        let (mut reads, mut reads100, mut reads100m) = (0, 0, 0);
+        let (mut reads, mut readsfull, mut reads100, mut reads100m) = (0, 0, 0, 0);
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
@@ -787,12 +797,16 @@ fn genelist(
         let genegenericrange = genestart.getobasedpos()..geneend.getobasedpos();
         let generange = ranges::Ranges::from(genegenericrange.clone());
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
-        reader.fetch((&gene.chromosome, genegenericrange.start, genegenericrange.end))?;
+        reader.fetch((
+            &gene.chromosome,
+            genegenericrange.start,
+            genegenericrange.end,
+        ))?;
         let records = reader.records();
         //Hash contains 1-based positions
         let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
         genegenericrange.for_each(|p| {
-            hash.insert(p, Posread::default());
+            hash.insert(p, Posread::new(0, 0, 0, args).unwrap());
         });
         let mut coverageperc = 0;
         let mut empty = true;
@@ -804,22 +818,12 @@ fn genelist(
             reads += 1;
             let range = record.reference_start()..record.reference_end();
             coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
-            for p in range {
-                match hash.get_mut(&p) {
-                    Some(d) => d.addtotal(1),
-                    None => {
-                        if record.reference_start() > gene.end {
-                            break;
-                        }
-                    } //Outside coverage of gene
-                }
-            }
             'outer: for [start, end] in record.aligned_blocks() {
                 for p in start..end {
                     match hash.get_mut(&p) {
                         Some(d) => d.addindel(1),
                         None => {
-                            if start > gene.end {
+                            if start > geneend.getzbasedpos() {
                                 break 'outer;
                             }
                         } //Outside coverage of gene
@@ -832,7 +836,7 @@ fn genelist(
                         match hash.get_mut(&p) {
                             Some(d) => d.addmatch(1),
                             None => {
-                                if start > gene.end {
+                                if start > geneend.getzbasedpos() {
                                     break 'outer;
                                 }
                             } //Outside coverage of gene
@@ -840,19 +844,38 @@ fn genelist(
                     }
                 }
             }
+            //Check 0-based gene is inside the inclusive range
+            let validrange = |p: [i64; 2], genestart: &Position, geneend: &Position| {
+                let range = p[0]..=p[1];
+                range.contains(&genestart.getzbasedpos()) && range.contains(&geneend.getzbasedpos())
+            };
             if record
                 .aligned_blocks()
-                .any(|p| p[0] <= gene.start && p[1] >= gene.end)
+                .any(|p| validrange(p, &genestart, &geneend))
             {
                 reads100 += 1;
+            }
+            if range.contains(&genestart.getzbasedpos()) && range.contains(&geneend.getzbasedpos())
+            {
+                readsfull += 1;
             }
             if !args.force
                 && iterblock(&record)
                     .unwrap()
                     .into_iter()
-                    .any(|p| p[0] <= gene.start && p[1] >= gene.end)
+                    .any(|p| validrange(p, &genestart, &geneend))
             {
                 reads100m += 1;
+            }
+            for p in range {
+                match hash.get_mut(&p) {
+                    Some(d) => d.addtotal(1),
+                    None => {
+                        if record.reference_start() > gene.end {
+                            break;
+                        }
+                    } //Outside coverage of gene
+                }
             }
         }
         if empty {
@@ -871,7 +894,8 @@ fn genelist(
                     .checked_add(1)
                     .unwrap(), //Calculate the length
                 reads,
-                matchpos: String::from("0"),
+                matchpos: String::from("N/A"),
+                readsfull,
                 reads100,
                 reads100m,
                 coverageperc: 0.0,
@@ -919,7 +943,15 @@ fn genelist(
         output.set_extension("png");
         let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
         //Gene graph
-        genegraph(args, &hash, &gene, loci, root, &mut alertingpositions, reads100m);
+        genegraph(
+            args,
+            &hash,
+            &gene,
+            loci,
+            root,
+            &mut alertingpositions,
+            reads100m,
+        );
         let elem = GeneInfosFinish {
             gene: genename,
             chromosome: gene.chromosome,
@@ -934,6 +966,7 @@ fn genelist(
                 .unwrap(), //Calculate the length
             reads,
             matchpos: text,
+            readsfull,
             reads100,
             reads100m,
             coverageperc: ((coverageperc * 1_000 / reads / generange.into_iter().count()) as f32)
@@ -1010,7 +1043,7 @@ fn genegraph<T>(
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
     alerting: &mut BTreeMap<GeneInfos, Vec<(bool, usize)>>,
-    reads100m: usize
+    reads100m: usize,
 ) where
     T: DrawingBackend,
 {
@@ -1037,17 +1070,17 @@ fn genegraph<T>(
         Strand::Minus => hash.iter().rev().collect(),
     };
     chart
-    .draw_series(LineSeries::new(
-        hash.iter()
-            .enumerate()
-            .map(|(pos, (_, val))| (pos + 1, val.gettotal())),
-        full_palette::BLUE_600.mix(0.8).stroke_width(2),
-    ))
-    .unwrap()
-    .label("Total reads")
-    .legend(|(x, y)| {
-        PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_600.mix(0.8))
-    });
+        .draw_series(LineSeries::new(
+            hash.iter()
+                .enumerate()
+                .map(|(pos, (_, val))| (pos + 1, val.gettotal())),
+            full_palette::BLUE_600.mix(0.8).stroke_width(2),
+        ))
+        .unwrap()
+        .label("Total reads")
+        .legend(|(x, y)| {
+            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_600.mix(0.8))
+        });
     //Enumerate to get position relative to the gene (+1 because 0-related)
     chart
         .draw_series(LineSeries::new(
@@ -1075,27 +1108,24 @@ fn genegraph<T>(
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_400.mix(0.6))
             });
-                //Line of all full reads
-    chart
-    .draw_series(LineSeries::new(
-        hash.iter()
-            .enumerate()
-            .map(|(pos, ..)| (pos + 1, reads100m)),
-        BLACK.mix(0.7).stroke_width(3),
-    ))
-    .unwrap()
-    .label("Reads 100% match")
-    .legend(|(x, y)| {
-        PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7))
-    });
+        //Line of all full reads
+        chart
+            .draw_series(LineSeries::new(
+                hash.iter()
+                    .enumerate()
+                    .map(|(pos, ..)| (pos + 1, reads100m)),
+                BLACK.mix(0.7).stroke_width(3),
+            ))
+            .unwrap()
+            .label("Reads 100% match")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7)));
         chart
             .draw_series(
                 Histogram::vertical(&chart)
                     .style(full_palette::ORANGE_300.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
                         let pos1 = pos + 1;
-                        if Alertpos::new(val, args).iswarning()
-                        {
+                        if val.iswarning() {
                             match alerting.get_mut(gene) {
                                 Some(d) => d.push((false, pos1)),
                                 None => {
@@ -1123,7 +1153,7 @@ fn genegraph<T>(
                     .style(full_palette::RED_400.mix(0.3).filled())
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
                         let pos1 = pos + 1;
-                        if Alertpos::new(val,args).issuspicious() {
+                        if val.issuspicious() {
                             match alerting.get_mut(gene) {
                                 Some(d) => d.push((true, pos1)),
                                 None => {
@@ -1168,6 +1198,7 @@ fn genegraph<T>(
         .draw()
         .unwrap();
     // To avoid the IO failure being ignored silently, we manually call the present function
+    let root = drawnoticetext(root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
 fn givename(
@@ -1200,7 +1231,7 @@ fn givename(
 fn createcsv(
     outputdir: &std::path::Path,
     loci: &LocusInfos,
-    pos: &BTreeMap<i64, HashMapinfo>,
+    pos: &[&HashMapinfo],
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
@@ -1215,35 +1246,33 @@ fn createcsv(
     let mut csv = csv::WriterBuilder::new()
         .comment(Some(b'#'))
         .flexible(false)
-        .has_headers(false)
+        .has_headers(true)
         .delimiter(b'\t')
         .flexible(true)
         .from_path(outputfile)?;
-    csv.write_record([
-        "Position",
-        "map60",
-        "map1",
-        "map0",
-        "globalmismatch (could be uncomputed)",
-        "overlaps",
-        "secondary",
-        "supplementary",
-        "mismatches",
-        "misalign",
-        "qual (could be uncomputed)",
-    ])?;
-    for (pos, record) in pos.iter() {
-        csv.write_field(format!("{}", pos.saturating_add(1)))?; //Add +1 because 0-based
+    for record in pos {
         csv.serialize(record)?;
     }
     csv.flush()?;
     println!("CSV analysis has been saved to {}", outputfile.display());
     Ok(())
 }
+fn drawnoticetext<T>(root: DrawingArea<T, Shift>) -> DrawingArea<T, Shift> where
+T: DrawingBackend {
+    let text = format!("Graph made by {} version {} ({})", NAME, VERSION, AUTHOR);
+    let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(&root);
+    let size = root.estimate_text_size(&text, &text_style).unwrap();
+    let size = (
+        (root.dim_in_pixel().0 - size.0 - 10) as i32,
+        (root.dim_in_pixel().1 - size.1 - 10) as i32,
+    );
+    root.draw_text(&text, &text_style, size).unwrap();
+    root
+}
 fn mismatchgraph<T>(
     _outputfile: &std::path::Path,
     loci: &LocusInfos,
-    pos: &BTreeMap<i64, HashMapinfo>,
+    pos: &[&HashMapinfo],
     args: &Args,
     root: DrawingArea<T, Shift>,
 ) where
@@ -1275,9 +1304,9 @@ fn mismatchgraph<T>(
         chart
             .draw_series(AreaSeries::new(
                 pos.iter().filter_map(|p| {
-                    let val: i32 = (p.1.mismatches * 100 / max(1, p.1.gettotalmap())) as i32;
-                    if val > 0 && p.1.gettotalmap() > 0 {
-                        Some((*p.0 + 1, val))
+                    let val: i32 = (p.mismatches * 100 / max(1, p.gettotalmap())) as i32;
+                    if val > 0 && p.gettotalmap() > 0 {
+                        Some((p.position.getobasedpos(), val))
                     } else {
                         None
                     }
@@ -1294,9 +1323,9 @@ fn mismatchgraph<T>(
     chart
         .draw_series(AreaSeries::new(
             pos.iter().filter_map(|p| {
-                let val = (p.1.misalign * 100 / max(1, p.1.gettotalmap())) as i32;
-                if val > 0 && p.1.gettotalmap() > 0 {
-                    Some((*p.0 + 1, val))
+                let val = (p.misalign * 100 / max(1, p.gettotalmap())) as i32;
+                if val > 0 && p.gettotalmap() > 0 {
+                    Some((p.position.getobasedpos(), val))
                 } else {
                     None
                 }
@@ -1323,8 +1352,8 @@ fn mismatchgraph<T>(
     secondary
         .draw_secondary_series(LineSeries::new(
             pos.iter().filter_map(|p| {
-                if p.1.qual > 0 {
-                    Some((*p.0 + 1, p.1.qual))
+                if p.qual > 0 {
+                    Some((p.position.getobasedpos(), p.qual))
                 } else {
                     None
                 }
@@ -1349,7 +1378,7 @@ fn mismatchgraph<T>(
         .unwrap();
     //Bottom graph
     if let Some(bottom) = bottom {
-        let max = pos.iter().map(|(_, f)| f.globalmismatch).max().unwrap();
+        let max = pos.iter().map(|f| f.globalmismatch).max().unwrap();
         let mut chart = ChartBuilder::on(&bottom)
             .set_label_area_size(LabelAreaPosition::Left, 60)
             .set_label_area_size(LabelAreaPosition::Bottom, 60)
@@ -1379,9 +1408,9 @@ fn mismatchgraph<T>(
                     .style(full_palette::DEEPORANGE_200.mix(0.8).filled())
                     .margin(0)
                     .data(pos.iter().filter_map(|p| {
-                        let score = p.1.globalmismatch as f64 / 10_000f64;
-                        if score.is_finite() && score != 0.0 && p.1.gettotalmap() > 0 {
-                            Some((*p.0 + 1, score))
+                        let score = p.globalmismatch as f64 / 10_000f64;
+                        if score.is_finite() && score != 0.0 && p.gettotalmap() > 0 {
+                            Some((p.position.getobasedpos(), score))
                         } else {
                             None
                         }
@@ -1401,19 +1430,20 @@ fn mismatchgraph<T>(
             .unwrap();
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
+    let root = drawnoticetext(root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
 fn readgraph<T>(
     outputfile: &std::path::Path,
     loci: &LocusInfos,
-    pos: &BTreeMap<i64, HashMapinfo>,
+    pos: &[&HashMapinfo],
     args: &Args,
     root: DrawingArea<T, Shift>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     T: DrawingBackend,
 {
-    let max = pos.values().map(|max| max.getmaxvalue()).max().unwrap() + 5;
+    let max = pos.iter().map(|max| max.getmaxvalue()).max().unwrap() + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let mut chart = ChartBuilder::on(&top)
@@ -1439,7 +1469,7 @@ where
         .draw();
     chart
         .draw_series(AreaSeries::new(
-            pos.iter().map(|p| (*p.0 + 1, p.1.map0)),
+            pos.iter().map(|p| (p.position.getobasedpos(), p.map0)),
             0,
             full_palette::RED_300.mix(0.6),
         ))
@@ -1453,7 +1483,7 @@ where
         });
     chart
         .draw_series(AreaSeries::new(
-            pos.iter().map(|p| (*p.0 + 1, p.1.map1)),
+            pos.iter().map(|p| (p.position.getobasedpos(), p.map1)),
             0,
             full_palette::YELLOW_900.mix(0.5),
         ))
@@ -1467,7 +1497,7 @@ where
         });
     chart
         .draw_series(AreaSeries::new(
-            pos.iter().map(|p| (*p.0 + 1, p.1.map60)),
+            pos.iter().map(|p| (p.position.getobasedpos(), p.map60)),
             0,
             full_palette::GREEN_400.mix(0.4),
         ))
@@ -1481,7 +1511,7 @@ where
         });
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0 + 1, p.1.secondary)),
+            pos.iter().map(|p| (p.position.getobasedpos(), p.secondary)),
             full_palette::BLACK,
         ))
         .unwrap()
@@ -1489,7 +1519,7 @@ where
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0 + 1, p.1.supplementary)),
+            pos.iter().map(|p| (p.position.getobasedpos(), p.supplementary)),
             full_palette::BLUE_700,
         ))
         .unwrap()
@@ -1497,7 +1527,7 @@ where
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_700));
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (*p.0 + 1, p.1.overlaps)),
+            pos.iter().map(|p| (p.position.getobasedpos(), p.overlaps)),
             full_palette::ORANGE_300,
         ))
         .unwrap()
@@ -1530,9 +1560,9 @@ where
         .x_label_style(text_style)
         .disable_x_axis()
         .draw();
-    let breaks = pos.iter().filter_map(|(pos, elem)| {
+    let breaks = pos.iter().filter_map(|elem| {
         if elem.overlaps <= args.breaks.into() {
-            Some((*pos, 1))
+            Some((elem.position.getobasedpos(), 1))
         } else {
             None
         }
@@ -1547,23 +1577,23 @@ where
     )))?;
     let mut first = None;
     let mut prev = None;
-    let (finalpos, _) = pos.iter().last().unwrap();
-    //Get a range of numbers
+    let finalpos = pos.iter().last().unwrap().position.getobasedpos();
+    //Get a range of numbers, breaks are already 1-based at this stage
     let mut acc = breaks.clone().fold(String::new(), |mut acc, (num, _)| {
         if first.is_none() {
             first = Some(num);
             prev = Some(num);
         } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
-            if num - prev_num != 1 || num == *finalpos {
-                if num == *finalpos {
-                    prev_num = *finalpos;
+            if num - prev_num != 1 || num == finalpos {
+                if num == finalpos {
+                    prev_num = finalpos;
                 }
                 if f == prev_num {
-                    acc.push_str(&format!("{}:{}\n", loci.contig, f + 1));
+                    acc.push_str(&format!("{}:{}\n", loci.contig, f));
                 } else {
-                    acc.push_str(&format!("{}:{}..{}\n", loci.contig, f + 1, prev_num + 1));
+                    acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
                 }
-                if num != *finalpos {
+                if num != finalpos {
                     first = Some(num);
                     prev = Some(num);
                 } else {
@@ -1596,6 +1626,7 @@ where
         .border_style(BLACK.mix(0.8))
         .draw()
         .unwrap();
+    let root = drawnoticetext(root);
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
     Ok(())
