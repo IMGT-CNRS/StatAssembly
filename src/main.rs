@@ -8,7 +8,6 @@ use clap::Parser;
 use colors::full_palette::GREY_400;
 use itertools::Itertools;
 use plotters::coord::Shift;
-use std::fs;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
@@ -1579,24 +1578,25 @@ where
     let mut first = None;
     let mut prev = None;
     let finalpos = pos.iter().last().unwrap().position.getobasedpos();
-    let finalbreak = breaks.clone().map(|p| p.0).max().unwrap();
+    //Might be none if no breaks
+    let finalbreak = breaks.clone().map(|p| p.0).max();
     let mut acc = breaks.clone().fold(String::new(), |mut acc, (num, _)| {
         if first.is_none() {
             first = Some(num);
             prev = Some(num);
-        } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
-            if num - prev_num != 1 || num == finalpos || num == finalbreak {
+        } else if let (Some(finalbreakr), Some(mut prev_num), Some(f)) = (finalbreak, prev, first) {
+            if num - prev_num != 1 || num == finalpos || num == finalbreakr {
                 if num == finalpos {
                     prev_num = finalpos;
-                } else if num == finalbreak {
-                    prev_num = finalbreak;
+                } else if num == finalbreakr {
+                    prev_num = finalbreakr;
                 }
                 if f == prev_num {
                     acc.push_str(&format!("{}:{}\n", loci.contig, f));
                 } else {
                     acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
                 }
-                if num != finalpos && num != finalbreak {
+                if num != finalpos && num != finalbreakr {
                     first = Some(num);
                     prev = Some(num);
                 } else {
