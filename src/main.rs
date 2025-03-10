@@ -280,14 +280,14 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
 //Process countings for each read
 fn processcounting(
     args: &Args,
-    pos: &mut BTreeMap<Position,HashMapinfo>,
+    pos: &mut BTreeMap<Position, HashMapinfo>,
     newrange: std::ops::Range<Position>,
     record: &bam::Record,
     sep: i64,
     matched: &[RangeInclusive<i64>],
     aligned: &[RangeInclusive<i64>],
 ) {
-    for (i,targeting) in pos.range_mut(newrange) {
+    for (i, targeting) in pos.range_mut(newrange) {
         let i = &i.getzbasedpos();
         let _time = Instant::now();
         targeting.globalmismatch += getglobalmismatch(args, record);
@@ -540,11 +540,14 @@ fn main() {
             //let file = File::create(&filename).unwrap();
             //let mut writer = BufWriter::new(file);
             let locusrange = locusstart.getzbasedpos()..=locusend.getzbasedpos();
-            let mut pos: BTreeMap<Position,HashMapinfo> = BTreeMap::new();
+            let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
             //Populate all B-Tree position, 0-based
             locusrange.for_each(|p| {
-                let default = HashMapinfo { position: Position::new(true,p), ..Default::default() };
-                pos.insert(Position::new(true,p),default);
+                let default = HashMapinfo {
+                    position: Position::new(true, p),
+                    ..Default::default()
+                };
+                pos.insert(Position::new(true, p), default);
             });
             let mut message = false;
             println!("Region {} fetched, analyzing all reads.", loci.locus);
@@ -576,10 +579,11 @@ fn main() {
                 }
                 nocount = false;
                 //Get range to put the reads inclusive pos
-                let newrange = Position::new(true,max(p.reference_start(), locusstart.getzbasedpos()))
-                    ..Position::new(true,min(locusend.getobasedpos(), p.reference_end()));
+                let newrange =
+                    Position::new(true, max(p.reference_start(), locusstart.getzbasedpos()))
+                        ..Position::new(true, min(locusend.getobasedpos(), p.reference_end()));
                 if p.is_secondary() || p.is_supplementary() {
-                    for (_,targeting) in pos.range_mut(newrange) {
+                    for (_, targeting) in pos.range_mut(newrange) {
                         if p.is_secondary() {
                             targeting.secondary += 1;
                         } else {
@@ -610,7 +614,7 @@ fn main() {
                 return;
             }
             //Quality is the sum of reads so dividing to get real results
-            pos.iter_mut().for_each(|(_,p)| {
+            pos.iter_mut().for_each(|(_, p)| {
                 if p.qual > 0 {
                     p.qual /= max(
                         std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
@@ -706,7 +710,12 @@ fn main() {
                 }
             }
             //Create CSV from HashMap
-            if let Err(e) = createcsv(outputdir, loci, pos.values().collect_vec().as_slice(), &args) {
+            if let Err(e) = createcsv(
+                outputdir,
+                loci,
+                pos.values().collect_vec().as_slice(),
+                &args,
+            ) {
                 eprintln!("Cannot create csv file. Error is {}", e);
                 return;
             }
@@ -1257,8 +1266,10 @@ fn createcsv(
     println!("CSV analysis has been saved to {}", outputfile.display());
     Ok(())
 }
-fn drawnoticetext<T>(root: DrawingArea<T, Shift>) -> DrawingArea<T, Shift> where
-T: DrawingBackend {
+fn drawnoticetext<T>(root: DrawingArea<T, Shift>) -> DrawingArea<T, Shift>
+where
+    T: DrawingBackend,
+{
     let text = format!("Graph made by {} version {} ({})", NAME, VERSION, AUTHOR);
     let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(&root);
     let size = root.estimate_text_size(&text, &text_style).unwrap();
@@ -1519,7 +1530,8 @@ where
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
     chart
         .draw_series(LineSeries::new(
-            pos.iter().map(|p| (p.position.getobasedpos(), p.supplementary)),
+            pos.iter()
+                .map(|p| (p.position.getobasedpos(), p.supplementary)),
             full_palette::BLUE_700,
         ))
         .unwrap()
@@ -1584,19 +1596,21 @@ where
         if first.is_none() {
             first = Some(num);
             prev = Some(num);
-        } else if let (Some(finalbreakr), Some(mut prev_num), Some(f)) = (finalbreak, prev, first) {
-            if num - prev_num != 1 || num == finalpos || num == finalbreakr {
+        } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
+            if num - prev_num != 1 || num == finalpos || Some(num) == finalbreak {
                 if num == finalpos {
                     prev_num = finalpos;
-                } else if num == finalbreakr {
-                    prev_num = finalbreakr;
+                } else if let Some(finalbreakr) = finalbreak {
+                    if num == finalbreakr {
+                        prev_num = finalbreakr;
+                    }
                 }
                 if f == prev_num {
                     acc.push_str(&format!("{}:{}\n", loci.contig, f));
                 } else {
                     acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
                 }
-                if num != finalpos && num != finalbreakr {
+                if num != finalpos && Some(num) != finalbreak {
                     first = Some(num);
                     prev = Some(num);
                 } else {
