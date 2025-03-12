@@ -1,7 +1,7 @@
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
-Available under X license
+Available under EUPL license
 */
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
@@ -38,7 +38,7 @@ pub(crate) struct Args {
     /// Coverage to calculate on CSV
     #[arg(short, long, default_value_t = 10)]
     pub(crate) coverage: u32,
-    /// Minimum number of reads (included) for warning positions
+    /// Minimum number of match reads (included) for warning positions
     #[arg(long, default_value_t = 10)]
     pub(crate) minreads: u32,
     /// Percent warning position for mismatch reads (included)
@@ -56,7 +56,7 @@ pub(crate) struct Args {
     /// Only strand-specific alignments to reference
     #[arg(long)]
     pub(crate) forward: bool,
-    /// Query full quality (script will be longer to execute)
+    /// Query full quality PHRED score (script will be longer to execute)
     #[arg(long)]
     pub(crate) fullquality: bool,
     /// Calculate total reads mismatch
@@ -65,10 +65,10 @@ pub(crate) struct Args {
     /// Get supplementary and secondary alignments on gene graphs
     #[arg(long)]
     pub(crate) allreads: bool,
-    /// Save as SVG images
+    /// Save as SVG images (create big images)
     #[arg(long)]
     pub(crate) svg: bool,
-    ///Species
+    ///Species name (for folder creation)
     #[arg(short, long)]
     pub(crate) species: String,
     ///Gene location (csv file). See example file for blueprint.
@@ -99,7 +99,7 @@ pub(crate) enum Locus {
 pub enum Alertpos {
     Valid,
     Warning,
-    Suspicious
+    Suspicious,
 }
 pub(crate) trait Alerting {
     ///Is a warning position
@@ -117,26 +117,32 @@ impl Alertpos {
         } else {
             0
         };
-        match (record.percentalerting,record.percentwarning,record.minreads)  {
-            (d,..) if percent <= d.into() => Alertpos::Suspicious,
-            (_,d,e) if record.r#match <= e.try_into().unwrap() || percent <= d.into() => Alertpos::Warning,
-            _ => Alertpos::Valid
+        match (
+            record.percentalerting,
+            record.percentwarning,
+            record.minreads,
+        ) {
+            (d, ..) if percent <= d.into() => Alertpos::Suspicious,
+            (_, d, e) if record.r#match <= e.try_into().unwrap() || percent <= d.into() => {
+                Alertpos::Warning
+            }
+            _ => Alertpos::Valid,
         }
     }
 }
 impl Alerting for Alertpos {
     ///Is a warning position
     fn iswarning(&self) -> bool {
-        matches!(self,Alertpos::Warning)
+        matches!(self, Alertpos::Warning)
     }
     ///Is a suspicious position
     fn issuspicious(&self) -> bool {
-        matches!(self,Alertpos::Suspicious)
+        matches!(self, Alertpos::Suspicious)
     }
     /// Is a non-suspicious nor warning position
     #[allow(dead_code)]
     fn isvalid(&self) -> bool {
-        matches!(self,Alertpos::Valid)
+        matches!(self, Alertpos::Valid)
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,18 +164,44 @@ impl Ord for Position {
 impl Serialize for Position {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer {
+        S: serde::Serializer,
+    {
         serializer.serialize_i64(self.getobasedpos())
+    }
+}
+impl<'de> Deserialize<'de> for Position {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s: &str = de::Deserialize::deserialize(deserializer)?;
+
+        match s.parse::<i64>() {
+            Ok(pos) => Ok(Position::new(false,pos)),
+            Err(_) => Err(de::Error::invalid_type(de::Unexpected::Str(s),&"expected i32")),
+        }
     }
 }
 impl Default for Position {
     fn default() -> Self {
-        Self { zbased: true, position: 0 }
+        Self {
+            zbased: true,
+            position: 0,
+        }
     }
 }
 impl Position {
     pub(crate) fn new(zbased: bool, position: i64) -> Self {
         Position { zbased, position }
+    }
+    pub(crate) fn length(&self, other: &Self) -> i64 {
+        let min = std::cmp::min(self.getzbasedpos(),other.getzbasedpos());
+        let max = std::cmp::max(self.getzbasedpos(),other.getzbasedpos());
+        max
+                .checked_sub(min)
+                .unwrap()
+                .checked_add(1)
+                .unwrap() //Calculate the length
     }
     pub(crate) fn getzbasedpos(&self) -> i64 {
         if self.zbased {
@@ -223,7 +255,12 @@ impl std::fmt::Display for MyError {
 impl std::error::Error for MyError {}
 impl Posread {
     #[allow(dead_code)]
-    pub(crate) fn new(r#match: usize, indel: usize, total: usize, args: &Args) -> Result<Self, MyError> {
+    pub(crate) fn new(
+        r#match: usize,
+        indel: usize,
+        total: usize,
+        args: &Args,
+    ) -> Result<Self, MyError> {
         if r#match + indel > total {
             return Err(MyError(String::from("Invalid total")));
         }
@@ -233,7 +270,7 @@ impl Posread {
             total,
             minreads: args.minreads,
             percentwarning: args.percentwarning,
-            percentalerting: args.percentalerting
+            percentalerting: args.percentalerting,
         })
     }
     ///Get the state of the position
@@ -278,14 +315,12 @@ pub(crate) enum Haplotype {
 }
 impl Ord for Haplotype {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self == other {
-            std::cmp::Ordering::Equal
-        } else if self == &Haplotype::Primary {
-            std::cmp::Ordering::Less
-        } else if other == &Haplotype::Primary {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
+        match (self, other) {
+            (Self::Primary, Self::Primary) | (Self::Alternate, Self::Alternate) => {
+                std::cmp::Ordering::Equal
+            }
+            (Self::Primary, Self::Alternate) => std::cmp::Ordering::Less,
+            (Self::Alternate, Self::Primary) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -312,8 +347,8 @@ pub(crate) struct GeneInfos {
     pub(crate) gene: String,
     pub(crate) chromosome: String,
     pub(crate) strand: Strand,
-    pub(crate) start: i64,
-    pub(crate) end: i64,
+    pub(crate) start: Position,
+    pub(crate) end: Position,
 }
 impl PartialEq for GeneInfos {
     fn eq(&self, other: &Self) -> bool {
@@ -375,9 +410,9 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) gene: String,
     pub(crate) chromosome: String,
     pub(crate) strand: Strand,
-    pub(crate) start: i64,
-    pub(crate) end: i64,
-    pub(crate) length: i64,
+    pub(crate) start: Position,
+    pub(crate) end: Position,
+    length: i64,
     pub(crate) coverageperc: f32,
     pub(crate) reads: usize,
     pub(crate) matchpos: String,
@@ -386,13 +421,45 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100m: usize,
     pub(crate) coveragex: usize,
 }
+impl GeneInfosFinish {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        gene: GeneInfos,
+        reads: usize,
+        readsfull: usize,
+        matchpos: Option<String>,
+        reads100: usize,
+        reads100m: usize,
+        coverageperc: f32,
+        coveragex: usize,
+    ) -> Self {
+        GeneInfosFinish {
+            gene: gene.gene,
+            chromosome: gene.chromosome,
+            strand: gene.strand,
+            length: gene.end.length(&gene.start),
+            start: gene.start,
+            end: gene.end,
+            reads,
+            matchpos: matchpos.unwrap_or(String::from("N/A")),
+            readsfull,
+            reads100,
+            reads100m,
+            coverageperc,
+            coveragex,
+        }
+    }
+    pub(crate) fn make_default(gene: GeneInfos) -> Self {
+        Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
     pub(crate) contig: String,
-    pub(crate) start: i64,
-    pub(crate) end: i64,
+    pub(crate) start: Position,
+    pub(crate) end: Position,
 }
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct HashMapinfo {
@@ -425,7 +492,7 @@ impl HashMapinfo {
             self.secondary,
             self.supplementary,
         ];
-        *elem.iter().max().unwrap()
+        elem.into_iter().max().unwrap()
     }
     pub(crate) fn gettotalmap(&self) -> i64 {
         self.map0 + self.map1 + self.map60
@@ -478,6 +545,6 @@ pub(crate) fn globalmismatch<S>(num: &usize, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    let val = *num as f32 / 10_000.0;
+    let val = *num as f32 / crate::GLOBALMISMATCHFLOATING as f32;
     s.collect_str(&format!("{}", val))
 }

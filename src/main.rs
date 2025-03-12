@@ -1,7 +1,7 @@
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
-Available under X license
+Available under EUPL license
 */
 ///Assess quality of an assembly based on reads mapping
 use clap::Parser;
@@ -35,6 +35,7 @@ mod r#struct;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NAME: &str = env!("CARGO_PKG_NAME");
 const AUTHOR: &str = "IMGT";
+const GLOBALMISMATCHFLOATING: usize = 10_000;
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
     match (record.getcsaligned(), record.aligned_blocks_match()) {
@@ -203,7 +204,7 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
             if d == 0 {
                 0
             } else {
-                (d as usize * 10_000usize) / length
+                (d as usize * GLOBALMISMATCHFLOATING) / length
             }
         }
         _ => 0,
@@ -379,6 +380,8 @@ fn main() {
             floci.locus,
             if !haplotypebool { "diploid" } else { "haploid" }
         );
+        let readresultsize = (1800,1000*std::convert::TryInto::<u32>::try_into(haplotype).unwrap());
+        let mismatchsize = (1200,600* std::convert::TryInto::<u32>::try_into(haplotype).unwrap());
         //Get infos for graph
         let mut outputfile1 = PathBuf::new();
         let mut outputfile2 = PathBuf::new();
@@ -408,10 +411,7 @@ fn main() {
                 outputfile1 = outputfile;
                 let root = SVGBackend::new(
                     &outputfile1,
-                    (
-                        900,
-                        500 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
-                    ),
+                    readresultsize,
                 )
                 .into_drawing_area();
                 if haplotypebool {
@@ -433,10 +433,7 @@ fn main() {
                 outputfile2 = outputfile;
                 let root = BitMapBackend::new(
                     &outputfile2,
-                    (
-                        1800,
-                        1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
-                    ),
+                    readresultsize,
                 )
                 .into_drawing_area();
                 if !haplotypebool {
@@ -461,10 +458,7 @@ fn main() {
                 outputfile3 = outputfile;
                 let root = SVGBackend::new(
                     &outputfile3,
-                    (
-                        1200,
-                        600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
-                    ),
+                    mismatchsize,
                 )
                 .into_drawing_area();
                 if !haplotypebool {
@@ -487,10 +481,7 @@ fn main() {
                 outputfile4 = outputfile;
                 let root = BitMapBackend::new(
                     &outputfile4,
-                    (
-                        1200,
-                        600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
-                    ),
+                    mismatchsize,
                 )
                 .into_drawing_area();
                 if !haplotypebool {
@@ -516,22 +507,20 @@ fn main() {
                     return;
                 }
             };
-            let locusstart = Position::new(false, loci.start);
-            let locusend = Position::new(false, loci.end);
             //0-based except end because end is exclusive
             if reader
                 .fetch((
                     &loci.contig,
-                    locusstart.getzbasedpos(),
-                    locusend.getobasedpos(),
+                    loci.start.getzbasedpos(),
+                    loci.end.getobasedpos(),
                 ))
                 .is_err()
             {
                 eprintln!(
                     "The region {}:{}-{} cannot be found, exiting.",
                     loci.contig,
-                    locusstart.getobasedpos(),
-                    locusend.getobasedpos()
+                    loci.start.getobasedpos(),
+                    loci.end.getobasedpos()
                 );
                 return;
             };
@@ -539,7 +528,7 @@ fn main() {
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
             //let file = File::create(&filename).unwrap();
             //let mut writer = BufWriter::new(file);
-            let locusrange = locusstart.getzbasedpos()..=locusend.getzbasedpos();
+            let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
             let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
             //Populate all B-Tree position, 0-based
             locusrange.for_each(|p| {
@@ -557,9 +546,9 @@ fn main() {
                 1
             } else {
                 max(
-                    (locusend.getobasedpos() - locusstart.getobasedpos() + 1) / 250,
+                    (loci.end.getobasedpos() - loci.start.getobasedpos() + 1) / 250,
                     100,
-                ) //250 points for quality point
+                ) //250 points for quality point or 100nt break
             };
             for p in reader
                 .rc_records()
@@ -580,8 +569,8 @@ fn main() {
                 nocount = false;
                 //Get range to put the reads inclusive pos
                 let newrange =
-                    Position::new(true, max(p.reference_start(), locusstart.getzbasedpos()))
-                        ..Position::new(true, min(locusend.getobasedpos(), p.reference_end()));
+                    Position::new(true, max(p.reference_start(), loci.start.getzbasedpos()))
+                        ..Position::new(true, min(loci.end.getobasedpos(), p.reference_end()));
                 if p.is_secondary() || p.is_supplementary() {
                     for (_, targeting) in pos.range_mut(newrange) {
                         if p.is_secondary() {
@@ -608,12 +597,12 @@ fn main() {
                 eprintln!(
                     "The region {}:{}-{} cannot be found, exiting.",
                     loci.contig,
-                    locusstart.getobasedpos(),
-                    locusend.getobasedpos()
+                    loci.start.getobasedpos(),
+                    loci.end.getobasedpos()
                 );
                 return;
             }
-            //Quality is the sum of reads so dividing to get real results
+            //Quality and mismatch is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
                 if p.qual > 0 {
                     p.qual /= max(
@@ -709,6 +698,7 @@ fn main() {
                     );
                 }
             }
+            println!("Graphs finished.");
             //Create CSV from HashMap
             if let Err(e) = createcsv(
                 outputdir,
@@ -726,7 +716,7 @@ fn main() {
                     eprintln!("Cannot create gene list. Error is {}", e);
                     return;
                 }
-                println!("Gene list finished");
+                println!("Gene list finished.");
             } else {
                 eprintln!(
                     "You have not provided a gene list, skipped. Provide one to get more datas."
@@ -767,18 +757,14 @@ fn genelist(
             "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive",
         )));
     }
-    let (locstart, locend) = (
-        Position::new(false, loci.start),
-        Position::new(false, loci.end),
-    );
     //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig
-            && (locstart.getobasedpos()..=locend.getobasedpos()).contains(&gene.start)
-            && (locstart.getobasedpos()..=locend.getobasedpos()).contains(&gene.end)
+            && (loci.start.getobasedpos()..=loci.end.getobasedpos()).contains(&gene.start.getobasedpos())
+            && (loci.start.getobasedpos()..=loci.end.getobasedpos()).contains(&gene.end.getobasedpos())
     });
     if genes.is_empty() {
-        println!("No gene identified for locus {}", loci.locus);
+        println!("No gene identified for locus {}, skipped.", loci.locus);
         return Ok(());
     }
     let outputfile = outputdir.join(givename(
@@ -798,12 +784,8 @@ fn genelist(
         if gene.start > gene.end {
             (gene.end, gene.start) = (gene.start, gene.end) //Swap position
         }
-        let (genestart, geneend) = (
-            Position::new(false, gene.start),
-            Position::new(false, gene.end),
-        );
         //O position is exclusive
-        let genegenericrange = genestart.getobasedpos()..geneend.getobasedpos();
+        let genegenericrange = gene.start.getobasedpos()..gene.end.getobasedpos();
         let generange = ranges::Ranges::from(genegenericrange.clone());
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
         reader.fetch((
@@ -832,7 +814,7 @@ fn genelist(
                     match hash.get_mut(&p) {
                         Some(d) => d.addindel(1),
                         None => {
-                            if start > geneend.getzbasedpos() {
+                            if start > gene.end.getzbasedpos() {
                                 break 'outer;
                             }
                         } //Outside coverage of gene
@@ -845,7 +827,7 @@ fn genelist(
                         match hash.get_mut(&p) {
                             Some(d) => d.addmatch(1),
                             None => {
-                                if start > geneend.getzbasedpos() {
+                                if start > gene.end.getzbasedpos() {
                                     break 'outer;
                                 }
                             } //Outside coverage of gene
@@ -860,11 +842,11 @@ fn genelist(
             };
             if record
                 .aligned_blocks()
-                .any(|p| validrange(p, &genestart, &geneend))
+                .any(|p| validrange(p, &gene.start, &gene.end))
             {
                 reads100 += 1;
             }
-            if range.contains(&genestart.getzbasedpos()) && range.contains(&geneend.getzbasedpos())
+            if range.contains(&gene.start.getzbasedpos()) && range.contains(&gene.end.getzbasedpos())
             {
                 readsfull += 1;
             }
@@ -872,7 +854,7 @@ fn genelist(
                 && iterblock(&record)
                     .unwrap()
                     .into_iter()
-                    .any(|p| validrange(p, &genestart, &geneend))
+                    .any(|p| validrange(p, &gene.start, &gene.end))
             {
                 reads100m += 1;
             }
@@ -880,7 +862,7 @@ fn genelist(
                 match hash.get_mut(&p) {
                     Some(d) => d.addtotal(1),
                     None => {
-                        if record.reference_start() > gene.end {
+                        if record.reference_start() > gene.end.getzbasedpos() {
                             break;
                         }
                     } //Outside coverage of gene
@@ -890,26 +872,7 @@ fn genelist(
         if empty {
             writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
             //PUT 0 value on the CSV
-            let elem = GeneInfosFinish {
-                gene: gene.gene,
-                chromosome: gene.chromosome,
-                strand: gene.strand,
-                start: genestart.getobasedpos(),
-                end: geneend.getobasedpos(),
-                length: geneend
-                    .getobasedpos()
-                    .checked_sub(genestart.getobasedpos())
-                    .unwrap()
-                    .checked_add(1)
-                    .unwrap(), //Calculate the length
-                reads,
-                matchpos: String::from("N/A"),
-                readsfull,
-                reads100,
-                reads100m,
-                coverageperc: 0.0,
-                coveragex: 0,
-            };
+            let elem = GeneInfosFinish::make_default(gene);
             finale.push(elem);
             continue;
         }
@@ -918,29 +881,22 @@ fn genelist(
             .iter()
             .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap())
             .count();
-        //Merging data
-        let text = match gene.strand {
-            Strand::Plus => hash.iter().fold(String::new(), |mut acc, (_, f)| {
-                acc.push_str(&format!(
-                    "{}/{}(={})-",
-                    f.getindel(),
-                    f.gettotal(),
-                    f.getmatch()
-                ));
-                acc
-            }),
-            Strand::Minus => hash.iter().rev().fold(String::new(), |mut acc, (_, f)| {
-                acc.push_str(&format!(
-                    "{}/{}(={})-",
-                    f.getindel(),
-                    f.gettotal(),
-                    f.getmatch()
-                ));
-                acc
-            }),
+        //Reverse if complement
+        let iterator: Vec<(&i64, &Posread)> = match gene.strand {
+            Strand::Plus => hash.iter().collect(),
+            Strand::Minus => hash.iter().rev().collect(),
         };
+        //Merging data
+        let text = iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
+            acc.push_str(&format!(
+                "{}/{}(={})-",
+                f.getindel(),
+                f.gettotal(),
+                f.getmatch()
+            ));
+            acc
+        });
         let text = String::from(text.trim_end_matches('-'));
-        let genename = gene.gene.clone();
         let plots = outputdir
             .join(format!("gene_{}", args.species))
             .join(loci.haplotype.to_string().as_str().to_lowercase());
@@ -948,7 +904,7 @@ fn genelist(
             println!("Creating the folder {}", plots.display());
             std::fs::create_dir_all(&plots)?;
         };
-        let mut output = plots.join(&genename);
+        let mut output = plots.join(&gene.gene);
         output.set_extension("png");
         let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
         //Gene graph
@@ -961,28 +917,10 @@ fn genelist(
             &mut alertingpositions,
             reads100m,
         );
-        let elem = GeneInfosFinish {
-            gene: genename,
-            chromosome: gene.chromosome,
-            strand: gene.strand,
-            start: genestart.getobasedpos(),
-            end: geneend.getobasedpos(),
-            length: geneend
-                .getobasedpos()
-                .checked_sub(genestart.getobasedpos())
-                .unwrap()
-                .checked_add(1)
-                .unwrap(), //Calculate the length
-            reads,
-            matchpos: text,
-            readsfull,
-            reads100,
-            reads100m,
-            coverageperc: ((coverageperc * 1_000 / reads / generange.into_iter().count()) as f32)
-                .round()
-                / 1000.0,
-            coveragex: coverage,
-        };
+        let coverageperc = ((coverageperc * 1_000 / reads / generange.into_iter().count()) as f32)
+        .round()
+        / 1_000.0;
+        let elem = GeneInfosFinish::new(gene,reads,readsfull,Some(text),reads100,reads100m,coverageperc,coverage);
         finale.push(elem);
     }
     let mut csv = csv::WriterBuilder::new()
@@ -1006,6 +944,56 @@ fn genelist(
         printpossus(args, loci, outputdir, &alertingpositions)?;
     }
     println!("Gene analysis has been saved to {}", outputfile.display());
+    Ok(())
+}
+fn printbreaks<T>(args: &Args, finalpos: i64, breaks: T,loci: &LocusInfos,outputfile: &std::path::Path) -> std::io::Result<()> where T: Iterator<Item = (i64,i64)> + Clone {
+    let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(
+        &args.species,
+        &loci.locus,
+        &loci.contig,
+        loci.haplotype.isprimary(),
+        "break.txt",
+        false,
+    )))?;
+    let mut first = None;
+    let mut prev = None;
+    //Might be none if no breaks
+    let finalbreak = breaks.clone().map(|p| p.0).max();
+    let mut acc = breaks.fold(String::new(), |mut acc, (num, _)| {
+        if first.is_none() {
+            first = Some(num);
+            prev = Some(num);
+        } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
+            if num - prev_num != 1 || num == finalpos || Some(num) == finalbreak {
+                if num == finalpos {
+                    prev_num = finalpos;
+                } else if let Some(finalbreakr) = finalbreak {
+                    if num == finalbreakr {
+                        prev_num = finalbreakr;
+                    }
+                }
+                if f == prev_num {
+                    acc.push_str(&format!("{}:{}\n", loci.contig, f));
+                } else {
+                    acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
+                }
+                if num != finalpos && Some(num) != finalbreak {
+                    first = Some(num);
+                    prev = Some(num);
+                } else {
+                    first = None;
+                }
+            } else {
+                prev = Some(num);
+            }
+        }
+        acc
+    });
+    if let Some(d) = first {
+        acc.push_str(&format!("{}:{}\n", loci.contig, d + 1));
+    }
+    breakfile.write_all(acc.trim().as_bytes())?;
+    breakfile.flush()?;
     Ok(())
 }
 fn printpossus(
@@ -1083,12 +1071,12 @@ fn genegraph<T>(
             hash.iter()
                 .enumerate()
                 .map(|(pos, (_, val))| (pos + 1, val.gettotal())),
-            full_palette::BLUE_600.mix(0.8).stroke_width(2),
+            full_palette::BLUE_300.mix(0.8).stroke_width(4),
         ))
         .unwrap()
         .label("Total reads")
         .legend(|(x, y)| {
-            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_600.mix(0.8))
+            PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_300.mix(0.8))
         });
     //Enumerate to get position relative to the gene (+1 because 0-related)
     chart
@@ -1096,7 +1084,7 @@ fn genegraph<T>(
             hash.iter()
                 .enumerate()
                 .map(|(pos, (_, val))| (pos + 1, val.getindel())),
-            full_palette::ORANGE_300.mix(0.8).stroke_width(2),
+            full_palette::ORANGE_300.mix(0.7).stroke_width(3),
         ))
         .unwrap()
         .label("Sequence match")
@@ -1110,12 +1098,12 @@ fn genegraph<T>(
                 hash.iter()
                     .enumerate()
                     .map(|(pos, (_, val))| (pos + 1, val.getmatch())),
-                full_palette::GREEN_400.mix(0.6).stroke_width(2),
+                full_palette::GREEN_400.mix(0.5).stroke_width(2),
             ))
             .unwrap()
             .label("Sequence align")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_400.mix(0.6))
+                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_400.mix(0.5))
             });
         //Line of all full reads
         chart
@@ -1207,7 +1195,7 @@ fn genegraph<T>(
         .draw()
         .unwrap();
     // To avoid the IO failure being ignored silently, we manually call the present function
-    let root = drawnoticetext(root);
+    drawnoticetext(&root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
 fn givename(
@@ -1266,19 +1254,18 @@ fn createcsv(
     println!("CSV analysis has been saved to {}", outputfile.display());
     Ok(())
 }
-fn drawnoticetext<T>(root: DrawingArea<T, Shift>) -> DrawingArea<T, Shift>
+fn drawnoticetext<T>(root: &DrawingArea<T, Shift>)
 where
     T: DrawingBackend,
 {
     let text = format!("Graph made by {} version {} ({})", NAME, VERSION, AUTHOR);
-    let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(&root);
+    let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(root);
     let size = root.estimate_text_size(&text, &text_style).unwrap();
     let size = (
         (root.dim_in_pixel().0 - size.0 - 10) as i32,
         (root.dim_in_pixel().1 - size.1 - 10) as i32,
     );
     root.draw_text(&text, &text_style, size).unwrap();
-    root
 }
 fn mismatchgraph<T>(
     _outputfile: &std::path::Path,
@@ -1309,7 +1296,7 @@ fn mismatchgraph<T>(
             ),
             ("sans-serif", 28),
         )
-        .build_cartesian_2d(loci.start..loci.end, 0..100)
+        .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..100)
         .unwrap();
     if !args.force {
         chart
@@ -1347,7 +1334,7 @@ fn mismatchgraph<T>(
         .unwrap()
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
-    let mut secondary = chart.set_secondary_coord(loci.start..loci.end, 0..100usize);
+    let mut secondary = chart.set_secondary_coord(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..100usize);
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{}%", f))
@@ -1401,7 +1388,7 @@ fn mismatchgraph<T>(
                 ),
                 ("sans-serif", 40),
             )  */
-            .build_cartesian_2d(loci.start..loci.end, 0.0..max as f64 * 1.1 / 10_000.0)
+            .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0.0..max as f64 * 1.1 / 10_000.0)
             .unwrap();
         let _ = chart
             .configure_mesh()
@@ -1419,7 +1406,7 @@ fn mismatchgraph<T>(
                     .style(full_palette::DEEPORANGE_200.mix(0.8).filled())
                     .margin(0)
                     .data(pos.iter().filter_map(|p| {
-                        let score = p.globalmismatch as f64 / 10_000f64;
+                        let score = p.globalmismatch as f64 / GLOBALMISMATCHFLOATING as f64;
                         if score.is_finite() && score != 0.0 && p.gettotalmap() > 0 {
                             Some((p.position.getobasedpos(), score))
                         } else {
@@ -1441,7 +1428,7 @@ fn mismatchgraph<T>(
             .unwrap();
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
-    let root = drawnoticetext(root);
+    drawnoticetext(&root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
 fn readgraph<T>(
@@ -1467,7 +1454,7 @@ where
             ),
             ("sans-serif", 28),
         )
-        .build_cartesian_2d(loci.start..loci.end, 0..max)
+        .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max)
         .unwrap();
     let _ = chart
         .configure_mesh()
@@ -1563,7 +1550,7 @@ where
             ),
             ("sans-serif", 40),
         )  */
-        .build_cartesian_2d((loci.start..loci.end).into_segmented(), 0..1i64)
+        .build_cartesian_2d((loci.start.getobasedpos()..loci.end.getobasedpos()).into_segmented(), 0..1i64)
         .unwrap();
     let text_style = ("sans-serif", 14, &BLACK).into_text_style(&root);
     let _ = chart
@@ -1579,53 +1566,8 @@ where
             None
         }
     });
-    let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(
-        &args.species,
-        &loci.locus,
-        &loci.contig,
-        loci.haplotype.isprimary(),
-        "break.txt",
-        false,
-    )))?;
-    let mut first = None;
-    let mut prev = None;
-    let finalpos = pos.iter().last().unwrap().position.getobasedpos();
-    //Might be none if no breaks
-    let finalbreak = breaks.clone().map(|p| p.0).max();
-    let mut acc = breaks.clone().fold(String::new(), |mut acc, (num, _)| {
-        if first.is_none() {
-            first = Some(num);
-            prev = Some(num);
-        } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
-            if num - prev_num != 1 || num == finalpos || Some(num) == finalbreak {
-                if num == finalpos {
-                    prev_num = finalpos;
-                } else if let Some(finalbreakr) = finalbreak {
-                    if num == finalbreakr {
-                        prev_num = finalbreakr;
-                    }
-                }
-                if f == prev_num {
-                    acc.push_str(&format!("{}:{}\n", loci.contig, f));
-                } else {
-                    acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
-                }
-                if num != finalpos && Some(num) != finalbreak {
-                    first = Some(num);
-                    prev = Some(num);
-                } else {
-                    first = None;
-                }
-            } else {
-                prev = Some(num);
-            }
-        }
-        acc
-    });
-    if let Some(d) = first {
-        acc.push_str(&format!("{}:{}\n", loci.contig, d + 1));
-    }
-    breakfile.write_all(acc.trim().as_bytes())?;
+        let finalpos = pos.iter().last().unwrap().position.getobasedpos();
+    printbreaks(args, finalpos,breaks.clone(),loci,outputfile)?;
     chart
         .draw_series(
             Histogram::vertical(&chart)
@@ -1643,7 +1585,7 @@ where
         .border_style(BLACK.mix(0.8))
         .draw()
         .unwrap();
-    let root = drawnoticetext(root);
+    drawnoticetext(&root);
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
     Ok(())
