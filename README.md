@@ -64,7 +64,7 @@ binaries/IMGT_StatAssembly_linux_x64_x86 -f example_files/CHM13v2.0.bam -s human
 
 ## Output
 
-
+The expected output from execution is present in `example_files/results/`.
 
 ### Memory consumption
 The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
