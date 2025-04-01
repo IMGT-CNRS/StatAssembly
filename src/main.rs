@@ -19,8 +19,7 @@ use extended_htslib::bam::{self, IndexedReader, Read};
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
-    AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord,
-    PathElement, SVGBackend, full_palette,
+    full_palette, AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord, PathElement, SVGBackend
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
@@ -31,11 +30,18 @@ use std::{
     io::Write,
     path::PathBuf,
 };
+use lazy_static::lazy_static;
 mod r#struct;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NAME: &str = env!("CARGO_PKG_NAME");
 const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
+lazy_static!{
+    static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
+        let args = Args::parse();
+        ("sans-serif", args.fontlegendsize, &BLACK)
+    };
+}
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
     match (record.getcsaligned(), record.aligned_blocks_match()) {
@@ -380,8 +386,14 @@ fn main() {
             floci.locus,
             if !haplotypebool { "diploid" } else { "haploid" }
         );
-        let readresultsize = (1800,1000*std::convert::TryInto::<u32>::try_into(haplotype).unwrap());
-        let mismatchsize = (1200,600* std::convert::TryInto::<u32>::try_into(haplotype).unwrap());
+        let readresultsize = (
+            1800,
+            1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+        );
+        let mismatchsize = (
+            1200,
+            600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+        );
         //Get infos for graph
         let mut outputfile1 = PathBuf::new();
         let mut outputfile2 = PathBuf::new();
@@ -409,11 +421,7 @@ fn main() {
                     true,
                 ));
                 outputfile1 = outputfile;
-                let root = SVGBackend::new(
-                    &outputfile1,
-                    readresultsize,
-                )
-                .into_drawing_area();
+                let root = SVGBackend::new(&outputfile1, readresultsize).into_drawing_area();
                 if haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (Some(top), Some(bottom), None, None)
@@ -431,11 +439,7 @@ fn main() {
                     true,
                 ));
                 outputfile2 = outputfile;
-                let root = BitMapBackend::new(
-                    &outputfile2,
-                    readresultsize,
-                )
-                .into_drawing_area();
+                let root = BitMapBackend::new(&outputfile2, readresultsize).into_drawing_area();
                 if !haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (None, None, Some(top), Some(bottom))
@@ -456,11 +460,7 @@ fn main() {
                     true,
                 ));
                 outputfile3 = outputfile;
-                let root = SVGBackend::new(
-                    &outputfile3,
-                    mismatchsize,
-                )
-                .into_drawing_area();
+                let root = SVGBackend::new(&outputfile3, mismatchsize).into_drawing_area();
                 if !haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (Some(top), Some(bottom), None, None)
@@ -479,11 +479,7 @@ fn main() {
                     true,
                 ));
                 outputfile4 = outputfile;
-                let root = BitMapBackend::new(
-                    &outputfile4,
-                    mismatchsize,
-                )
-                .into_drawing_area();
+                let root = BitMapBackend::new(&outputfile4, mismatchsize).into_drawing_area();
                 if !haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (None, None, Some(top), Some(bottom))
@@ -760,8 +756,10 @@ fn genelist(
     //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig
-            && (loci.start.getobasedpos()..=loci.end.getobasedpos()).contains(&gene.start.getobasedpos())
-            && (loci.start.getobasedpos()..=loci.end.getobasedpos()).contains(&gene.end.getobasedpos())
+            && (loci.start.getobasedpos()..=loci.end.getobasedpos())
+                .contains(&gene.start.getobasedpos())
+            && (loci.start.getobasedpos()..=loci.end.getobasedpos())
+                .contains(&gene.end.getobasedpos())
     });
     if genes.is_empty() {
         println!("No gene identified for locus {}, skipped.", loci.locus);
@@ -846,7 +844,8 @@ fn genelist(
             {
                 reads100 += 1;
             }
-            if range.contains(&gene.start.getzbasedpos()) && range.contains(&gene.end.getzbasedpos())
+            if range.contains(&gene.start.getzbasedpos())
+                && range.contains(&gene.end.getzbasedpos())
             {
                 readsfull += 1;
             }
@@ -918,9 +917,18 @@ fn genelist(
             reads100m,
         );
         let coverageperc = ((coverageperc * 1_000 / reads / generange.into_iter().count()) as f32)
-        .round()
-        / 1_000.0;
-        let elem = GeneInfosFinish::new(gene,reads,readsfull,Some(text),reads100,reads100m,coverageperc,coverage);
+            .round()
+            / 1_000.0;
+        let elem = GeneInfosFinish::new(
+            gene,
+            reads,
+            readsfull,
+            Some(text),
+            reads100,
+            reads100m,
+            coverageperc,
+            coverage,
+        );
         finale.push(elem);
     }
     let mut csv = csv::WriterBuilder::new()
@@ -946,7 +954,16 @@ fn genelist(
     println!("Gene analysis has been saved to {}", outputfile.display());
     Ok(())
 }
-fn printbreaks<T>(args: &Args, finalpos: i64, breaks: T,loci: &LocusInfos,outputfile: &std::path::Path) -> std::io::Result<()> where T: Iterator<Item = (i64,i64)> + Clone {
+fn printbreaks<T>(
+    args: &Args,
+    finalpos: i64,
+    breaks: T,
+    loci: &LocusInfos,
+    outputfile: &std::path::Path,
+) -> std::io::Result<()>
+where
+    T: Iterator<Item = (i64, i64)> + Clone,
+{
     let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(
         &args.species,
         &loci.locus,
@@ -1045,7 +1062,7 @@ fn genegraph<T>(
     T: DrawingBackend,
 {
     let genename = gene.gene.to_string();
-    let text_style = ("sans-serif", 14, &BLACK).into_text_style(&root);
+    let text_style = fontstyle.into_text_style(&root);
     let _ = root.fill(&plotters::prelude::WHITE);
     let max = hash.values().map(|p| p.gettotal()).max().unwrap() + 5;
     let mut chart = ChartBuilder::on(&root)
@@ -1179,21 +1196,23 @@ fn genegraph<T>(
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
         .x_desc("Position in sequence (bp)")
         .y_desc("Reads count")
-        .x_label_style(text_style.clone())
-        .y_label_style(text_style)
+        .label_style(text_style.clone())
         .light_line_style(GREY_400.mix(0.6))
         .x_max_light_lines(5)
         .y_max_light_lines(2)
         //.disable_y_mesh()
         .draw()
         .unwrap();
-    chart
-        .configure_series_labels()
-        .position(plotters::chart::SeriesLabelPosition::LowerRight)
-        .background_style(WHITE.mix(0.6))
-        .border_style(BLACK.mix(0.8))
-        .draw()
-        .unwrap();
+    if !args.nolegend {
+        chart
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::LowerRight)
+            .background_style(WHITE.mix(0.6))
+            .label_font(text_style)
+            .border_style(BLACK.mix(0.8))
+            .draw()
+            .unwrap();
+    }
     // To avoid the IO failure being ignored silently, we manually call the present function
     drawnoticetext(&root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
@@ -1277,7 +1296,7 @@ fn mismatchgraph<T>(
     T: DrawingBackend,
 {
     let _ = root.fill(&plotters::prelude::WHITE);
-    let text_style = ("sans-serif", 14, &BLACK).into_text_style(&root);
+    let text_style = fontstyle.into_text_style(&root);
     let (top, bottom) = match args.totalread {
         true => {
             let (top, bottom) = root.split_vertically((50).percent_height());
@@ -1334,7 +1353,10 @@ fn mismatchgraph<T>(
         .unwrap()
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
-    let mut secondary = chart.set_secondary_coord(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..100usize);
+    let mut secondary = chart.set_secondary_coord(
+        loci.start.getobasedpos()..loci.end.getobasedpos(),
+        0..100usize,
+    );
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{}%", f))
@@ -1342,6 +1364,7 @@ fn mismatchgraph<T>(
         .x_desc("Genomic position (bp)")
         .y_desc("Mismatch rate (%)")
         .disable_x_mesh()
+        .label_style(text_style.clone())
         .y_max_light_lines(2)
         //.disable_y_mesh()
         .draw()
@@ -1367,13 +1390,16 @@ fn mismatchgraph<T>(
         //.disable_y_mesh()
         .draw()
         .unwrap();
-    secondary
-        .configure_series_labels()
-        .position(plotters::chart::SeriesLabelPosition::UpperRight)
-        .background_style(WHITE)
-        .border_style(BLACK.mix(0.8))
-        .draw()
-        .unwrap();
+    if !args.nolegend {
+        secondary
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperRight)
+            .background_style(WHITE.mix(0.6))
+            .label_font(text_style.clone())
+            .border_style(BLACK.mix(0.8))
+            .draw()
+            .unwrap();
+    }
     //Bottom graph
     if let Some(bottom) = bottom {
         let max = pos.iter().map(|f| f.globalmismatch).max().unwrap();
@@ -1388,7 +1414,10 @@ fn mismatchgraph<T>(
                 ),
                 ("sans-serif", 40),
             )  */
-            .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0.0..max as f64 * 1.1 / 10_000.0)
+            .build_cartesian_2d(
+                loci.start.getobasedpos()..loci.end.getobasedpos(),
+                0.0..max as f64 * 1.1 / 10_000.0,
+            )
             .unwrap();
         let _ = chart
             .configure_mesh()
@@ -1396,7 +1425,7 @@ fn mismatchgraph<T>(
             .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
             .x_desc("Genomic position (bp)")
             .y_desc("Mismatch full rate (%)")
-            .x_label_style(text_style)
+            .x_label_style(text_style.clone())
             .disable_x_mesh()
             .y_max_light_lines(2)
             .draw();
@@ -1419,13 +1448,16 @@ fn mismatchgraph<T>(
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPORANGE_200)
             });
-        chart
-            .configure_series_labels()
-            .position(plotters::chart::SeriesLabelPosition::UpperRight)
-            .background_style(WHITE)
-            .border_style(BLACK.mix(0.8))
-            .draw()
-            .unwrap();
+        if !args.nolegend {
+            chart
+                .configure_series_labels()
+                .position(plotters::chart::SeriesLabelPosition::UpperRight)
+                .label_font(text_style)
+                .background_style(WHITE.mix(0.6))
+                .border_style(BLACK.mix(0.8))
+                .draw()
+                .unwrap();
+        }
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
     drawnoticetext(&root);
@@ -1441,6 +1473,7 @@ fn readgraph<T>(
 where
     T: DrawingBackend,
 {
+    let text_style = fontstyle.into_text_style(&root);
     let max = pos.iter().map(|max| max.getmaxvalue()).max().unwrap() + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
@@ -1461,6 +1494,7 @@ where
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
         //.x_desc("Genomic position (bp)")
         .y_desc("Coverage")
+        .label_style(text_style.clone())
         .disable_x_mesh()
         .y_max_light_lines(2)
         //.disable_y_mesh()
@@ -1532,13 +1566,16 @@ where
         .unwrap()
         .label("Overlapping reads")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300));
-    chart
-        .configure_series_labels()
-        .position(plotters::chart::SeriesLabelPosition::UpperRight)
-        .background_style(WHITE)
-        .border_style(BLACK.mix(0.8))
-        .draw()
-        .unwrap();
+    if !args.nolegend {
+        chart
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperRight)
+            .background_style(WHITE.mix(0.6))
+            .border_style(BLACK.mix(0.8))
+            .label_font(text_style)
+            .draw()
+            .unwrap();
+    }
     //Bottom graph
     let mut chart = ChartBuilder::on(&bottom)
         .set_label_area_size(LabelAreaPosition::Left, 60)
@@ -1550,13 +1587,16 @@ where
             ),
             ("sans-serif", 40),
         )  */
-        .build_cartesian_2d((loci.start.getobasedpos()..loci.end.getobasedpos()).into_segmented(), 0..1i64)
+        .build_cartesian_2d(
+            (loci.start.getobasedpos()..loci.end.getobasedpos()).into_segmented(),
+            0..1i64,
+        )
         .unwrap();
-    let text_style = ("sans-serif", 14, &BLACK).into_text_style(&root);
+    let text_style = fontstyle.into_text_style(&root);
     let _ = chart
         .configure_mesh()
         .x_desc("Genomic position (bp)")
-        .x_label_style(text_style)
+        .x_label_style(text_style.clone())
         .disable_x_axis()
         .draw();
     let breaks = pos.iter().filter_map(|elem| {
@@ -1566,8 +1606,8 @@ where
             None
         }
     });
-        let finalpos = pos.iter().last().unwrap().position.getobasedpos();
-    printbreaks(args, finalpos,breaks.clone(),loci,outputfile)?;
+    let finalpos = pos.iter().last().unwrap().position.getobasedpos();
+    printbreaks(args, finalpos, breaks.clone(), loci, outputfile)?;
     chart
         .draw_series(
             Histogram::vertical(&chart)
@@ -1578,13 +1618,16 @@ where
         .unwrap()
         .label("Coverage break")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
-    chart
-        .configure_series_labels()
-        .position(plotters::chart::SeriesLabelPosition::UpperRight)
-        .background_style(WHITE)
-        .border_style(BLACK.mix(0.8))
-        .draw()
-        .unwrap();
+    if !args.nolegend {
+        chart
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperRight)
+            .background_style(WHITE.mix(0.6))
+            .border_style(BLACK.mix(0.8))
+            .label_font(text_style)
+            .draw()
+            .unwrap();
+    }
     drawnoticetext(&root);
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
