@@ -1,7 +1,7 @@
 [package]
 name = "IMGT_StatAssembly"
 description = "Assess quality of assemblies and allele confidence on IG and TR loci"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>"]
 rust-version = "1.85"
@@ -25,5 +25,6 @@ ranges = "0.4.0"
 #extended-htslib = { version = "*", features = ["bzip2","curl","lzma","static"] }
 extended-htslib = { version = "*", features = ["bzip2","curl","lzma","static"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }
+lazy_static = "1.5.0"
 [lints.rust]
 unsafe_code = "deny"
