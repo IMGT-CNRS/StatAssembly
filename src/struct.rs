@@ -62,6 +62,12 @@ pub(crate) struct Args {
     /// Calculate total reads mismatch
     #[arg(long)]
     pub(crate) totalread: bool,
+    /// Size of legend axis (default 16)
+    #[arg(long, default_value_t = 16)]
+    pub(crate) fontlegendsize: u32,
+    /// No legend on graphs
+    #[arg(long)]
+    pub(crate) nolegend: bool,
     /// Get supplementary and secondary alignments on gene graphs
     #[arg(long)]
     pub(crate) allreads: bool,
