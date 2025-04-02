@@ -314,10 +314,24 @@ impl Display for Locus {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Haplotype {
     Primary,
     Alternate,
+}
+impl<'de> Deserialize<'de> for Haplotype {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s: &str = de::Deserialize::deserialize(deserializer)?;
+
+        match s.to_lowercase().as_str() {
+            "primary" | "pri" | "p" => Ok(Haplotype::Primary),
+            "alternate" | "alt" | "a" => Ok(Haplotype::Alternate),
+            _ => Err(de::Error::unknown_variant(s, &["primary or pri or p","alternate or alt or a"])),
+        }
+    }
 }
 impl Ord for Haplotype {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
