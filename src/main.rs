@@ -41,6 +41,7 @@ lazy_static!{
         let args = Args::parse();
         ("sans-serif", args.fontlegendsize, &BLACK)
     };
+    static ref regexpword: regex::Regex = regex::Regex::new(r"\W").unwrap();
 }
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
@@ -738,10 +739,10 @@ fn genelist(
     for record in csv.deserialize() {
         let record = match record {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive",
+                    format!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive.\n{}",e),
                 )));
             }
         };
@@ -750,7 +751,7 @@ fn genelist(
     if genes.is_empty() {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive",
+            "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive. Nothing found.",
         )));
     }
     //Retain genes inside the correct loci
@@ -903,7 +904,7 @@ fn genelist(
             println!("Creating the folder {}", plots.display());
             std::fs::create_dir_all(&plots)?;
         };
-        let mut output = plots.join(&gene.gene);
+        let mut output = plots.join(regexpword.replace_all(&gene.gene, "_").to_uppercase());
         output.set_extension("png");
         let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
         //Gene graph
