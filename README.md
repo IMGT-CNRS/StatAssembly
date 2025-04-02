@@ -1,4 +1,6 @@
 # IMGT/StatAssembly
+![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016810.svg)
+
 IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. 
 <p align="middle">
 <img src = "images/logo_software.png" width ="200" />
@@ -31,10 +33,10 @@ Locus must be one of the following:
 [^1]: TRD is inside TRA locus and so both loci are analyzed together.
 
 Haplotype must be one of the following:
-* Primary
-* Alternate
+* Primary or pri or p (case insensitive)
+* Alternate or alt or a (case insensitive)
 
-It is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared in graph.
+The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared in graph.
 
 Contig, start and end should match SAM regions.
 Example in test files.
@@ -59,13 +61,19 @@ to access the help.
 
 Here is the command to execute with example files from the repo folder on linux 64bits:
 ```bash
-binaries/IMGT_StatAssembly_linux_x64_x86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
+binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
 ```
 
 ## Output
 
 The expected output from execution is present in `example_files/results/`.
 
-### Memory consumption
+## How to cite
+
+If you use IMGT/StatAssembly in your work, please cite:
+
+> Institut de Génétique Humaine. (2025). IMGT StatAssembly (v0.1.4). Zenodo. https://doi.org/10.5281/zenodo.15016810
+
+## Memory consumption
 The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
 ![Memory consumption](/images/memory.png)

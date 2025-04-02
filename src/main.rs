@@ -41,7 +41,7 @@ lazy_static!{
         let args = Args::parse();
         ("sans-serif", args.fontlegendsize, &BLACK)
     };
-    static ref regexpword: regex::Regex = regex::Regex::new(r"\W").unwrap();
+    static ref regexpword: regex::Regex = regex::Regex::new(r"[^-\w()]").unwrap();
 }
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
@@ -240,10 +240,10 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     for record in csv.deserialize() {
         let record = match record {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend",
+                    format!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",e)
                 ));
             }
         };
@@ -252,7 +252,7 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     if locus.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend",
+            "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend. Nothing found.",
         ));
     }
     Ok(locus)
@@ -1320,7 +1320,7 @@ fn mismatchgraph<T>(
         .unwrap();
     if !args.force {
         chart
-            .draw_series(AreaSeries::new(
+            .draw_series(Histogram::vertical(&chart).data(
                 pos.iter().filter_map(|p| {
                     let val: i32 = (p.mismatches * 100 / max(1, p.gettotalmap())) as i32;
                     if val > 0 && p.gettotalmap() > 0 {
@@ -1328,10 +1328,10 @@ fn mismatchgraph<T>(
                     } else {
                         None
                     }
-                }),
-                0,
-                full_palette::DEEPPURPLE_200.mix(0.6),
-            ))
+                }))
+                .baseline(0).style(
+                full_palette::DEEPPURPLE_200.mix(0.6)
+            ).margin(0))
             .unwrap()
             .label("Mismatches (%)")
             .legend(|(x, y)| {
@@ -1339,7 +1339,7 @@ fn mismatchgraph<T>(
             });
     }
     chart
-        .draw_series(AreaSeries::new(
+        .draw_series(Histogram::vertical(&chart).data(
             pos.iter().filter_map(|p| {
                 let val = (p.misalign * 100 / max(1, p.gettotalmap())) as i32;
                 if val > 0 && p.gettotalmap() > 0 {
@@ -1348,8 +1348,7 @@ fn mismatchgraph<T>(
                     None
                 }
             }),
-            0,
-            full_palette::RED_400.mix(0.6),
+        ).baseline(0).margin(0).style(full_palette::RED_400.mix(0.6)
         ))
         .unwrap()
         .label("Misalign (%)")
