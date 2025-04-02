@@ -18,6 +18,7 @@ dependencies = [
  "ordered-float",
  "plotters",
  "ranges",
+ "regex",
  "serde",
 ]
 

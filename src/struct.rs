@@ -396,10 +396,10 @@ impl<'de> Deserialize<'de> for Strand {
     {
         let s: &str = de::Deserialize::deserialize(deserializer)?;
 
-        match s {
-            "1" | "-" => Ok(Strand::Minus),
-            "0" | "+" => Ok(Strand::Plus),
-            _ => Err(de::Error::unknown_variant(s, &["1 or -", "0 or +"])),
+        match s.to_lowercase().as_str() {
+            "1" | "-" | "minus" => Ok(Strand::Minus),
+            "0" | "+" | "plus" => Ok(Strand::Plus),
+            _ => Err(de::Error::unknown_variant(s, &["1 or - or minus", "0 or + or plus"])),
         }
     }
 }
