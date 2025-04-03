@@ -1320,7 +1320,7 @@ fn mismatchgraph<T>(
         .unwrap();
     if !args.force {
         chart
-            .draw_series(Histogram::vertical(&chart).data(
+            .draw_series(LineSeries::new(
                 pos.iter().filter_map(|p| {
                     let val: i32 = (p.mismatches * 100 / max(1, p.gettotalmap())) as i32;
                     if val > 0 && p.gettotalmap() > 0 {
@@ -1328,18 +1328,16 @@ fn mismatchgraph<T>(
                     } else {
                         None
                     }
-                }))
-                .baseline(0).style(
-                full_palette::DEEPPURPLE_200.mix(0.6)
-            ).margin(0))
+                }),full_palette::DEEPPURPLE_400.mix(0.8).filled()
+            ))
             .unwrap()
             .label("Mismatches (%)")
             .legend(|(x, y)| {
-                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_200)
+                PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_400)
             });
     }
     chart
-        .draw_series(Histogram::vertical(&chart).data(
+        .draw_series(LineSeries::new(
             pos.iter().filter_map(|p| {
                 let val = (p.misalign * 100 / max(1, p.gettotalmap())) as i32;
                 if val > 0 && p.gettotalmap() > 0 {
@@ -1347,9 +1345,8 @@ fn mismatchgraph<T>(
                 } else {
                     None
                 }
-            }),
-        ).baseline(0).margin(0).style(full_palette::RED_400.mix(0.6)
-        ))
+            }),full_palette::RED_400.mix(0.8).filled())
+        )
         .unwrap()
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
@@ -1431,17 +1428,14 @@ fn mismatchgraph<T>(
             .draw();
         chart
             .draw_series(
-                Histogram::vertical(&chart)
-                    .style(full_palette::DEEPORANGE_200.mix(0.8).filled())
-                    .margin(0)
-                    .data(pos.iter().filter_map(|p| {
+                AreaSeries::new(pos.iter().filter_map(|p| {
                         let score = p.globalmismatch as f64 / GLOBALMISMATCHFLOATING as f64;
                         if score.is_finite() && score != 0.0 && p.gettotalmap() > 0 {
                             Some((p.position.getobasedpos(), score))
                         } else {
                             None
                         }
-                    })),
+                    }),0.0,full_palette::DEEPORANGE_200.mix(0.8).filled()),
             )
             .unwrap()
             .label("Mismatch full rate (%)")
