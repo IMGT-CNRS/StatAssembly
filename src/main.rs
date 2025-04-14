@@ -11,6 +11,7 @@ use plotters::coord::Shift;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
+use std::process::ExitCode;
 use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
@@ -218,7 +219,8 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
     }
 }
 //Parse the location csv with locus infos
-fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
+fn 
+locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     let mut csv = match csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
@@ -239,7 +241,9 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     let mut locus: Vec<LocusInfos> = Vec::new();
     for record in csv.deserialize() {
         let record = match record {
-            Ok(r) => r,
+            Ok(r) => {
+                r
+            },
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -255,6 +259,13 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
             "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend. Nothing found.",
         ));
     }
+    //make complement if locus is complement
+    locus.iter_mut().for_each(|r| {
+        if r.start >= r.end {
+            (r.end,r.start) = (r.start.clone(), r.end.clone());
+            r.complement = true;
+        }
+    });
     Ok(locus)
 }
 //Check BAM file exists and outputdir is created and return it
@@ -347,22 +358,22 @@ fn processcounting(
         }
     }
 }
-fn main() {
+fn main() -> ExitCode {
     let firstinstant = Instant::now();
     let args = Args::parse();
     if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater than percent alerting.");
-        return;
+        return ExitCode::FAILURE;
     }
     //Get locus, geneloc and outputdir, print errors if we have
     let (outputdir, locus) = match (checklocusandoutput(&args), locusposparser(&args)) {
         (Err(e), _) => {
             eprintln!("{}", e);
-            return;
+            return ExitCode::FAILURE;
         }
         (_, Err(f)) => {
             eprintln!("{}", f);
-            return;
+            return ExitCode::FAILURE;
         }
         (Ok(a), Ok(b)) => (a, b),
     };
@@ -371,7 +382,7 @@ fn main() {
         Some(g) => g,
         None => {
             eprintln!("Check order of loci in the file.");
-            return;
+            return ExitCode::FAILURE;
         }
     };
     for locus in grouped {
@@ -379,7 +390,7 @@ fn main() {
         let haplotype = locus.len();
         if haplotype > 2 {
             eprintln!("There is more than 2 haplotypes for {}", floci.locus);
-            return;
+            return ExitCode::FAILURE;
         }
         let haplotypebool = haplotype == 1; //IS there one or two haplotypes?
         println!(
@@ -501,7 +512,7 @@ fn main() {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("Cannot read bam file. Error is {}. Exiting", e);
-                    return;
+                    return ExitCode::FAILURE;
                 }
             };
             //0-based except end because end is exclusive
@@ -519,7 +530,7 @@ fn main() {
                     loci.start.getobasedpos(),
                     loci.end.getobasedpos()
                 );
-                return;
+                return ExitCode::FAILURE;
             };
             let mut nocount = true;
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
@@ -582,7 +593,9 @@ fn main() {
                     continue;
                 }
                 let (matched, aligned) = match iteralert(&args, message, &p) {
-                    (_, None, _) => return, //Kill software, errors sent by iteralert
+                    (_, None, _) => {
+                        return ExitCode::FAILURE;
+                    }, //Kill software, errors sent by iteralert
                     (newmessage, Some(p), aligned) => {
                         message = newmessage;
                         (p, aligned)
@@ -597,7 +610,7 @@ fn main() {
                     loci.start.getobasedpos(),
                     loci.end.getobasedpos()
                 );
-                return;
+                return ExitCode::FAILURE;
             }
             //Quality and mismatch is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
@@ -624,7 +637,7 @@ fn main() {
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {}", e);
-                        return;
+                        return ExitCode::FAILURE;
                     }
                     mismatchgraph(
                         &outputfile3,
@@ -644,7 +657,7 @@ fn main() {
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {}", e);
-                        return;
+                        return ExitCode::FAILURE;
                     }
                     mismatchgraph(
                         &outputfile3,
@@ -664,7 +677,7 @@ fn main() {
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {}", e);
-                        return;
+                        return ExitCode::FAILURE;
                     }
                     mismatchgraph(
                         &outputfile4,
@@ -684,7 +697,7 @@ fn main() {
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {}", e);
-                        return;
+                        return ExitCode::FAILURE;
                     }
                     mismatchgraph(
                         &outputfile4,
@@ -704,14 +717,14 @@ fn main() {
                 &args,
             ) {
                 eprintln!("Cannot create csv file. Error is {}", e);
-                return;
+                return ExitCode::FAILURE;
             }
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
                 if let Err(e) = genelist(outputdir, loci, &args) {
                     eprintln!("Cannot create gene list. Error is {}", e);
-                    return;
+                    return ExitCode::FAILURE;
                 }
                 println!("Gene list finished.");
             } else {
@@ -723,6 +736,7 @@ fn main() {
         println!("Locus {} is done!", &floci.locus);
     }
     println!("Process done in {} s", firstinstant.elapsed().as_secs_f32());
+    ExitCode::SUCCESS
 }
 fn genelist(
     outputdir: &std::path::Path,
@@ -1357,7 +1371,7 @@ fn mismatchgraph<T>(
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{}%", f))
-        .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
+        .x_label_formatter(&|f| format!("{}\n{}",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
         .x_desc("Genomic position (bp)")
         .y_desc("Mismatch rate (%)")
         .disable_x_mesh()
@@ -1419,8 +1433,8 @@ fn mismatchgraph<T>(
         let _ = chart
             .configure_mesh()
             .y_label_formatter(&|f| format!("{}%", (f * 10_000.0).round() / 100.0))
-            .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
-            .x_desc("Genomic position (bp)")
+            .x_label_formatter(&|f| format!("{}\n{}",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
+        .x_desc("Genomic position (bp)")
             .y_desc("Mismatch full rate (%)")
             .x_label_style(text_style.clone())
             .disable_x_mesh()
@@ -1485,7 +1499,8 @@ where
         .unwrap();
     let _ = chart
         .configure_mesh()
-        .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
+        .x_label_formatter(&|f| format!("{} ({})",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
+        
         //.x_desc("Genomic position (bp)")
         .y_desc("Coverage")
         .label_style(text_style.clone())

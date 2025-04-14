@@ -38,7 +38,7 @@ Haplotype must be one of the following:
 
 The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared in graph.
 
-Contig, start and end should match SAM regions.
+Contig, start and end should match SAM regions. If start is greater than end, the locus would be considered reverse.
 Example in test files.
 
 ## How to install
