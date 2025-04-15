@@ -1,6 +1,8 @@
 stages:
   - build_and_upload
-
+job:
+  tags:
+    - kodalabo
 variables:
   VERSION: ${CI_COMMIT_TAG}
   BINARY_NAME: "IMGT_StatAssembly"  # Define your binary name
