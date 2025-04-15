@@ -11,7 +11,7 @@ build-and-upload:
   tags:
     - kodalabo
   script:
-    - apt install rustc
+    - rpm install rustc ; yum install rustc
     - echo "VERSION=${VERSION}" >> .env
     - rustup update stable
     - cargo build --verbose --release --target ${TARGET}
