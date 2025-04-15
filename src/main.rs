@@ -1371,7 +1371,7 @@ fn mismatchgraph<T>(
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{}%", f))
-        .x_label_formatter(&|f| format!("{}\n{}",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
+        .x_label_formatter(&|f| format!("{} ({})",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
         .x_desc("Genomic position (bp)")
         .y_desc("Mismatch rate (%)")
         .disable_x_mesh()
@@ -1416,8 +1416,8 @@ fn mismatchgraph<T>(
         let max = pos.iter().map(|f| f.globalmismatch).max().unwrap();
         let mut chart = ChartBuilder::on(&bottom)
             .set_label_area_size(LabelAreaPosition::Left, 60)
+                        .right_y_label_area_size(60)
             .set_label_area_size(LabelAreaPosition::Bottom, 60)
-            .right_y_label_area_size(60)
             /*.caption(
                 format!(
                     "Break in coverage {} ({})",
@@ -1433,7 +1433,7 @@ fn mismatchgraph<T>(
         let _ = chart
             .configure_mesh()
             .y_label_formatter(&|f| format!("{}%", (f * 10_000.0).round() / 100.0))
-            .x_label_formatter(&|f| format!("{}\n{}",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
+            .x_label_formatter(&|f| format!("{} ({})",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
         .x_desc("Genomic position (bp)")
             .y_desc("Mismatch full rate (%)")
             .x_label_style(text_style.clone())
