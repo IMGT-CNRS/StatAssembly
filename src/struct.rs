@@ -183,8 +183,11 @@ impl<'de> Deserialize<'de> for Position {
         let s: &str = de::Deserialize::deserialize(deserializer)?;
 
         match s.parse::<i64>() {
-            Ok(pos) => Ok(Position::new(false,pos)),
-            Err(_) => Err(de::Error::invalid_type(de::Unexpected::Str(s),&"expected i32")),
+            Ok(pos) => Ok(Position::new(false, pos)),
+            Err(_) => Err(de::Error::invalid_type(
+                de::Unexpected::Str(s),
+                &"expected i32",
+            )),
         }
     }
 }
@@ -201,13 +204,9 @@ impl Position {
         Position { zbased, position }
     }
     pub(crate) fn length(&self, other: &Self) -> i64 {
-        let min = std::cmp::min(self.getzbasedpos(),other.getzbasedpos());
-        let max = std::cmp::max(self.getzbasedpos(),other.getzbasedpos());
-        max
-                .checked_sub(min)
-                .unwrap()
-                .checked_add(1)
-                .unwrap() //Calculate the length
+        let min = std::cmp::min(self.getzbasedpos(), other.getzbasedpos());
+        let max = std::cmp::max(self.getzbasedpos(), other.getzbasedpos());
+        max.checked_sub(min).unwrap().checked_add(1).unwrap() //Calculate the length
     }
     pub(crate) fn getzbasedpos(&self) -> i64 {
         if self.zbased {
@@ -286,6 +285,12 @@ impl Posread {
     pub(crate) fn gettotal(&self) -> usize {
         self.total
     }
+    pub(crate) fn getmismatchcount(&self) -> usize {
+        self.getindel().checked_sub(self.getmatch()).unwrap()
+    }
+    pub(crate) fn getindelcount(&self) -> usize {
+        self.gettotal().checked_sub(self.getindel()).unwrap()
+    }
     pub(crate) fn addtotal(&mut self, count: usize) {
         self.total += count
     }
@@ -329,7 +334,10 @@ impl<'de> Deserialize<'de> for Haplotype {
         match s.to_lowercase().as_str() {
             "primary" | "pri" | "p" => Ok(Haplotype::Primary),
             "alternate" | "alt" | "a" => Ok(Haplotype::Alternate),
-            _ => Err(de::Error::unknown_variant(s, &["primary or pri or p","alternate or alt or a"])),
+            _ => Err(de::Error::unknown_variant(
+                s,
+                &["primary or pri or p", "alternate or alt or a"],
+            )),
         }
     }
 }
@@ -413,7 +421,10 @@ impl<'de> Deserialize<'de> for Strand {
         match s.to_lowercase().as_str() {
             "1" | "-" | "minus" => Ok(Strand::Minus),
             "0" | "+" | "plus" => Ok(Strand::Plus),
-            _ => Err(de::Error::unknown_variant(s, &["1 or - or minus", "0 or + or plus"])),
+            _ => Err(de::Error::unknown_variant(
+                s,
+                &["1 or - or minus", "0 or + or plus"],
+            )),
         }
     }
 }
@@ -433,7 +444,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) start: Position,
     pub(crate) end: Position,
     length: i64,
-    pub(crate) coverageperc: f32,
+    pub(crate) readscoverage: f32,
     pub(crate) reads: usize,
     pub(crate) matchpos: String,
     pub(crate) readsfull: usize,
@@ -450,7 +461,7 @@ impl GeneInfosFinish {
         matchpos: Option<String>,
         reads100: usize,
         reads100m: usize,
-        coverageperc: f32,
+        readscoverage: f32,
         coveragex: usize,
     ) -> Self {
         GeneInfosFinish {
@@ -465,7 +476,7 @@ impl GeneInfosFinish {
             readsfull,
             reads100,
             reads100m,
-            coverageperc,
+            readscoverage,
             coveragex,
         }
     }
@@ -481,7 +492,7 @@ pub(crate) struct LocusInfos {
     pub(crate) start: Position,
     pub(crate) end: Position,
     #[serde(skip)]
-    pub(crate) complement: bool
+    pub(crate) complement: bool,
 }
 impl LocusInfos {
     pub fn intooneincrement(&self, actualpos: &i64) -> std::io::Result<i64> {
@@ -492,9 +503,9 @@ impl LocusInfos {
             ));
         }
         if self.complement {
-            Ok(self.end.getzbasedpos()-actualpos+1)
+            Ok(self.end.getzbasedpos() - actualpos + 1)
         } else {
-            Ok(actualpos-self.start.getzbasedpos()+1)
+            Ok(actualpos - self.start.getzbasedpos() + 1)
         }
     }
 }

@@ -17,10 +17,12 @@ use std::time::Instant;
 use crate::r#struct::*;
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, IndexedReader, Read};
+use lazy_static::lazy_static;
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
 use plotters::prelude::{
-    full_palette, AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord, PathElement, SVGBackend
+    AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoDrawingArea, IntoSegmentedCoord,
+    PathElement, SVGBackend, full_palette,
 };
 use plotters::series::{Histogram, LineSeries};
 use plotters::style::*;
@@ -31,13 +33,12 @@ use std::{
     io::Write,
     path::PathBuf,
 };
-use lazy_static::lazy_static;
 mod r#struct;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NAME: &str = env!("CARGO_PKG_NAME");
 const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
-lazy_static!{
+lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
         ("sans-serif", args.fontlegendsize, &BLACK)
@@ -219,8 +220,7 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
     }
 }
 //Parse the location csv with locus infos
-fn 
-locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
+fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     let mut csv = match csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
@@ -241,13 +241,14 @@ locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     let mut locus: Vec<LocusInfos> = Vec::new();
     for record in csv.deserialize() {
         let record = match record {
-            Ok(r) => {
-                r
-            },
+            Ok(r) => r,
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",e)
+                    format!(
+                        "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",
+                        e
+                    ),
                 ));
             }
         };
@@ -262,7 +263,7 @@ locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     //make complement if locus is complement
     locus.iter_mut().for_each(|r| {
         if r.start >= r.end {
-            (r.end,r.start) = (r.start.clone(), r.end.clone());
+            (r.end, r.start) = (r.start.clone(), r.end.clone());
             r.complement = true;
         }
     });
@@ -539,8 +540,14 @@ fn main() -> ExitCode {
             let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
             let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
             //Populate all B-Tree position, 0-based
-            locusrange.for_each(|p| {
+            locusrange.enumerate().for_each(|(i,p)| {
+                let locuspos: i64 = if loci.complement {
+                    loci.end.length(&loci.start)-i64::try_from(i).unwrap()
+                } else {
+                    i.try_into().unwrap()
+                };
                 let default = HashMapinfo {
+                    locuspos: Position::new(true,locuspos),
                     position: Position::new(true, p),
                     ..Default::default()
                 };
@@ -595,7 +602,7 @@ fn main() -> ExitCode {
                 let (matched, aligned) = match iteralert(&args, message, &p) {
                     (_, None, _) => {
                         return ExitCode::FAILURE;
-                    }, //Kill software, errors sent by iteralert
+                    } //Kill software, errors sent by iteralert
                     (newmessage, Some(p), aligned) => {
                         message = newmessage;
                         (p, aligned)
@@ -756,7 +763,10 @@ fn genelist(
             Err(e) => {
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive.\n{}",e),
+                    format!(
+                        "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive.\n{}",
+                        e
+                    ),
                 )));
             }
         };
@@ -768,6 +778,10 @@ fn genelist(
             "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive. Nothing found.",
         )));
     }
+    //Invert if start >= end because strand is given and won't work
+    genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
+        (p.start,p.end) = (p.end.clone(), p.start.clone());
+    });
     //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig
@@ -791,27 +805,25 @@ fn genelist(
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
-    for mut gene in genes {
+    for gene in genes {
         let mut reader = getreaderoffile(args)?;
         let (mut reads, mut readsfull, mut reads100, mut reads100m) = (0, 0, 0, 0);
-        if gene.start > gene.end {
-            (gene.end, gene.start) = (gene.start, gene.end) //Swap position
-        }
-        //O position is exclusive
-        let genegenericrange = gene.start.getobasedpos()..gene.end.getobasedpos();
-        let generange = ranges::Ranges::from(genegenericrange.clone());
-        //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
-        reader.fetch((
-            &gene.chromosome,
-            genegenericrange.start,
-            genegenericrange.end,
-        ))?;
-        let records = reader.records();
-        //Hash contains 1-based positions
-        let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
-        genegenericrange.for_each(|p| {
-            hash.insert(p, Posread::new(0, 0, 0, args).unwrap());
-        });
+        let (mut hash, records) = {
+            //O position is exclusive
+            let genegenericrange = gene.start.getzbasedpos()..gene.end.getobasedpos();
+            //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
+            reader.fetch((
+                &gene.chromosome,
+                genegenericrange.start,
+                genegenericrange.end,
+            ))?;
+            let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
+            //Hash contains 1-based positions
+            genegenericrange.for_each(|p| {
+                hash.insert(p, Posread::new(0, 0, 0, args).unwrap());
+            });
+            (hash,reader.records())
+        };
         let mut coverageperc = 0;
         let mut empty = true;
         for record in records
@@ -903,10 +915,11 @@ fn genelist(
         //Merging data
         let text = iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
             acc.push_str(&format!(
-                "{}/{}(={})-",
-                f.getindel(),
+                "{}({}={}X{}ID)-",
                 f.gettotal(),
-                f.getmatch()
+                f.getmatch(),
+                f.getmismatchcount(),
+                f.getindelcount()
             ));
             acc
         });
@@ -931,7 +944,7 @@ fn genelist(
             &mut alertingpositions,
             reads100m,
         );
-        let coverageperc = ((coverageperc * 1_000 / reads / generange.into_iter().count()) as f32)
+        let coverageperc = ((coverageperc * 1_000 / reads / usize::try_from(gene.end.length(&gene.start)).unwrap()) as f32)
             .round()
             / 1_000.0;
         let elem = GeneInfosFinish::new(
@@ -1342,7 +1355,8 @@ fn mismatchgraph<T>(
                     } else {
                         None
                     }
-                }),full_palette::DEEPPURPLE_400.mix(0.8).filled()
+                }),
+                full_palette::DEEPPURPLE_400.mix(0.8).filled(),
             ))
             .unwrap()
             .label("Mismatches (%)")
@@ -1359,8 +1373,9 @@ fn mismatchgraph<T>(
                 } else {
                     None
                 }
-            }),full_palette::RED_400.mix(0.8).filled())
-        )
+            }),
+            full_palette::RED_400.mix(0.8).filled(),
+        ))
         .unwrap()
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
@@ -1371,7 +1386,15 @@ fn mismatchgraph<T>(
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{}%", f))
-        .x_label_formatter(&|f| format!("{} ({})",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
+        .x_label_formatter(&|f| {
+            format!(
+                "{} ({})",
+                f.to_formatted_string(&Locale::en),
+                loci.intooneincrement(f)
+                    .unwrap()
+                    .to_formatted_string(&Locale::en)
+            )
+        })
         .x_desc("Genomic position (bp)")
         .y_desc("Mismatch rate (%)")
         .disable_x_mesh()
@@ -1416,7 +1439,7 @@ fn mismatchgraph<T>(
         let max = pos.iter().map(|f| f.globalmismatch).max().unwrap();
         let mut chart = ChartBuilder::on(&bottom)
             .set_label_area_size(LabelAreaPosition::Left, 60)
-                        .right_y_label_area_size(60)
+            .right_y_label_area_size(60)
             .set_label_area_size(LabelAreaPosition::Bottom, 60)
             /*.caption(
                 format!(
@@ -1433,24 +1456,34 @@ fn mismatchgraph<T>(
         let _ = chart
             .configure_mesh()
             .y_label_formatter(&|f| format!("{}%", (f * 10_000.0).round() / 100.0))
-            .x_label_formatter(&|f| format!("{} ({})",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
-        .x_desc("Genomic position (bp)")
+            .x_label_formatter(&|f| {
+                format!(
+                    "{} ({})",
+                    f.to_formatted_string(&Locale::en),
+                    loci.intooneincrement(f)
+                        .unwrap()
+                        .to_formatted_string(&Locale::en)
+                )
+            })
+            .x_desc("Genomic position (bp)")
             .y_desc("Mismatch full rate (%)")
             .x_label_style(text_style.clone())
             .disable_x_mesh()
             .y_max_light_lines(2)
             .draw();
         chart
-            .draw_series(
-                AreaSeries::new(pos.iter().filter_map(|p| {
-                        let score = p.globalmismatch as f64 / GLOBALMISMATCHFLOATING as f64;
-                        if score.is_finite() && score != 0.0 && p.gettotalmap() > 0 {
-                            Some((p.position.getobasedpos(), score))
-                        } else {
-                            None
-                        }
-                    }),0.0,full_palette::DEEPORANGE_200.mix(0.8).filled()),
-            )
+            .draw_series(AreaSeries::new(
+                pos.iter().filter_map(|p| {
+                    let score = p.globalmismatch as f64 / GLOBALMISMATCHFLOATING as f64;
+                    if score.is_finite() && score != 0.0 && p.gettotalmap() > 0 {
+                        Some((p.position.getobasedpos(), score))
+                    } else {
+                        None
+                    }
+                }),
+                0.0,
+                full_palette::DEEPORANGE_200.mix(0.8).filled(),
+            ))
             .unwrap()
             .label("Mismatch full rate (%)")
             .legend(|(x, y)| {
@@ -1499,8 +1532,15 @@ where
         .unwrap();
     let _ = chart
         .configure_mesh()
-        .x_label_formatter(&|f| format!("{} ({})",f.to_formatted_string(&Locale::en),loci.intooneincrement(f).unwrap().to_formatted_string(&Locale::en)))
-        
+        .x_label_formatter(&|f| {
+            format!(
+                "{} ({})",
+                f.to_formatted_string(&Locale::en),
+                loci.intooneincrement(f)
+                    .unwrap()
+                    .to_formatted_string(&Locale::en)
+            )
+        })
         //.x_desc("Genomic position (bp)")
         .y_desc("Coverage")
         .label_style(text_style.clone())
