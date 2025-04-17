@@ -494,21 +494,6 @@ pub(crate) struct LocusInfos {
     #[serde(skip)]
     pub(crate) complement: bool,
 }
-impl LocusInfos {
-    pub fn intooneincrement(&self, actualpos: &i64) -> std::io::Result<i64> {
-        if !(self.start.getzbasedpos()..=self.end.getzbasedpos()).contains(actualpos) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid location".to_string(),
-            ));
-        }
-        if self.complement {
-            Ok(self.end.getzbasedpos() - actualpos + 1)
-        } else {
-            Ok(actualpos - self.start.getzbasedpos() + 1)
-        }
-    }
-}
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct HashMapinfo {
     pub(crate) locuspos: Position,
