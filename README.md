@@ -1,5 +1,5 @@
 # IMGT/StatAssembly
-![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016810.svg)
+![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016809.svg)
 
 IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. 
 <p align="middle">
@@ -87,9 +87,9 @@ For a better overview of IMGT rules based on this result, check [IMGT assembly q
 
 ## How to cite
 
-If you use IMGT/StatAssembly in your work, please cite:
+If you use IMGT/StatAssembly in your work, please cite the version you used, for example:
 
-> Institut de Génétique Humaine. (2025). IMGT StatAssembly (v0.1.4). Zenodo. https://doi.org/10.5281/zenodo.15016810
+> Institut de Génétique Humaine. (2025). IMGT StatAssembly (v0.1.7). Zenodo. https://doi.org/10.5281/zenodo.15234695
 
 ## Memory consumption
 The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
