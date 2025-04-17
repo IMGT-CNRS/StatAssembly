@@ -35,7 +35,6 @@ use std::{
 };
 mod r#struct;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const NAME: &str = env!("CARGO_PKG_NAME");
 const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 lazy_static! {
@@ -43,6 +42,7 @@ lazy_static! {
         let args = Args::parse();
         ("sans-serif", args.fontlegendsize, &BLACK)
     };
+    static ref NAME: String = env!("CARGO_PKG_NAME").replacen('_', "/", 1);
     static ref regexpword: regex::Regex = regex::Regex::new(r"[^-\w()]").unwrap();
 }
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
@@ -539,15 +539,16 @@ fn main() -> ExitCode {
             //let mut writer = BufWriter::new(file);
             let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
             let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
-            //Populate all B-Tree position, 0-based
-            locusrange.enumerate().for_each(|(i,p)| {
-                let locuspos: i64 = if loci.complement {
-                    loci.end.length(&loci.start)-i64::try_from(i).unwrap()
-                } else {
-                    i.try_into().unwrap()
-                };
+            //Populate all B-Tree position, 0-based, invert if locus complement
+            let iterator: Vec<(usize, i64)> = if loci.complement {
+                locusrange.rev().enumerate().collect()
+            } else {
+                locusrange.enumerate().collect()
+            };
+            iterator.into_iter().for_each(|(i, p)| {
+                let locuspos: i64 = i.try_into().unwrap();
                 let default = HashMapinfo {
-                    locuspos: Position::new(true,locuspos),
+                    locuspos: Position::new(true, locuspos),
                     position: Position::new(true, p),
                     ..Default::default()
                 };
@@ -780,7 +781,7 @@ fn genelist(
     }
     //Invert if start >= end because strand is given and won't work
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
-        (p.start,p.end) = (p.end.clone(), p.start.clone());
+        (p.start, p.end) = (p.end.clone(), p.start.clone());
     });
     //Retain genes inside the correct loci
     genes.retain(|gene| {
@@ -822,7 +823,7 @@ fn genelist(
             genegenericrange.for_each(|p| {
                 hash.insert(p, Posread::new(0, 0, 0, args).unwrap());
             });
-            (hash,reader.records())
+            (hash, reader.records())
         };
         let mut coverageperc = 0;
         let mut empty = true;
@@ -944,7 +945,10 @@ fn genelist(
             &mut alertingpositions,
             reads100m,
         );
-        let coverageperc = ((coverageperc * 1_000 / reads / usize::try_from(gene.end.length(&gene.start)).unwrap()) as f32)
+        let coverageperc = ((coverageperc * 1_000
+            / reads
+            / usize::try_from(gene.end.length(&gene.start)).unwrap())
+            as f32)
             .round()
             / 1_000.0;
         let elem = GeneInfosFinish::new(
@@ -1146,7 +1150,7 @@ fn genegraph<T>(
                 full_palette::GREEN_400.mix(0.5).stroke_width(2),
             ))
             .unwrap()
-            .label("Sequence align")
+            .label("Sequence equal")
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_400.mix(0.5))
             });
@@ -1305,7 +1309,7 @@ fn drawnoticetext<T>(root: &DrawingArea<T, Shift>)
 where
     T: DrawingBackend,
 {
-    let text = format!("Graph made by {} version {} ({})", NAME, VERSION, AUTHOR);
+    let text = format!("Graph made by {} version {} ({})", NAME.as_str(), VERSION, AUTHOR);
     let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(root);
     let size = root.estimate_text_size(&text, &text_style).unwrap();
     let size = (
@@ -1390,8 +1394,11 @@ fn mismatchgraph<T>(
             format!(
                 "{} ({})",
                 f.to_formatted_string(&Locale::en),
-                loci.intooneincrement(f)
+                pos.iter()
+                    .find(|p| { p.position.getobasedpos() == *f })
                     .unwrap()
+                    .locuspos
+                    .getobasedpos()
                     .to_formatted_string(&Locale::en)
             )
         })
@@ -1460,8 +1467,11 @@ fn mismatchgraph<T>(
                 format!(
                     "{} ({})",
                     f.to_formatted_string(&Locale::en),
-                    loci.intooneincrement(f)
+                    pos.iter()
+                        .find(|p| { p.position.getobasedpos() == *f })
                         .unwrap()
+                        .locuspos
+                        .getobasedpos()
                         .to_formatted_string(&Locale::en)
                 )
             })
@@ -1536,8 +1546,11 @@ where
             format!(
                 "{} ({})",
                 f.to_formatted_string(&Locale::en),
-                loci.intooneincrement(f)
+                pos.iter()
+                    .find(|p| { p.position.getobasedpos() == *f })
                     .unwrap()
+                    .locuspos
+                    .getobasedpos()
                     .to_formatted_string(&Locale::en)
             )
         })
