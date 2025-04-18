@@ -1,5 +1,6 @@
 # IMGT/StatAssembly
-![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016809.svg)
+[![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016809.svg)](https://zenodo.org/doi/10.5281/zenodo.15016810)
+![GitHub License](https://img.shields.io/github/license/DorianCoding/IMGT_StatAssembly)
 
 IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. 
 <p align="middle">
