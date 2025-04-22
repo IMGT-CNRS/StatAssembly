@@ -23,7 +23,7 @@ use std::{fmt::Display, hash::Hash, path::PathBuf};
 )]
 #[command(version, author, about, long_about = None)]
 pub(crate) struct Args {
-    /// Input file (SAM or BAM)
+    /// Input file (indexed BAM file)
     #[arg(short, long)]
     pub(crate) file: PathBuf,
     /// Index file if not default
@@ -50,6 +50,9 @@ pub(crate) struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     pub(crate) force: bool,
+    /// Huge region
+    #[arg(long)]
+    pub(crate) hugeregion: bool,
     /// Number of threads to decrypt bgzf files (0 for number of threads up to 12)
     #[arg(long, default_value_t = 0)]
     pub(crate) threads: usize,
