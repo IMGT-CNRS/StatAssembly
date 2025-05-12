@@ -23,7 +23,7 @@ use std::{fmt::Display, hash::Hash, path::PathBuf};
 )]
 #[command(version, author, about, long_about = None)]
 pub(crate) struct Args {
-    /// Input file (indexed BAM file)
+    /// Input file (BAM-indexed file)
     #[arg(short, long)]
     pub(crate) file: PathBuf,
     /// Index file if not default
