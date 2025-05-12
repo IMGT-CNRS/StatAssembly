@@ -65,8 +65,8 @@ To generate the BAM file used in the analysis, you can follow those steps. Keep 
 * Launch minimap from bash terminal:
 ```bash
 minimap2 -ax map-hifi -t 32 --eqx --cs CHM13v2.0.fasta reads.fastq.gz > reads.sam
-samtools sort -@ 32 -o result.bam result.sam
-samtools index -c result.bam
+samtools sort -@ 32 -o reads.bam reads.sam
+samtools index -c reads.bam
 ```
 The output of the commands should look like:
 ```console
