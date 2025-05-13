@@ -1044,6 +1044,7 @@ fn genelist(
         );
         finale.push(elem);
     }
+    finale.sort_unstable(); //Sort the table
     let mut csv = csv::WriterBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
