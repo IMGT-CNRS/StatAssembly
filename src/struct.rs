@@ -23,7 +23,7 @@ use std::{fmt::Display, hash::Hash, path::PathBuf};
 )]
 #[command(version, author, about, long_about = None)]
 pub(crate) struct Args {
-    /// Input file (SAM or BAM)
+    /// Input file (BAM-indexed file)
     #[arg(short, long)]
     pub(crate) file: PathBuf,
     /// Index file if not default
@@ -50,6 +50,9 @@ pub(crate) struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     pub(crate) force: bool,
+    /// Huge region
+    #[arg(long)]
+    pub(crate) hugeregion: bool,
     /// Number of threads to decrypt bgzf files (0 for number of threads up to 12)
     #[arg(long, default_value_t = 0)]
     pub(crate) threads: usize,
@@ -90,7 +93,7 @@ pub(crate) fn less_than_100(s: &str) -> Result<u8, String> {
         _ => Err(String::from("Bad number, must be between 0 and 100.")),
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum Locus {
     IGH,
@@ -151,7 +154,7 @@ impl Alerting for Alertpos {
         matches!(self, Alertpos::Valid)
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct Position {
     zbased: bool,
     position: i64,
@@ -319,7 +322,7 @@ impl Display for Locus {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Haplotype {
     Primary,
     Alternate,
@@ -436,7 +439,7 @@ impl Display for Strand {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct GeneInfosFinish {
     pub(crate) gene: String,
     pub(crate) chromosome: String,
@@ -452,6 +455,34 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100m: usize,
     pub(crate) coveragex: usize,
 }
+impl Ord for GeneInfosFinish {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.chromosome.cmp(&other.chromosome) {
+            core::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        match self.start.cmp(&other.start) {
+            core::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        match self.end.cmp(&other.end) {
+            core::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        std::cmp::Ordering::Equal
+    }
+}
+impl PartialOrd for GeneInfosFinish {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for GeneInfosFinish {
+    fn eq(&self, other: &Self) -> bool {
+        self.gene == other.gene
+    }
+}
+impl Eq for GeneInfosFinish {}
 impl GeneInfosFinish {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -484,7 +515,7 @@ impl GeneInfosFinish {
         Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
