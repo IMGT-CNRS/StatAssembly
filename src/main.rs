@@ -37,6 +37,7 @@ mod r#struct;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
+const ALERTLOCUSSIZE: i64 = 10_000_000;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
@@ -246,7 +247,8 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",
+                        "Invalid CSV format (tabular fields) required for file {}, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",
+                        args.locuspos.display(),
                         e
                     ),
                 ));
@@ -257,7 +259,20 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     if locus.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Invalid CSV format, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend. Nothing found.",
+            format!(
+                "Empty CSV format for file {}, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend. Nothing found.",
+                args.locuspos.display()
+            ),
+        ));
+    }
+    //At least one duplicate line
+    if let Some(d) = locus.iter().duplicates().next() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique gene name.",
+                d.locus,d.haplotype,d.contig,d.start.getobasedpos(),d.end.getobasedpos()
+            ),
         ));
     }
     //make complement if locus is complement
@@ -267,6 +282,23 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
             r.complement = true;
         }
     });
+    if !args.hugeregion {
+        if let Some(big) = locus
+            .iter()
+            .find(|p| p.end.length(&p.start) >= ALERTLOCUSSIZE)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "The region {}-{} is more than {}. Check your input file ({}) is correct.n\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory",
+                    big.start.getobasedpos(),
+                    big.end.getobasedpos(),
+                    ALERTLOCUSSIZE,
+                    args.locuspos.display()
+                ),
+            ));
+        }
+    }
     Ok(locus)
 }
 //Check BAM file exists and outputdir is created and return it
@@ -275,7 +307,11 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     if let Err(e) = getreaderoffile(args) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Cannot read bam file. Error is {}. Exiting.", e),
+            format!(
+                "Cannot read bam file ({}). Error is: {}. Exiting.",
+                args.file.display(),
+                e
+            ),
         ));
     }
     let outputdir = match args.outdir.is_dir() {
@@ -382,7 +418,10 @@ fn main() -> ExitCode {
     let grouped = match mergelocus(locus) {
         Some(g) => g,
         None => {
-            eprintln!("Check order of loci in the file.");
+            eprintln!(
+                "Check order of loci in the file {}.",
+                args.locuspos.display()
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -743,7 +782,11 @@ fn main() -> ExitCode {
         }
         println!("Locus {} is done!", &floci.locus);
     }
-    println!("Process done in {} s", firstinstant.elapsed().as_secs_f32());
+    println!(
+        "{} done in {} s",
+        NAME.as_str(),
+        firstinstant.elapsed().as_secs_f32()
+    );
     ExitCode::SUCCESS
 }
 fn genelist(
@@ -751,13 +794,22 @@ fn genelist(
     loci: &LocusInfos,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let geneloc = match &args.geneloc {
+        Some(l) => l,
+        None => {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No localization given",
+            )));
+        }
+    };
     let mut genes: Vec<GeneInfos> = Vec::new();
     let mut lock: std::io::StderrLock<'_> = stderr().lock();
     let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b',')
-        .from_path(args.geneloc.as_ref().unwrap())?;
+        .from_path(geneloc)?;
     for record in csv.deserialize() {
         let record = match record {
             Ok(r) => r,
@@ -765,7 +817,8 @@ fn genelist(
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive.\n{}",
+                        "Invalid CSV format (comma separated) for file {}, waiting gene,chromosome,strand,start,end case sensitive.\n{}",
+                        geneloc.display(),
                         e
                     ),
                 )));
@@ -776,7 +829,20 @@ fn genelist(
     if genes.is_empty() {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "Invalid CSV format, waiting gene,chromosome,strand,start,end case sensitive. Nothing found.",
+            format!(
+                "Empty CSV format for file {}, waiting gene,chromosome,strand,start,end case sensitive. Nothing found.",
+                geneloc.display()
+            ),
+        )));
+    }
+    //At least one duplicate line
+    if let Some(d) = genes.iter().duplicates().next() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The gene {} appears more than once. Please provide a unique gene name.",
+                d.gene
+            ),
         )));
     }
     //Invert if start >= end because strand is given and won't work
@@ -933,18 +999,33 @@ fn genelist(
             std::fs::create_dir_all(&plots)?;
         };
         let mut output = plots.join(regexpword.replace_all(&gene.gene, "_").to_uppercase());
-        output.set_extension("png");
-        let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
-        //Gene graph
-        genegraph(
-            args,
-            &hash,
-            &gene,
-            loci,
-            root,
-            &mut alertingpositions,
-            reads100m,
-        );
+        if !args.svg {
+            output.set_extension("png");
+            let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
+            //Gene graph
+            genegraph(
+                args,
+                &hash,
+                &gene,
+                loci,
+                root,
+                &mut alertingpositions,
+                reads100m,
+            );
+        } else {
+            output.set_extension("svg");
+            let root = SVGBackend::new(&output, (700, 400)).into_drawing_area();
+            //Gene graph
+            genegraph(
+                args,
+                &hash,
+                &gene,
+                loci,
+                root,
+                &mut alertingpositions,
+                reads100m,
+            );
+        }
         let coverageperc = ((coverageperc * 1_000
             / reads
             / usize::try_from(gene.end.length(&gene.start)).unwrap())
@@ -963,6 +1044,7 @@ fn genelist(
         );
         finale.push(elem);
     }
+    finale.sort_unstable(); //Sort the table
     let mut csv = csv::WriterBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
@@ -1007,26 +1089,30 @@ where
     let mut first = None;
     let mut prev = None;
     //Might be none if no breaks
-    let finalbreak = breaks.clone().map(|p| p.0).max();
+    let finalbreak = match breaks.clone().map(|p| p.0).max() {
+        Some(d) => d,
+        None => {
+            breakfile.write_all("No breaks.".as_bytes())?;
+            return Ok(());
+        }
+    };
     let mut acc = breaks.fold(String::new(), |mut acc, (num, _)| {
         if first.is_none() {
             first = Some(num);
             prev = Some(num);
         } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
-            if num - prev_num != 1 || num == finalpos || Some(num) == finalbreak {
+            if num - prev_num != 1 || num == finalpos || num == finalbreak {
                 if num == finalpos {
                     prev_num = finalpos;
-                } else if let Some(finalbreakr) = finalbreak {
-                    if num == finalbreakr {
-                        prev_num = finalbreakr;
-                    }
+                } else if num == finalbreak {
+                    prev_num = finalbreak;
                 }
                 if f == prev_num {
                     acc.push_str(&format!("{}:{}\n", loci.contig, f));
                 } else {
                     acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
                 }
-                if num != finalpos && Some(num) != finalbreak {
+                if num != finalpos && num != finalbreak {
                     first = Some(num);
                     prev = Some(num);
                 } else {
@@ -1309,7 +1395,12 @@ fn drawnoticetext<T>(root: &DrawingArea<T, Shift>)
 where
     T: DrawingBackend,
 {
-    let text = format!("Graph made by {} version {} ({})", NAME.as_str(), VERSION, AUTHOR);
+    let text = format!(
+        "Graph made by {} version {} ({})",
+        NAME.as_str(),
+        VERSION,
+        AUTHOR
+    );
     let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(root);
     let size = root.estimate_text_size(&text, &text_style).unwrap();
     let size = (
