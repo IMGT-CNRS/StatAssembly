@@ -1,7 +1,7 @@
 # IMGT/StatAssembly
-[![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016809.svg)](https://zenodo.org/doi/10.5281/zenodo.15016810)
-![GitHub License](https://img.shields.io/github/license/DorianCoding/IMGT_StatAssembly)
-
+[![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016809.svg)](https://zenodo.org/doi/10.5281/zenodo.15016809)
+![GitLab Release](https://img.shields.io/gitlab/v/release/:project)
+![GitLab Release](https://img.shields.io/gitlab/v/release/https%3A%2F%2Fsrc.koda.cnrs.fr%2Fimgt-igh%2Fstatassembly)
 IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. 
 <p align="middle">
 <img src = "images/logo_software.png" width ="200" />
@@ -37,16 +37,16 @@ Haplotype must be one of the following:
 * Primary or pri or p (case insensitive)
 * Alternate or alt or a (case insensitive)
 
-The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared in graph.
+The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared and shown together in graphs.
 
-Contig, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
+Contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
 Example in test files.
 * A CSV file containing gene position on the chromosome (optional). ***Header must be preserved***:
 ```csv
 "gene","chromosome","strand","start","end"
-"IGHA1","NC_060938.1","1","99976277","99980553"
-"IGHA2","NC_060938.1","1","99837189","99841426"
-"IGHD","NC_060938.1","1","100108615","100117138"
+"IGHA1","NC_060938.1","minus","99976277","99980553"
+"IGHA2","NC_060938.1","minus","99837189","99841426"
+"IGHD","NC_060938.1","minus","100108615","100117138"
 ```
 Strand can be 0 or 1 (reverse), + or - (reverse), plus or minus (reverse).
 Chromosome, start and end should be 1-based position. Start should be less than end.
@@ -62,7 +62,7 @@ To generate the BAM file used in the analysis, you can follow those steps. Keep 
 ```console
 # apt install minimap2 samtools
 ```
-* Launch minimap from bash terminal:
+* Launch minimap from bash terminal and create the BAM file and its index:
 ```bash
 minimap2 -ax map-hifi -t 32 --eqx --cs CHM13v2.0.fasta reads.fastq.gz > reads.sam
 samtools sort -@ 32 -o reads.bam reads.sam
@@ -121,7 +121,9 @@ The expected output from execution is present in `example_files/results/`.
 - *readresult.png* shows over the locus (position on the chromosome and on the locus displayed) the number of reads based on their quality score, as well as secondary, supplementary and overlapping reads. The number of breaks is displayed as red bars at the bottom panel if existing.
 - *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph.
 - If gene list given:
-    - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239,83,80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts).
+    - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239,83,80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
+        - Warning positions (`rgb(255, 171, 145)`) are positions where less than 10 reads are present and/or the rate of reads matching the base compared to the number of reads present at this position is between 60 and 80%.
+        - Suspicious positions (`rgb(239,83,80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less then 60%.
     - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads on the entire region with 100% match are displayed with the `rgb(0,0,0)` (black) curve.
     - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
 
