@@ -93,7 +93,7 @@ pub(crate) fn less_than_100(s: &str) -> Result<u8, String> {
         _ => Err(String::from("Bad number, must be between 0 and 100.")),
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum Locus {
     IGH,
@@ -154,7 +154,7 @@ impl Alerting for Alertpos {
         matches!(self, Alertpos::Valid)
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct Position {
     zbased: bool,
     position: i64,
@@ -322,7 +322,7 @@ impl Display for Locus {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Haplotype {
     Primary,
     Alternate,
@@ -487,7 +487,7 @@ impl GeneInfosFinish {
         Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
