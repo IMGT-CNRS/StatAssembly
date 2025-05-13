@@ -265,6 +265,16 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
             ),
         ));
     }
+    //At least one duplicate line
+    if let Some(d) = locus.iter().duplicates().next() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique gene name.",
+                d.locus,d.haplotype,d.contig,d.start.getobasedpos(),d.end.getobasedpos()
+            ),
+        ));
+    }
     //make complement if locus is complement
     locus.iter_mut().for_each(|r| {
         if r.start >= r.end {
@@ -298,7 +308,7 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!(
-                "Cannot read bam file ({}). Error is {}. Exiting.",
+                "Cannot read bam file ({}). Error is: {}. Exiting.",
                 args.file.display(),
                 e
             ),
@@ -825,6 +835,16 @@ fn genelist(
             ),
         )));
     }
+    //At least one duplicate line
+    if let Some(d) = genes.iter().duplicates().next() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The gene {} appears more than once. Please provide a unique gene name.",
+                d.gene
+            ),
+        )));
+    }
     //Invert if start >= end because strand is given and won't work
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
         (p.start, p.end) = (p.end.clone(), p.start.clone());
@@ -1084,7 +1104,7 @@ where
                 if num == finalpos {
                     prev_num = finalpos;
                 } else if num == finalbreak {
-                        prev_num = finalbreak;
+                    prev_num = finalbreak;
                 }
                 if f == prev_num {
                     acc.push_str(&format!("{}:{}\n", loci.contig, f));
