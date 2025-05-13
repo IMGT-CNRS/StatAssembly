@@ -2,6 +2,7 @@
 [![zenodo](https://zenodo.org/badge/DOI/10.5281/zenodo.15016809.svg)](https://zenodo.org/doi/10.5281/zenodo.15016809)
 ![GitLab Release](https://img.shields.io/gitlab/v/release/:project)
 ![GitLab Release](https://img.shields.io/gitlab/v/release/https%3A%2F%2Fsrc.koda.cnrs.fr%2Fimgt-igh%2Fstatassembly)
+
 IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including order of genes and validation of alleles in IG and TR loci. 
 <p align="middle">
 <img src = "images/logo_software.png" width ="200" />
