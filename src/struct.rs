@@ -439,7 +439,7 @@ impl Display for Strand {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct GeneInfosFinish {
     pub(crate) gene: String,
     pub(crate) chromosome: String,
@@ -455,6 +455,34 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100m: usize,
     pub(crate) coveragex: usize,
 }
+impl Ord for GeneInfosFinish {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.chromosome.cmp(&other.chromosome) {
+            core::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        match self.start.cmp(&other.start) {
+            core::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        match self.end.cmp(&other.end) {
+            core::cmp::Ordering::Equal => {}
+            ord => return ord,
+        }
+        std::cmp::Ordering::Equal
+    }
+}
+impl PartialOrd for GeneInfosFinish {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for GeneInfosFinish {
+    fn eq(&self, other: &Self) -> bool {
+        self.gene == other.gene
+    }
+}
+impl Eq for GeneInfosFinish {}
 impl GeneInfosFinish {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
