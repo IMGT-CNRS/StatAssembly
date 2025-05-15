@@ -124,7 +124,7 @@ The expected output from execution is present in `example_files/results/`.
 - *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph.
 - If gene list given:
     - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239,83,80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
-        - Warning positions (`rgb(255, 171, 145)`) are positions where less than 10 reads are present and/or the rate of reads matching the base compared to the number of reads present at this position is between 60 and 80%.
+        - Warning positions (`rgb(255, 183, 77)`) are positions where less than 10 reads are present and/or the rate of reads matching the base compared to the number of reads present at this position is between 60 and 80%.
         - Suspicious positions (`rgb(239,83,80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less then 60%.
     - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads on the entire region with 100% match are displayed with the `rgb(0,0,0)` (black) curve.
     - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
@@ -137,7 +137,7 @@ For a better overview of IMGT rules based on this result, check [IMGT assembly q
 
 If you use IMGT/StatAssembly in your work, please cite the version you used, for example:
 
-> Institut de Génétique Humaine. (2025). IMGT StatAssembly (v0.1.7). Zenodo. https://doi.org/10.5281/zenodo.15234695
+> Institut de Génétique Humaine. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
 
 ## Memory consumption
 The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
