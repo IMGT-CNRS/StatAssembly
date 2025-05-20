@@ -21,6 +21,14 @@ The script was made by <a href="//www.imgt.org">IMGT team</a>.
 
 ## Script input files and data
 * The BAM file from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
+
+> [!TIP]
+> If your BAM file does not contain equal CIGAR format or a CS/MD tag, you can recalculate this tag without relaunching the analysis completely if you have the bam file and the assembly like:
+> ```console
+> samtools calmd -b -@ 28 full.bam assembly.fasta > align.bam
+> ```
+> Then you can use the new BAM file to have full results in the software.
+
 * A TSV file with the following information, separated by a tabular:
 ```tsv
 Locus Haplotype contig  start end
@@ -50,8 +58,8 @@ Example in test files.
 "IGHA2","NC_060938.1","minus","99837189","99841426"
 "IGHD","NC_060938.1","minus","100108615","100117138"
 ```
-Strand can be 0 or 1 (reverse), + or - (reverse), plus or minus (reverse).
-Chromosome, start and end should be 1-based position. Start should be less than end.
+Strand can be 0 or 1 (reverse), + or - (reverse), plus or minus (reverse). Strand is related to the chromosome.
+Chromosome, start and end should be 1-based position. *Start should be less than end*.
 Example in test files.
 
 ### Generation of a BAM file
@@ -90,7 +98,7 @@ The BAM file as a result is different from the BAM in example_folder as it is re
 
 ### Binaries
 
-Download the binaries from binaries folder depending on your OS. Then type:
+Download the binaries from binaries folder or releases depending on your OS and put it in your path. Then type:
 ```bash
 IMGT_StatAssembly -h
 ```
@@ -98,14 +106,14 @@ to access the help.
 
 ### Source code
 
-- [ ] Install rust if not installed.
-- [ ] Check Rust version, should be >= 1.85.
-- [ ] Do a git clone and then `cargo build --release` to compile the software.
+- [ ] Install [rust](https://www.rust-lang.org/fr/learn/get-started) if not installed.
+- [ ] Check Rust version `rustc -V`, should be >= 1.85.
+- [ ] Do a `git clone` and then `cargo build --release` to compile the software.
 
 
-## Execution (Test)
+## Execution  (Test)
 
-Here is the command to execute with example files from the repo folder on linux 64bits:
+Here is the command to execute with example files from the repository folder on linux 64bits:
 ```bash
 binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
 ```
@@ -116,18 +124,18 @@ The expected output from execution is present in `example_files/results/`.
 
 ### Description of generated file in example folder
 
-- *break.txt* lists where breaks are present (default: 3,parameter: breaks). An empty file means no break.
+- *break.txt* lists where breaks are present (default: 3, parameter: breaks).
 - *mismatchresult.txt* shows two graphs.
-    - The first graph shows the PHRED quality score (`rgb(0,0,0)` (black) curve) with the right axis. The rate of mismatches (`rgb(126,87,194)`) and misalign (`rgb(239,83,80)`) is also shown for each position. A misalign is a read that has an indel at this position and a mismatch a read with a substitution.
-    - The bottom graph shows the number of mismatch rate for all reads overlapping the position indicated (`rgb(255, 171, 145)`).
+    - The first graph shows the PHRED quality score (`rgb(0,0,0)` (black) curve) with the legend on the right axis. The rate of mismatches (`rgb(126,87,194)`) and misalign (`rgb(239,83,80)`) is also shown for each position with the legend on the left axis. A misalign is a read that has an indel at this position and a mismatch a read with a substitution.
+    - The bottom graph shows the number of mismatch rate for all reads which alignment cover the position indicated (`rgb(255, 171, 145)`).
 - *readresult.png* shows over the locus (position on the chromosome and on the locus displayed) the number of reads based on their quality score, as well as secondary, supplementary and overlapping reads. The number of breaks is displayed as red bars at the bottom panel if existing.
-- *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph.
-- If gene list given:
+- *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph. The rate could be recalculated by dividing with the sum of reads in the column map60,map1 and map0.
+- If gene list is provided:
     - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239,83,80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
-        - Warning positions (`rgb(255, 183, 77)`) are positions where less than 10 reads are present and/or the rate of reads matching the base compared to the number of reads present at this position is between 60 and 80%.
-        - Suspicious positions (`rgb(239,83,80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less then 60%.
-    - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads on the entire region with 100% match are displayed with the `rgb(0,0,0)` (black) curve.
-    - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
+        - Warning positions (`rgb(255, 183, 77)`) are positions where less than x reads (parameter: minreads default 10) are present and/or the rate of reads matching the base compared to the number of reads present at this position is above the suspicious position rate and below the treeshold (parameter: percentwarning default 0.8).
+        - Suspicious positions (`rgb(239,83,80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: percentalerting default 0.6).
+    - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0,0,0)` (black) curve.
+    - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
 
 ### Results analysis
 
@@ -138,6 +146,14 @@ For a better overview of IMGT rules based on this result, check [IMGT assembly q
 If you use IMGT/StatAssembly in your work, please cite the version you used, for example:
 
 > Institut de Génétique Humaine. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
+
+## License
+
+IMGT/StatAssembly: Copyright Guilhem Zeitoun (IMGT), 2025, licensed under the EUPL (European Union Public Licence) v1.2.
+The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
+
+The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
+
 
 ## Memory consumption
 The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
