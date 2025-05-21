@@ -9,12 +9,13 @@ IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including
 <img src = "images/logo_software.png" width ="200" />
 </p>
 
-## Source
+## Software information
 It is a script written in Rust, compiled as a optimized binary.
 <p align="middle">
 <img src = "images/rust.png" width ="50" />
 </p>
-The script was made by <a href="//www.imgt.org">IMGT team</a>.
+
+The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT rules](#results-analysis) to assess the quality of loci, genes and alleles.
 <p align="middle">
 <img src= "images/logo_imgt.png" width ="150" />
 </p>
@@ -102,13 +103,13 @@ Download the binaries from binaries folder or releases depending on your OS and 
 ```bash
 IMGT_StatAssembly -h
 ```
-to access the help.
+to access the help and all parameters.
 
 ### Source code
 
 - [ ] Install [rust](https://www.rust-lang.org/fr/learn/get-started) if not installed.
 - [ ] Check Rust version `rustc -V`, should be >= 1.85.
-- [ ] Do a `git clone` and then `cargo build --release` to compile the software.
+- [ ] Do a `git clone` of the repo and then `cargo build --release` to compile the software.
 
 
 ## Execution  (Test)
@@ -124,28 +125,28 @@ The expected output from execution is present in `example_files/results/`.
 
 ### Description of generated file in example folder
 
-- *break.txt* lists where breaks are present (default: 3, parameter: breaks).
+- *break.txt* lists where breaks are present. Breaks represents positions where less than x reads are covering this position (default: 3, parameter: breaks).
 - *mismatchresult.txt* shows two graphs.
-    - The first graph shows the PHRED quality score (`rgb(0,0,0)` (black) curve) with the legend on the right axis. The rate of mismatches (`rgb(126,87,194)`) and misalign (`rgb(239,83,80)`) is also shown for each position with the legend on the left axis. A misalign is a read that has an indel at this position and a mismatch a read with a substitution.
+    - The first graph shows the PHRED quality score (`rgb(0, 0, 0)` (black) curve) with the legend on the right axis. The rate of mismatches (`rgb(126, 87, 194)`) and misalign (`rgb(239, 83, 80)`) is also shown for each position with the legend on the left axis. A misalign is a read that has an indel at this position and a mismatch a read with a substitution.
     - The bottom graph shows the number of mismatch rate for all reads which alignment cover the position indicated (`rgb(255, 171, 145)`).
-- *readresult.png* shows over the locus (position on the chromosome and on the locus displayed) the number of reads based on their quality score, as well as secondary, supplementary and overlapping reads. The number of breaks is displayed as red bars at the bottom panel if existing.
+- *readresult.png* shows over the locus (position on the chromosome and on the locus displayed) the number of reads based on their quality score, as well as secondary, supplementary and overlapping alignments. The number of breaks is displayed as red bars at the bottom panel if existing.
 - *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph. The rate could be recalculated by dividing with the sum of reads in the column map60,map1 and map0.
 - If gene list is provided:
-    - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239,83,80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
+    - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239, 83, 80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
         - Warning positions (`rgb(255, 183, 77)`) are positions where less than x reads (parameter: minreads default 10) are present and/or the rate of reads matching the base compared to the number of reads present at this position is above the suspicious position rate and below the treeshold (parameter: percentwarning default 0.8).
-        - Suspicious positions (`rgb(239,83,80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: percentalerting default 0.6).
-    - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0,0,0)` (black) curve.
+        - Suspicious positions (`rgb(239, 83, 80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: percentalerting default 0.6).
+    - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0, 0, 0)` (black) curve.
     - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
 
 ### Results analysis
 
-For a better overview of IMGT rules based on this result, check [IMGT assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
+For a better overview of IMGT rules based on this analysis, check [IMGT assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
 
 ## How to cite
 
 If you use IMGT/StatAssembly in your work, please cite the version you used, for example:
 
-> Institut de Génétique Humaine. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
+> ZEITOUN, G., & Kossida, S. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
 
 ## License
 
