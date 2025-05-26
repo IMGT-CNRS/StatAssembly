@@ -271,7 +271,11 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
             std::io::ErrorKind::InvalidData,
             format!(
                 "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique gene name.",
-                d.locus,d.haplotype,d.contig,d.start.getobasedpos(),d.end.getobasedpos()
+                d.locus,
+                d.haplotype,
+                d.contig,
+                d.start.getobasedpos(),
+                d.end.getobasedpos()
             ),
         ));
     }
@@ -1150,6 +1154,9 @@ fn printpossus(
         .comment(Some(b'#'))
         .delimiter(b'\t')
         .from_path(&outputfile)?;
+    /* if data.is_empty() {
+        csv.write_record(["No warning or alerting positions found."])?;
+    } else { */
     csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])?;
     for (gene, vec) in data {
         csv.write_field(&gene.gene)?;
@@ -1161,6 +1168,7 @@ fn printpossus(
         csv.write_field(infos)?;
         csv.write_record(None::<&[u8]>)?;
     }
+    //}
     csv.flush()?;
     println!(
         "Gene suspicious position has been saved to {}",
