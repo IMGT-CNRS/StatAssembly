@@ -121,7 +121,7 @@ binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human 
 
 ## Output
 
-The expected output from execution is present in `example_files/results/`.
+The expected output from execution with test files is present in `example_files/results/`.
 
 ### Description of generated file in example folder
 
@@ -146,11 +146,11 @@ For a better overview of IMGT rules based on this analysis, check [IMGT assembly
 
 If you use IMGT/StatAssembly in your work, please cite the version you used, for example:
 
-> ZEITOUN, G., & Kossida, S. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
+> ZEITOUN, G., DEBBAGH, C., Georga, M., PAPADAKI, A., Sideri, I., FOLCH, G., Jabado-Michaloud, J., Giudicelli, V., Duroux, P., & Kossida, S. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
 
 ## License
 
-IMGT/StatAssembly: Copyright Guilhem Zeitoun (IMGT), 2025, licensed under the EUPL (European Union Public Licence) v1.2.
+IMGT/StatAssembly: Copyright Guilhem Zeitoun (IMGT), 2025, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
 The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
 
 The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
