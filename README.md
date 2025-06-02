@@ -51,8 +51,9 @@ Haplotype must be one of the following:
 The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared and shown together in graphs.
 
 Contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
+*You can use [IMGT description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [LIGM-Motif](https://imgt.org/ligmotif/) to identify locus position*.
 Example in test files.
-* A CSV file containing gene position on the chromosome (optional). ***Header must be preserved***:
+* A CSV file containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
 ```csv
 "gene","chromosome","strand","start","end"
 "IGHA1","NC_060938.1","minus","99976277","99980553"
@@ -65,17 +66,26 @@ Example in test files.
 
 ### Generation of a BAM file
 
-To generate the BAM file used in the analysis, you can follow those steps. Keep in mind minimap2 requires at least 32 GB of memory.
+To generate the BAM file used in the analysis, you can follow those steps.
 
-* Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) and name it CHM13v2.0.fasta.
-* Download HiFi reads of T2T-CHMv2.0 from [NCBI SRA](https://www.ncbi.nlm.nih.gov/sra/?term=SRX789768*+CHM13) and name it reads.fastq.gz (compress it if needed).
+> [!NOTE]
+> Those commands (minimap2 and samtools) needs a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.
+
+* Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) and name it assembly.fasta.
+* Download HiFi reads of T2T-CHMv2.0 from [NCBI SRA](https://www.ncbi.nlm.nih.gov/sra/?term=SRX789768*+CHM13) and keep their SRA names. Or execute ```/bin/bash example_files/download.sh```
 * Install dependancies if not existing
 ```console
 # apt install minimap2 samtools
 ```
+#### Automatic
+
+* Execute the script ```/bin/python3 example_files/assembly.py -m map-hifi -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -s human -o results/``` from the folder with reads and assembly.
+
+#### Manual
 * Launch minimap from bash terminal and create the BAM file and its index:
 ```bash
-minimap2 -ax map-hifi -t 32 --eqx --cs CHM13v2.0.fasta reads.fastq.gz > reads.sam
+cat SRR11292*.fastq.gz > reads.fastq.gz && rm SRR11292*.fastq.gz
+minimap2 -ax map-hifi -t 32 --eqx --cs assembly.fasta reads.fastq.gz > reads.sam
 samtools sort -@ 32 -o reads.bam reads.sam
 samtools index -c reads.bam
 ```
@@ -118,6 +128,7 @@ Here is the command to execute with example files from the repository folder on 
 ```bash
 binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
 ```
+The script should last around 30 seconds.
 
 ## Output
 
