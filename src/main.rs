@@ -839,16 +839,6 @@ fn genelist(
             ),
         )));
     }
-    //At least one duplicate line
-    if let Some(d) = genes.iter().duplicates().next() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "The gene {} appears more than once. Please provide a unique gene name.",
-                d.gene
-            ),
-        )));
-    }
     //Invert if start >= end because strand is given and won't work
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
         (p.start, p.end) = (p.end.clone(), p.start.clone());
@@ -864,6 +854,16 @@ fn genelist(
     if genes.is_empty() {
         println!("No gene identified for locus {}, skipped.", loci.locus);
         return Ok(());
+    }
+    //At least one duplicate line
+    if let Some(d) = genes.iter().duplicates().next() {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The gene {} appears more than once. Please provide a unique gene name.",
+                d.gene
+            ),
+        )));
     }
     let outputfile = outputdir.join(givename(
         &args.species,
