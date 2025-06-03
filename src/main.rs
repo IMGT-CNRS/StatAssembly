@@ -793,11 +793,10 @@ fn main() -> ExitCode {
     );
     ExitCode::SUCCESS
 }
-fn genelist(
-    outputdir: &std::path::Path,
-    loci: &LocusInfos,
+fn extractgenelist(
     args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+    loci: &LocusInfos,
+) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
     let geneloc = match &args.geneloc {
         Some(l) => l,
         None => {
@@ -808,7 +807,6 @@ fn genelist(
         }
     };
     let mut genes: Vec<GeneInfos> = Vec::new();
-    let mut lock: std::io::StderrLock<'_> = stderr().lock();
     let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .comment(Some(b'#'))
@@ -821,7 +819,7 @@ fn genelist(
                 return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "Invalid CSV format (comma separated) for file {}, waiting gene,chromosome,strand,start,end case sensitive.\n{}",
+                        "Invalid CSV format (comma separated) for file {}, waiting gene,chromosome,strand,start,end case sensitive. Have you kept the header?\n{}",
                         geneloc.display(),
                         e
                     ),
@@ -853,17 +851,32 @@ fn genelist(
     });
     if genes.is_empty() {
         println!("No gene identified for locus {}, skipped.", loci.locus);
-        return Ok(());
+        return Ok(Vec::new());
     }
     //At least one duplicate line
-    if let Some(d) = genes.iter().duplicates().next() {
+    if let Some(d) = genes
+        .iter()
+        .duplicates_by(|g| (g.gene.as_str(), loci.haplotype.isprimary()))
+        .next()
+    {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "The gene {} appears more than once. Please provide a unique gene name.",
+                "The gene {} appears more than once (same gene and haplotype). Please provide a unique gene name or consider splitting gene list.",
                 d.gene
             ),
         )));
+    }
+    Ok(genes)
+}
+fn genelist(
+    outputdir: &std::path::Path,
+    loci: &LocusInfos,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let genes = extractgenelist(args, loci)?;
+    if genes.is_empty() {
+        return Ok(());
     }
     let outputfile = outputdir.join(givename(
         &args.species,
@@ -873,6 +886,7 @@ fn genelist(
         "geneanalysis.csv",
         false,
     ));
+    let mut lock: std::io::StderrLock<'_> = stderr().lock();
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
