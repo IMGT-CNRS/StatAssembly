@@ -53,7 +53,7 @@ The list of arguments used in the example (more available in software help):
 The script should last around 30 seconds.
 
 ## Script input files and data
-* The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
+* The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*. The use of HiFi reads should be preferred as short or noisy reads might give confusing results.
 
 > [!TIP]
 > If your BAM file does not contain equal CIGAR format or a CS/MD tag, you can recalculate this tag without relaunching the analysis completely if you have the bam file and the assembly like:
@@ -169,7 +169,8 @@ If you use IMGT/StatAssembly in your work, please cite the version you used, for
 
 ## License
 
-IMGT/StatAssembly: Copyright Guilhem Zeitoun (IMGT), 2025, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
+IMGT/StatAssembly - &copy; Copyright Guilhem Zeitoun (IMGT), 2025, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
+
 The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
 
 The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
