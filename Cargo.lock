@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "IMGT_StatAssembly"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "bio-types",
  "bzip2-sys",
