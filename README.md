@@ -20,8 +20,40 @@ The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT ru
 <img src= "images/logo_imgt.png" width ="150" />
 </p>
 
+## How to install
+
+### Binaries
+
+Download the binaries from binaries folder or releases depending on your OS and put it in your path. Then type:
+```bash
+IMGT_StatAssembly -h
+```
+to access the help and all parameters.
+
+### Source code
+
+- [ ] Install [rust](https://www.rust-lang.org/fr/learn/get-started) if not installed.
+- [ ] Check Rust version `rustc -V`, should be >= 1.85.
+- [ ] Do a `git clone` of the repo and then `cargo build --release` to compile the software.
+
+
+## Execution  (Test)
+
+Here is the command to execute with example files from the repository folder on linux 64bits:
+```bash
+binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
+```
+The list of arguments used in the example (more available in software help):
+* -f is the BAM file with its index (in the same folder) (see [BAM file generation](##generation-of-a-bam-file))
+* -s is the species
+* -l is the locus file (see [input file section](#script-input-files-and-data))
+* -g (OPTIONAL) is the gene list file (see [input file section](#script-input-files-and-data))
+* -o is the path of the folder to send results
+
+The script should last around 30 seconds.
+
 ## Script input files and data
-* The BAM file from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
+* The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*.
 
 > [!TIP]
 > If your BAM file does not contain equal CIGAR format or a CS/MD tag, you can recalculate this tag without relaunching the analysis completely if you have the bam file and the assembly like:
@@ -30,7 +62,7 @@ The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT ru
 > ```
 > Then you can use the new BAM file to have full results in the software.
 
-* A TSV file with the following information, separated by a tabular:
+* A TSV file (-l) with the following information, separated by a tabular:
 ```tsv
 Locus Haplotype contig  start end
 ```
@@ -53,7 +85,7 @@ The rest is ***case sensitive***. You can only have one alternate per primary (t
 Contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
 *You can use [IMGT description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [LIGM-Motif](https://imgt.org/ligmotif/) to identify locus position*.
 Example in test files.
-* A CSV file containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
+* A CSV file (-g) containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
 ```csv
 "gene","chromosome","strand","start","end"
 "IGHA1","NC_060938.1","minus","99976277","99980553"
@@ -72,7 +104,7 @@ To generate the BAM file used in the analysis, you can follow those steps.
 > Those commands (minimap2 and samtools) needs a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.
 
 * Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) and name it assembly.fasta.
-* Download HiFi reads of T2T-CHMv2.0 from [NCBI SRA](https://www.ncbi.nlm.nih.gov/sra/?term=SRX789768*+CHM13) and keep their SRA names. Or execute ```/bin/bash example_files/download.sh```
+* Download HiFi reads of T2T-CHMv2.0 from [NCBI SRA](https://www.ncbi.nlm.nih.gov/sra/?term=SRX789768*+CHM13) and keep their SRA names. Or execute ```/bin/bash example_files/download.sh```.
 * Install dependancies if not existing
 ```console
 # apt install minimap2 samtools
@@ -80,6 +112,7 @@ To generate the BAM file used in the analysis, you can follow those steps.
 #### Automatic
 
 * Execute the script ```/bin/python3 example_files/assembly.py -m map-hifi -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -s human -o results/``` from the folder with reads and assembly.
+* if you want to check the quality of your reads before using fastqc (to be installed), run this: ```/bin/python3 example_files/assembly.py -m map-hifi -q -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -s human -o results/```.
 
 #### Manual
 * Launch minimap from bash terminal and create the BAM file and its index:
@@ -104,31 +137,6 @@ The output of the commands should look like:
 [bam_sort_core] merging from 0 files and 32 in-memory blocks...
 ```
 The BAM file as a result is different from the BAM in example_folder as it is restricted to specific portion of the assembly but contains the same results and can be used as input file.
-
-## How to install
-
-### Binaries
-
-Download the binaries from binaries folder or releases depending on your OS and put it in your path. Then type:
-```bash
-IMGT_StatAssembly -h
-```
-to access the help and all parameters.
-
-### Source code
-
-- [ ] Install [rust](https://www.rust-lang.org/fr/learn/get-started) if not installed.
-- [ ] Check Rust version `rustc -V`, should be >= 1.85.
-- [ ] Do a `git clone` of the repo and then `cargo build --release` to compile the software.
-
-
-## Execution  (Test)
-
-Here is the command to execute with example files from the repository folder on linux 64bits:
-```bash
-binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
-```
-The script should last around 30 seconds.
 
 ## Output
 
