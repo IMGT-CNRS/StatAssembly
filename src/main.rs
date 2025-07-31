@@ -183,7 +183,7 @@ fn mergelocus(locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
                 return None;
             }
             Some(e) if e.locus == loci.locus && alternate => actual.push(loci),
-            Some(e) if e.locus != loci.locus && !loci.haplotype.isprimary() => {
+            Some(e) if e.locus != loci.locus && alternate => {
                 eprintln!("Alternate without a corresponding primary!");
                 return None;
             }
@@ -294,10 +294,11 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "The region {}-{} is more than {}. Check your input file ({}) is correct.n\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory",
+                    "The region {}-{} ({}) is more than {} bp and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
                     big.start.getobasedpos(),
                     big.end.getobasedpos(),
-                    ALERTLOCUSSIZE,
+                    big.locus,
+                    ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
                     args.locuspos.display()
                 ),
             ));
