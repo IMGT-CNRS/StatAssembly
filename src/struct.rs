@@ -525,6 +525,20 @@ pub(crate) struct LocusInfos {
     #[serde(skip)]
     pub(crate) complement: bool,
 }
+impl Ord for LocusInfos {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.locus.to_string().cmp(&other.locus.to_string()) {
+            std::cmp::Ordering::Equal => (),
+            ord => return ord
+        };
+        self.haplotype.cmp(&other.haplotype)
+    }
+}
+impl PartialOrd for LocusInfos {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct HashMapinfo {
     pub(crate) locuspos: Position,

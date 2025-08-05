@@ -154,10 +154,10 @@ fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors
     Ok(reader)
 }
 //Check there is one alternate for one primary.
-fn mergelocus(locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
+fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     let mut elem: Vec<Vec<LocusInfos>> = Vec::with_capacity(locus.len());
-    let mut alternate = false;
     let mut actual: Vec<LocusInfos> = Vec::new();
+    locus.sort_unstable();
     for loci in locus {
         match elem
             .iter()
@@ -169,14 +169,16 @@ fn mergelocus(locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
             }
             _ => (),
         };
-        if !loci.haplotype.isprimary() {
+        let alternate = if !loci.haplotype.isprimary() {
             if actual.is_empty() {
                 eprintln!("Empty without a corresponding primary!");
                 return None;
             } else {
-                alternate = true;
+                true
             }
-        }
+        } else {
+            false
+        };
         match actual.first() {
             Some(e) if e.locus == loci.locus && alternate && actual.len() >= 2 => {
                 eprintln!("Only one alternate is allowed!");
@@ -193,7 +195,6 @@ fn mergelocus(locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
                 };
                 actual.clear();
                 actual.push(loci);
-                alternate = false;
             }
         }
     }
