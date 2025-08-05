@@ -105,12 +105,11 @@ fn iteralert(
             let text = "No = CIGAR given";
             if !args.force {
                 eprintln!(
-                    "{}. Add --force to force even without = or MD/CS tag (some results won't be available).",
-                    text
+                    "{text}. Add --force to force even without = or MD/CS tag (some results won't be available)."
                 );
                 return (false, None, aligned);
             } else if !message {
-                eprintln!("{} but it was forced... Continuing...", text);
+                eprintln!("{text} but it was forced... Continuing...");
                 message = true;
             }
             (
@@ -234,8 +233,7 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "CSV file of location position cannot be found. Error is {}",
-                    e
+                    "CSV file of location position cannot be found. Error is {e}"
                 ),
             ));
         }
@@ -411,11 +409,11 @@ fn main() -> ExitCode {
     //Get locus, geneloc and outputdir, print errors if we have
     let (outputdir, locus) = match (checklocusandoutput(&args), locusposparser(&args)) {
         (Err(e), _) => {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             return ExitCode::FAILURE;
         }
         (_, Err(f)) => {
-            eprintln!("{}", f);
+            eprintln!("{f}");
             return ExitCode::FAILURE;
         }
         (Ok(a), Ok(b)) => (a, b),
@@ -475,7 +473,7 @@ fn main() -> ExitCode {
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
-                    &format!("{}.svg", fgraph),
+                    &format!("{fgraph}.svg"),
                     true,
                 ));
                 outputfile1 = outputfile;
@@ -493,7 +491,7 @@ fn main() -> ExitCode {
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
-                    &format!("{}.png", fgraph),
+                    &format!("{fgraph}.png"),
                     true,
                 ));
                 outputfile2 = outputfile;
@@ -514,7 +512,7 @@ fn main() -> ExitCode {
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
-                    &format!("{}.svg", sgraph),
+                    &format!("{sgraph}.svg"),
                     true,
                 ));
                 outputfile3 = outputfile;
@@ -533,7 +531,7 @@ fn main() -> ExitCode {
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
-                    &format!("{}.png", sgraph),
+                    &format!("{sgraph}.png"),
                     true,
                 ));
                 outputfile4 = outputfile;
@@ -557,7 +555,7 @@ fn main() -> ExitCode {
             let mut reader = match getreaderoffile(&args) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("Cannot read bam file. Error is {}. Exiting", e);
+                    eprintln!("Cannot read bam file. Error is {e}. Exiting");
                     return ExitCode::FAILURE;
                 }
             };
@@ -689,7 +687,7 @@ fn main() -> ExitCode {
                         readgraphtop.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}", e);
+                        eprintln!("Cannot create read graph. Error is {e}");
                         return ExitCode::FAILURE;
                     }
                     mismatchgraph(
@@ -709,7 +707,7 @@ fn main() -> ExitCode {
                         readgraphbottom.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}", e);
+                        eprintln!("Cannot create read graph. Error is {e}");
                         return ExitCode::FAILURE;
                     }
                     mismatchgraph(
@@ -729,7 +727,7 @@ fn main() -> ExitCode {
                         readgraphtop2.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}", e);
+                        eprintln!("Cannot create read graph. Error is {e}");
                         return ExitCode::FAILURE;
                     }
                     mismatchgraph(
@@ -749,7 +747,7 @@ fn main() -> ExitCode {
                         readgraphbottom2.clone().unwrap(),
                     );
                     if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {}", e);
+                        eprintln!("Cannot create read graph. Error is {e}");
                         return ExitCode::FAILURE;
                     }
                     mismatchgraph(
@@ -769,14 +767,14 @@ fn main() -> ExitCode {
                 pos.values().collect_vec().as_slice(),
                 &args,
             ) {
-                eprintln!("Cannot create csv file. Error is {}", e);
+                eprintln!("Cannot create csv file. Error is {e}");
                 return ExitCode::FAILURE;
             }
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
                 if let Err(e) = genelist(outputdir, loci, &args) {
-                    eprintln!("Cannot create gene list. Error is {}", e);
+                    eprintln!("Cannot create gene list. Error is {e}");
                     return ExitCode::FAILURE;
                 }
                 println!("Gene list finished.");
@@ -1374,7 +1372,7 @@ fn givename(
         if image && !haplo {
             String::new()
         } else {
-            format!("{}-", contig)
+            format!("{contig}-")
         },
         if haplo {
             "primary"
@@ -1504,7 +1502,7 @@ fn mismatchgraph<T>(
     );
     secondary
         .configure_mesh()
-        .y_label_formatter(&|f| format!("{}%", f))
+        .y_label_formatter(&|f| format!("{f}%"))
         .x_label_formatter(&|f| {
             format!(
                 "{} ({})",

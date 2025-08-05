@@ -627,5 +627,5 @@ where
     S: serde::Serializer,
 {
     let val = *num as f32 / crate::GLOBALMISMATCHFLOATING as f32;
-    s.collect_str(&format!("{}", val))
+    s.collect_str(&format!("{val}"))
 }
