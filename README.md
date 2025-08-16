@@ -48,9 +48,18 @@ The list of arguments used in the example (more available in software help):
 * -s is the species
 * -l is the locus file (see [input file section](#script-input-files-and-data))
 * -g (OPTIONAL) is the gene list file (see [input file section](#script-input-files-and-data))
-* -o is the path of the folder to send results
+* -o is the path of the folder to put0 results (would be created if not existing)
 
 The script should last around 30 seconds.
+
+> [!NOTE]
+> To get example_files, you need to have git lfs installed and download them. More information on [Git LFS](https://git-lfs.com/).
+> 
+> ```bash
+> sudo apt install git-lfs
+> git lfs install
+> git lfs fetch
+> ```
 
 ## Script input files and data
 * The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*. The use of HiFi reads should be preferred as short or noisy reads might give confusing results.
@@ -100,8 +109,7 @@ Example in test files.
 
 To generate the BAM file used in the analysis, you can follow those steps.
 
-> [!NOTE]
-> Those commands (minimap2 and samtools) needs a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.
+***Those commands (minimap2 and samtools) needs a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.***
 
 * Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) and name it assembly.fasta.
 * Download HiFi reads of T2T-CHMv2.0 from [NCBI SRA](https://www.ncbi.nlm.nih.gov/sra/?term=SRX789768*+CHM13) and keep their SRA names. Or execute ```/bin/bash example_files/download.sh```.
@@ -163,9 +171,13 @@ For a better overview of IMGT rules based on this analysis, check [IMGT assembly
 
 ## How to cite
 
-If you use IMGT/StatAssembly in your work, please cite the version you used, for example:
+More informations on this software can be found on the article.
 
-> ZEITOUN, G., DEBBAGH, C., Georga, M., PAPADAKI, A., Sideri, I., FOLCH, G., Jabado-Michaloud, J., Giudicelli, V., Duroux, P., & Kossida, S. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812
+If you use IMGT/StatAssembly in your work, please cite the article related to the software:
+> IMGT&reg; at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis<br>Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida<br>
+bioRxiv 2025.08.12.669823; doi: https://doi.org/10.1101/2025.08.12.669823
+
+<!-- > ZEITOUN, G., DEBBAGH, C., Georga, M., PAPADAKI, A., Sideri, I., FOLCH, G., Jabado-Michaloud, J., Giudicelli, V., Duroux, P., & Kossida, S. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812 -->
 
 ## License
 
