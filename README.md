@@ -48,7 +48,7 @@ The list of arguments used in the example (more available in software help):
 * -s is the species
 * -l is the locus file (see [input file section](#script-input-files-and-data))
 * -g (OPTIONAL) is the gene list file (see [input file section](#script-input-files-and-data))
-* -o is the path of the folder to put0 results (would be created if not existing)
+* -o is the path of the folder to put results (would be created if not existing)
 
 The script should last around 30 seconds.
 
