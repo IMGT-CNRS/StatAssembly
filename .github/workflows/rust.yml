@@ -48,8 +48,13 @@ jobs:
       if: runner.os == 'windows'
       shell: powershell
       run: |
-        echo "PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        echo "OPENSSL_SRC_PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          choco install openssl.light
+          $env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"
+          $env:OPENSSL_LIB_DIR="$env:OPENSSL_DIR\lib"
+          $env:OPENSSL_INCLUDE_DIR="$env:OPENSSL_DIR\include"
+          $env:OPENSSL_NO_VENDOR=1
+          $env:RUSTFLAGS="-Ctarget-feature=+crt-static"
+          $env:Path += ";$env:OPENSSL_DIR\bin"
     - name: Install dependencies
       if: runner.os == 'linux'
       run: |

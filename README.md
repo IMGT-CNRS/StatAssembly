@@ -177,6 +177,10 @@ If you use IMGT/StatAssembly in your work, please cite the article related to th
 > IMGT&reg; at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis<br>Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida<br>
 bioRxiv 2025.08.12.669823; doi: https://doi.org/10.1101/2025.08.12.669823
 
+<p align="middle">
+<img src= "images/biorxiv-link.png" width ="150" />
+</p>
+
 <!-- > ZEITOUN, G., DEBBAGH, C., Georga, M., PAPADAKI, A., Sideri, I., FOLCH, G., Jabado-Michaloud, J., Giudicelli, V., Duroux, P., & Kossida, S. (2025). IMGT/StatAssembly (1.0.0). Zenodo. https://doi.org/10.5281/zenodo.15396812 -->
 
 ## License
