@@ -10,7 +10,7 @@ IMGT/StatAssembly uses BAM file to assess the quality of the assembly, including
 </p>
 
 ## Software information
-It is a script written in Rust, compiled as a optimized binary.
+It is a script written in Rust, compiled as a optimized binary or an AppImage.
 <p align="middle">
 <img src = "images/rust.png" width ="50" />
 </p>
@@ -22,9 +22,9 @@ The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT ru
 
 ## How to install
 
-### Binaries
+### Binaries and AppImage
 
-Download the binaries from binaries folder or releases depending on your OS and put it in your path. Then type:
+Download the binaries or the AppImage from binaries folder or releases depending on your OS and put it in your path. Then type:
 ```bash
 IMGT_StatAssembly -h
 ```
@@ -34,7 +34,14 @@ to access the help and all parameters.
 
 - [ ] Install [rust](https://www.rust-lang.org/fr/learn/get-started) if not installed.
 - [ ] Check Rust version `rustc -V`, should be >= 1.85.
-- [ ] Do a `git clone` of the repo and then `cargo build --release` to compile the software.
+- [ ] Do a `git clone` of the repo and then `cargo build --release` to compile the software or run to run.
+
+Those commands can be put as:
+```bash
+git clone https://src.koda.cnrs.fr/imgt-igh/statassembly.git
+cd statassembly
+cargo run --release
+```
 
 
 ## Execution  (Test)
@@ -109,6 +116,9 @@ Example in test files.
 
 To generate the BAM file used in the analysis, you can follow those steps.
 
+<details>
+<summary>Steps</summary>
+
 ***Those commands (minimap2 and samtools) needs a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.***
 
 * Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) and name it assembly.fasta.
@@ -145,12 +155,15 @@ The output of the commands should look like:
 [bam_sort_core] merging from 0 files and 32 in-memory blocks...
 ```
 The BAM file as a result is different from the BAM in example_folder as it is restricted to specific portion of the assembly but contains the same results and can be used as input file.
-
+</details>
 ## Output
 
 The expected output from execution with test files is present in `example_files/results/`.
 
 ### Description of generated file in example folder
+
+<details>
+<summary>Description</summary>
 
 - *break.txt* lists where breaks are present. Breaks represents positions where less than x reads are covering this position (default: 3, parameter: breaks).
 - *mismatchresult.txt* shows two graphs.
@@ -165,13 +178,15 @@ The expected output from execution with test files is present in `example_files/
     - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0, 0, 0)` (black) curve.
     - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
 
+</details>
+
 ### Results analysis
 
 For a better overview of IMGT rules based on this analysis, check [IMGT assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
 
 ## How to cite
 
-More informations on this software can be found on the article.
+More informations on this software can be found in the article.
 
 If you use IMGT/StatAssembly in your work, please cite the article related to the software:
 > IMGT&reg; at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis<br>Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida<br>
