@@ -232,9 +232,7 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
         Err(e) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!(
-                    "CSV file of location position cannot be found. Error is {e}"
-                ),
+                format!("CSV file of location position cannot be found. Error is {e}"),
             ));
         }
     };
@@ -418,6 +416,12 @@ fn main() -> ExitCode {
         }
         (Ok(a), Ok(b)) => (a, b),
     };
+    if args.geneloc.is_some() {
+        if let Err(e) = checkgenelistformat(&args) {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    }
     //Group between primary and alternate
     let grouped = match mergelocus(locus) {
         Some(g) => g,
@@ -793,10 +797,7 @@ fn main() -> ExitCode {
     );
     ExitCode::SUCCESS
 }
-fn extractgenelist(
-    args: &Args,
-    loci: &LocusInfos,
-) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
+fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
     let geneloc = match &args.geneloc {
         Some(l) => l,
         None => {
@@ -841,6 +842,13 @@ fn extractgenelist(
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
         (p.start, p.end) = (p.end.clone(), p.start.clone());
     });
+    Ok(genes)
+}
+fn extractgenelist(
+    args: &Args,
+    loci: &LocusInfos,
+) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
+    let mut genes = checkgenelistformat(&args)?;
     //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig

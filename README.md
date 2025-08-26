@@ -189,6 +189,8 @@ IMGT/StatAssembly - &copy; Copyright Guilhem Zeitoun (IMGT), 2025, licensed unde
 
 The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
 
+Biorxiv QR code is the property of Biorxiv.
+
 The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
 
 
