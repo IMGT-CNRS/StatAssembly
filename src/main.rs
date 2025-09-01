@@ -5,7 +5,6 @@ Available under EUPL license
 */
 ///Assess quality of an assembly based on reads mapping
 use clap::Parser;
-use colors::full_palette::GREY_400;
 use itertools::Itertools;
 use plotters::coord::Shift;
 use std::io::{stderr, stdout};
@@ -618,6 +617,17 @@ fn main() -> ExitCode {
                 .filter_map(Result::ok)
                 .filter(|p| !(args.forward && p.is_reverse()))
             {
+                let start = &Position::new(true, p.reference_start());
+                let end = &Position::new(true, p.reference_end());
+                if pos.contains_key(start) {
+                    if let Some(d) = pos.get_mut(start) {
+                        d.softclips += usize::try_from(p.cigar().leading_softclips()).unwrap();
+                    }
+                } else if pos.contains_key(end) {
+                    if let Some(d) = pos.get_mut(end) {
+                        d.softclips += usize::try_from(p.cigar().trailing_softclips()).unwrap();
+                    }
+                }
                 count += 1;
                 //Print every 100 reads done
                 if count % 100 == 0 {
@@ -674,6 +684,13 @@ fn main() -> ExitCode {
                         std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
                         1,
                     )
+                }
+                if p.softclips > 0 {
+                    p.softclips /= std::convert::TryInto::<usize>::try_into(max(
+                        1,
+                        p.gettotalmap() + p.secondary + p.supplementary,
+                    ))
+                    .unwrap();
                 }
                 p.globalmismatch /= max(
                     std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
@@ -910,10 +927,13 @@ fn genelist(
                 genegenericrange.start,
                 genegenericrange.end,
             ))?;
-            let mut hash: BTreeMap<i64, Posread> = BTreeMap::new(); //Match and full match and total
+            let mut hash: BTreeMap<Position, Posread> = BTreeMap::new(); //Match and full match and total
             //Hash contains 1-based positions
             genegenericrange.for_each(|p| {
-                hash.insert(p, Posread::new(0, 0, 0, args).unwrap());
+                hash.insert(
+                    Position::new(true, p),
+                    Posread::new(0, 0, 0, 0, args).unwrap(),
+                );
             });
             (hash, reader.records())
         };
@@ -925,11 +945,17 @@ fn genelist(
         {
             empty = false;
             reads += 1;
+            if let Some(d) = hash.get_mut(&Position::new(true, record.reference_start())) {
+                d.softclips += usize::try_from(record.cigar().leading_softclips()).unwrap();
+            }
+            if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end())) {
+                d.softclips += usize::try_from(record.cigar().trailing_softclips()).unwrap();
+            }
             let range = record.reference_start()..record.reference_end();
             coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
             'outer: for [start, end] in record.aligned_blocks() {
                 for p in start..end {
-                    match hash.get_mut(&p) {
+                    match hash.get_mut(&Position::new(true, p)) {
                         Some(d) => d.addindel(1),
                         None => {
                             if start > gene.end.getzbasedpos() {
@@ -942,7 +968,7 @@ fn genelist(
             if !args.force {
                 'outer: for [start, end] in iterblock(&record).unwrap() {
                     for p in start..end {
-                        match hash.get_mut(&p) {
+                        match hash.get_mut(&Position::new(true, p)) {
                             Some(d) => d.addmatch(1),
                             None => {
                                 if start > gene.end.getzbasedpos() {
@@ -978,7 +1004,7 @@ fn genelist(
                 reads100m += 1;
             }
             for p in range {
-                match hash.get_mut(&p) {
+                match hash.get_mut(&Position::new(true, p)) {
                     Some(d) => d.addtotal(1),
                     None => {
                         if record.reference_start() > gene.end.getzbasedpos() {
@@ -1001,21 +1027,23 @@ fn genelist(
             .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap())
             .count();
         //Reverse if complement
-        let iterator: Vec<(&i64, &Posread)> = match gene.strand {
-            Strand::Plus => hash.iter().collect(),
-            Strand::Minus => hash.iter().rev().collect(),
+        let text = {
+            let iterator: Vec<(&Position, &Posread)> = match gene.strand {
+                Strand::Plus => hash.iter().collect(),
+                Strand::Minus => hash.iter().rev().collect(),
+            };
+            //Merging data
+            iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
+                acc.push_str(&format!(
+                    "{}({}={}X{}ID)-",
+                    f.gettotal(),
+                    f.getmatch(),
+                    f.getmismatchcount(),
+                    f.getindelcount()
+                ));
+                acc
+            })
         };
-        //Merging data
-        let text = iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
-            acc.push_str(&format!(
-                "{}({}={}X{}ID)-",
-                f.gettotal(),
-                f.getmatch(),
-                f.getmismatchcount(),
-                f.getindelcount()
-            ));
-            acc
-        });
         let text = String::from(text.trim_end_matches('-'));
         let plots = outputdir
             .join(format!("gene_{}", args.species))
@@ -1200,7 +1228,7 @@ fn printpossus(
 }
 fn genegraph<T>(
     args: &Args,
-    hash: &BTreeMap<i64, Posread>,
+    hash: &BTreeMap<Position, Posread>,
     gene: &GeneInfos,
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
@@ -1227,7 +1255,7 @@ fn genegraph<T>(
         .build_cartesian_2d(1..hash.len(), 0..max)
         .unwrap();
     //Reverse complement genes
-    let hash: Vec<(&i64, &Posread)> = match gene.strand {
+    let hash: Vec<(&Position, &Posread)> = match gene.strand {
         Strand::Plus => hash.iter().collect(),
         Strand::Minus => hash.iter().rev().collect(),
     };
@@ -1339,7 +1367,7 @@ fn genegraph<T>(
             });
     }
     //Continue graph
-    chart
+    /* chart
         .configure_mesh()
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
         .x_desc("Position in sequence (bp)")
@@ -1357,6 +1385,66 @@ fn genegraph<T>(
             .position(plotters::chart::SeriesLabelPosition::LowerRight)
             .background_style(WHITE.mix(0.6))
             .label_font(text_style)
+            .border_style(BLACK.mix(0.8))
+            .draw()
+            .unwrap();
+    } */
+    //Secondary
+    let softclipmax = hash.iter().map(|(_,p)| p.softclips).max().unwrap() + 5;
+    /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
+    //let softclipmax = core::cmp::max(calc,max);
+     */
+    let mut secondary = chart.set_secondary_coord(
+        usize::try_from(loci.start.getobasedpos()).unwrap()..usize::try_from(loci.end.getobasedpos()).unwrap(),
+        0..softclipmax,
+    );
+    secondary
+        .configure_mesh()
+        .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
+        .x_desc("Genomic position (bp)")
+        .y_desc("Average softclip")
+        .disable_x_mesh()
+        .label_style(text_style.clone())
+        .y_max_light_lines(2)
+        //.disable_y_mesh()
+        .draw()
+        .unwrap();
+    //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
+    secondary
+        .draw_secondary_series(
+            Histogram::vertical(&secondary)
+                .baseline(0)
+                .margin(3)
+                .data(hash.iter().filter_map(|(pos,p)| {
+                    if p.softclips > 0 {
+                        Some((usize::try_from(pos.getobasedpos()).unwrap(), p.softclips))
+                    } else {
+                        None
+                    }
+                }))
+                .style(full_palette::BLACK.mix(0.4).filled()),
+        )
+        .unwrap()
+        .label("Average softclip")
+        .legend(|(x, y)| {
+            plotters::element::Rectangle::new(
+                [(x, y), (x + 15, y + 5)],
+                full_palette::BLACK.filled(),
+            )
+        });
+    secondary
+        .configure_secondary_axes()
+        .y_desc("Soft clips")
+        .label_style(text_style.clone())
+        //.disable_y_mesh()
+        .draw()
+        .unwrap();
+    if !args.nolegend {
+        secondary
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperRight)
+            .background_style(WHITE.mix(0.6))
+            .label_font(text_style.clone())
             .border_style(BLACK.mix(0.8))
             .draw()
             .unwrap();
@@ -1550,6 +1638,7 @@ fn mismatchgraph<T>(
         .configure_secondary_axes()
         .y_desc("Quality (PHRED score)")
         //.disable_y_mesh()
+        .label_style(text_style.clone())
         .draw()
         .unwrap();
     if !args.nolegend {
@@ -1651,6 +1740,7 @@ where
     let (top, bottom) = root.split_vertically((80).percent_height());
     let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 60)
+        .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         .caption(
             format!(
@@ -1661,27 +1751,27 @@ where
         )
         .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max)
         .unwrap();
-    let _ = chart
-        .configure_mesh()
-        .x_label_formatter(&|f| {
-            format!(
-                "{} ({})",
-                f.to_formatted_string(&Locale::en),
-                pos.iter()
-                    .find(|p| { p.position.getobasedpos() == *f })
-                    .unwrap()
-                    .locuspos
-                    .getobasedpos()
-                    .to_formatted_string(&Locale::en)
-            )
-        })
-        //.x_desc("Genomic position (bp)")
-        .y_desc("Coverage")
-        .label_style(text_style.clone())
-        .disable_x_mesh()
-        .y_max_light_lines(2)
-        //.disable_y_mesh()
-        .draw();
+    /* let _ = chart
+    .configure_mesh()
+    .x_label_formatter(&|f| {
+        format!(
+            "{} ({})",
+            f.to_formatted_string(&Locale::en),
+            pos.iter()
+                .find(|p| { p.position.getobasedpos() == *f })
+                .unwrap()
+                .locuspos
+                .getobasedpos()
+                .to_formatted_string(&Locale::en)
+        )
+    })
+    //.x_desc("Genomic position (bp)")
+    .y_desc("Coverage")
+    .label_style(text_style.clone())
+    .disable_x_mesh()
+    .y_max_light_lines(2)
+    //.disable_y_mesh()
+    .draw(); */
     chart
         .draw_series(AreaSeries::new(
             pos.iter().map(|p| (p.position.getobasedpos(), p.map0)),
@@ -1749,19 +1839,84 @@ where
         .unwrap()
         .label("Overlapping reads")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300));
+    //Secondary
+    let softclipmax = i64::try_from(pos.iter().map(|p| p.softclips).max().unwrap()).unwrap() + 5;
+    /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
+    //let softclipmax = core::cmp::max(calc,max);
+     */
+    let mut secondary = chart.set_secondary_coord(
+        loci.start.getobasedpos()..loci.end.getobasedpos(),
+        0..softclipmax,
+    );
+    secondary
+        .configure_mesh()
+        .x_label_formatter(&|f| {
+            format!(
+                "{} ({})",
+                f.to_formatted_string(&Locale::en),
+                pos.iter()
+                    .find(|p| { p.position.getobasedpos() == *f })
+                    .unwrap()
+                    .locuspos
+                    .getobasedpos()
+                    .to_formatted_string(&Locale::en)
+            )
+        })
+        .x_desc("Genomic position (bp)")
+        .y_desc("Average softclip")
+        .disable_x_mesh()
+        .label_style(text_style.clone())
+        .y_max_light_lines(2)
+        //.disable_y_mesh()
+        .draw()
+        .unwrap();
+    //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
+    secondary
+        .draw_secondary_series(
+            Histogram::vertical(&secondary)
+                .baseline(0)
+                .margin(3)
+                .data(pos.iter().filter_map(|p| {
+                    if p.softclips > 0 {
+                        Some((
+                            p.position.getobasedpos(),
+                            i64::try_from(p.softclips).unwrap(),
+                        ))
+                    } else {
+                        None
+                    }
+                }))
+                .style(full_palette::BLACK.mix(0.4).filled()),
+        )
+        .unwrap()
+        .label("Average softclip")
+        .legend(|(x, y)| {
+            plotters::element::Rectangle::new(
+                [(x, y), (x + 15, y + 5)],
+                full_palette::BLACK.filled(),
+            )
+        });
+    secondary
+        .configure_secondary_axes()
+        .y_desc("Soft clips")
+        .label_style(text_style.clone())
+        //.disable_y_mesh()
+        .draw()
+        .unwrap();
     if !args.nolegend {
-        chart
+        secondary
             .configure_series_labels()
             .position(plotters::chart::SeriesLabelPosition::UpperRight)
             .background_style(WHITE.mix(0.6))
+            .label_font(text_style.clone())
             .border_style(BLACK.mix(0.8))
-            .label_font(text_style)
             .draw()
             .unwrap();
     }
     //Bottom graph
     let mut chart = ChartBuilder::on(&bottom)
         .set_label_area_size(LabelAreaPosition::Left, 60)
+        .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
         /*.caption(
             format!(

@@ -238,6 +238,7 @@ pub(crate) struct Posread {
     pub(crate) minreads: u32,
     pub(crate) percentwarning: u8,
     pub(crate) percentalerting: u8,
+    pub(crate) softclips: usize
 }
 impl Alerting for Posread {
     fn iswarning(&self) -> bool {
@@ -267,6 +268,7 @@ impl Posread {
         r#match: usize,
         indel: usize,
         total: usize,
+        softclips: usize,
         args: &Args,
     ) -> Result<Self, MyError> {
         if r#match + indel > total {
@@ -279,6 +281,7 @@ impl Posread {
             minreads: args.minreads,
             percentwarning: args.percentwarning,
             percentalerting: args.percentalerting,
+            softclips
         })
     }
     ///Get the state of the position
@@ -555,6 +558,7 @@ pub(crate) struct HashMapinfo {
     pub(crate) misalign: i64,
     #[serde(skip_serializing_if = "iszero")]
     pub(crate) qual: usize,
+    pub(crate) softclips: usize
 }
 impl PartialEq for HashMapinfo {
     fn eq(&self, other: &Self) -> bool {
@@ -602,6 +606,7 @@ impl HashMapinfo {
         mismatches: i64,
         misalign: i64,
         qual: usize,
+        softclips: usize
     ) -> Self {
         HashMapinfo {
             locuspos,
@@ -616,6 +621,7 @@ impl HashMapinfo {
             mismatches,
             misalign,
             qual,
+            softclips
         }
     }
 }
