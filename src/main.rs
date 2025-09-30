@@ -15,7 +15,7 @@ use std::time::Instant;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
-use extended_htslib::bam::{self, IndexedReader, Read};
+use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
 use lazy_static::lazy_static;
 use num_format::{Locale, ToFormattedString};
 use plotters::chart::{ChartBuilder, LabelAreaPosition};
@@ -396,6 +396,48 @@ fn processcounting(
         }
     }
 }
+fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
+    let mut reader = getreaderoffile(args)
+        .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+    reader
+        .fetch(FetchDefinition::All)
+        .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+    let time = Instant::now();
+    let length = reader
+        .rc_records()
+        .filter_map(Result::ok)
+        .filter_map(|f| {
+            if !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() {
+                Some(usize::try_from(f.reference_end() - f.reference_start() + 1).unwrap_or(0))
+            } else {
+                None
+            }
+        })
+        .sum::<usize>();
+    let total_mapped = match args.extractedlength {
+        0 => {
+            println!("Going for stats");
+            let stats = reader
+                .index_stats()
+                .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+            stats.iter().map(|f| f.1).sum::<u64>()
+        }
+        e => {
+            println!("Forced length used");
+            e
+        }
+    };
+    let values = u64::try_from(length)
+        .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+    let mean = values / total_mapped;
+    if mean == 0 {
+        println!(
+            "Probably truncated BAM, you should give extracted length with the argument -extractedlength."
+        );
+    }
+    println!("Calculated in {} s", time.elapsed().as_secs());
+    Ok(mean)
+}
 fn main() -> ExitCode {
     let firstinstant = Instant::now();
     let args = Args::parse();
@@ -431,6 +473,20 @@ fn main() -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
+    };
+    let mean = if args.meancoverage {
+        println!("Getting mean coverage, please wait.");
+        let mean = match getmeancoverage(&args) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        println!("Mean coverage is {}", mean);
+        Some(mean)
+    } else {
+        None
     };
     for locus in grouped {
         let floci = locus.first().unwrap();
@@ -687,8 +743,8 @@ fn main() -> ExitCode {
                 }
                 if p.softclips > 0 {
                     p.softclips /= std::convert::TryInto::<usize>::try_into(max(
-                        1,
                         p.gettotalmap() + p.secondary + p.supplementary,
+                        1,
                     ))
                     .unwrap();
                 }
@@ -706,6 +762,7 @@ fn main() -> ExitCode {
                         pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphtop.clone().unwrap(),
+                        mean,
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {e}");
@@ -726,6 +783,7 @@ fn main() -> ExitCode {
                         pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphbottom.clone().unwrap(),
+                        mean,
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {e}");
@@ -746,6 +804,7 @@ fn main() -> ExitCode {
                         pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphtop2.clone().unwrap(),
+                        mean,
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {e}");
@@ -766,6 +825,7 @@ fn main() -> ExitCode {
                         pos.values().collect_vec().as_slice(),
                         &args,
                         readgraphbottom2.clone().unwrap(),
+                        mean,
                     );
                     if let Err(e) = f {
                         eprintln!("Cannot create read graph. Error is {e}");
@@ -947,8 +1007,7 @@ fn genelist(
             reads += 1;
             if let Some(d) = hash.get_mut(&Position::new(true, record.reference_start())) {
                 d.softclips += usize::try_from(record.cigar().leading_softclips()).unwrap();
-            }
-            if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end())) {
+            } else if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end())) {
                 d.softclips += usize::try_from(record.cigar().trailing_softclips()).unwrap();
             }
             let range = record.reference_start()..record.reference_end();
@@ -1021,6 +1080,12 @@ fn genelist(
             finale.push(elem);
             continue;
         }
+        hash.iter_mut().for_each(|(_, p)| {
+            if p.softclips > 0 {
+                p.softclips /=
+                    std::convert::TryInto::<usize>::try_into(max(p.gettotal(), 1)).unwrap();
+            }
+        });
         //Coverage calculus
         let coverage = hash
             .iter()
@@ -1390,19 +1455,20 @@ fn genegraph<T>(
             .unwrap();
     } */
     //Secondary
-    let softclipmax = hash.iter().map(|(_,p)| p.softclips).max().unwrap() + 5;
+    let softclipmax = hash.iter().map(|(_, p)| p.softclips).max().unwrap() + 5;
     /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
     //let softclipmax = core::cmp::max(calc,max);
      */
     let mut secondary = chart.set_secondary_coord(
-        usize::try_from(loci.start.getobasedpos()).unwrap()..usize::try_from(loci.end.getobasedpos()).unwrap(),
+        usize::try_from(loci.start.getobasedpos()).unwrap()
+            ..usize::try_from(loci.end.getobasedpos()).unwrap(),
         0..softclipmax,
     );
     secondary
         .configure_mesh()
         .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
         .x_desc("Genomic position (bp)")
-        .y_desc("Average softclip")
+        .y_desc("Reads count")
         .disable_x_mesh()
         .label_style(text_style.clone())
         .y_max_light_lines(2)
@@ -1415,7 +1481,7 @@ fn genegraph<T>(
             Histogram::vertical(&secondary)
                 .baseline(0)
                 .margin(3)
-                .data(hash.iter().filter_map(|(pos,p)| {
+                .data(hash.iter().filter_map(|(pos, p)| {
                     if p.softclips > 0 {
                         Some((usize::try_from(pos.getobasedpos()).unwrap(), p.softclips))
                     } else {
@@ -1425,7 +1491,7 @@ fn genegraph<T>(
                 .style(full_palette::BLACK.mix(0.4).filled()),
         )
         .unwrap()
-        .label("Average softclip")
+        .label("Average softclips")
         .legend(|(x, y)| {
             plotters::element::Rectangle::new(
                 [(x, y), (x + 15, y + 5)],
@@ -1434,7 +1500,7 @@ fn genegraph<T>(
         });
     secondary
         .configure_secondary_axes()
-        .y_desc("Soft clips")
+        .y_desc("Average softclips")
         .label_style(text_style.clone())
         //.disable_y_mesh()
         .draw()
@@ -1730,14 +1796,20 @@ fn readgraph<T>(
     pos: &[&HashMapinfo],
     args: &Args,
     root: DrawingArea<T, Shift>,
+    mean: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     T: DrawingBackend,
 {
     let text_style = fontstyle.into_text_style(&root);
-    let max = pos.iter().map(|max| max.getmaxvalue()).max().unwrap() + 5;
+    let mean = mean.and_then(|mean| Some(i64::try_from(mean).unwrap_or(0)));
+    let max = max(
+        mean.unwrap_or(0),
+        pos.iter().map(|max| max.getmaxvalue()).max().unwrap(),
+    ) + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
+    let tenlines = loci.getlength() / 10;
     let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .right_y_label_area_size(60)
@@ -1786,6 +1858,28 @@ where
                 full_palette::RED_300.filled(),
             )
         });
+    if let Some(mean) = mean {
+        chart
+            .draw_series(
+                LineSeries::new(
+                    pos.iter().filter_map(|p| {
+                        if (p.position.getobasedpos() - loci.start.getobasedpos())
+                            .rem_euclid(std::cmp::max(tenlines, 1))
+                            == 0
+                        {
+                            Some((p.position.getobasedpos(), mean))
+                        } else {
+                            None
+                        }
+                    }),
+                    full_palette::BROWN.mix(0.7).filled(),
+                )
+                .point_size(3),
+            )
+            .unwrap()
+            .label("Mean coverage")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BROWN));
+    }
     chart
         .draw_series(AreaSeries::new(
             pos.iter().map(|p| (p.position.getobasedpos(), p.map1)),

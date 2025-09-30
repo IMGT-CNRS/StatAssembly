@@ -4,3 +4,5 @@ test/
 othertest/
 libs/
 icon.png
+assembly.fn*
+pileup.txt

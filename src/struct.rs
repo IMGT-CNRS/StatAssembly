@@ -50,6 +50,12 @@ pub(crate) struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     pub(crate) force: bool,
+    /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 10 and 15 minutes.
+    #[arg(long, requires="meancoverage", default_value_t = 0)]
+    pub(crate) extractedlength: u64,
+    /// If the coverage analysis should be activated, needed if extracted length is given.
+    #[arg(long)]
+    pub(crate) meancoverage: bool,
     /// Huge region
     #[arg(long)]
     pub(crate) hugeregion: bool,
@@ -542,6 +548,11 @@ impl PartialOrd for LocusInfos {
         Some(self.cmp(other))
     }
 }
+impl LocusInfos {
+    pub(crate) fn getlength(&self) -> i64 {
+        self.end.length(&self.start)
+    }
+}
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct HashMapinfo {
     pub(crate) locuspos: Position,
@@ -558,6 +569,7 @@ pub(crate) struct HashMapinfo {
     pub(crate) misalign: i64,
     #[serde(skip_serializing_if = "iszero")]
     pub(crate) qual: usize,
+    #[serde(rename = "average-softclips")]
     pub(crate) softclips: usize
 }
 impl PartialEq for HashMapinfo {
