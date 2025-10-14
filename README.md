@@ -6,13 +6,12 @@
 
 IMGT/StatAssembly uses BAM file to assess the quality of the IG/TR loci in assemblies and validation of alleles.
 
-
-
 ## Software information
 
 It is a script written in Rust, compiled as a optimized binary or an AppImage.
 
 The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT rules](#results-analysis) to assess the quality of loci, genes and alleles.
+
 <p float="center">
   <img src="images/logo_software.png" margin="" width="100" />
   <img src="images/rust.png" width="100" /> 
@@ -212,7 +211,9 @@ More informations on this software can be found in the article.
 
 If you use IMGT/StatAssembly in your work, please cite the article related to the software:
 
-> IMGT® at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis `<br>`Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida `<br>`
+> IMGT® at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis
+>
+> Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida
 > *Nucleic Acids Research*, Volume 53, Issue 18, 14 October 2025, gkaf1024, [https://doi.org/10.1093/nar/gkaf1024](https://doi.org/10.1093/nar/gkaf1024)
 
 ## License
