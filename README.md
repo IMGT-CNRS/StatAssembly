@@ -6,22 +6,16 @@
 
 IMGT/StatAssembly uses BAM file to assess the quality of the IG/TR loci in assemblies and validation of alleles.
 
-<p align="middle">
-<img src = "images/logo_software.png" width ="200" />
-</p>
+
 
 ## Software information
 
 It is a script written in Rust, compiled as a optimized binary or an AppImage.
 
-<p align="middle">
-<img src = "images/rust.png" width ="50" />
-</p>
-
 The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT rules](#results-analysis) to assess the quality of loci, genes and alleles.
-
-<p align="middle">
-<img src= "images/logo_imgt.png" width ="150" />
+<p float="center">
+  <img src="images/logo_software.png" margin="" width="100" />
+  <img src="images/rust.png" width="100" /> 
 </p>
 
 ## How to install
