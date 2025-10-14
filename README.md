@@ -214,7 +214,7 @@ If you use IMGT/StatAssembly in your work, please cite the article related to th
 > IMGT® at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis
 >
 > Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida
-> *Nucleic Acids Research*, Volume 53, Issue 18, 14 October 2025, gkaf1024, [https://doi.org/10.1093/nar/gkaf1024](https://doi.org/10.1093/nar/gkaf1024)
+> *Nucleic Acids Research;*, gkaf1024, [https://doi.org/10.1093/nar/gkaf1024](https://doi.org/10.1093/nar/gkaf1024)
 
 ## License
 
