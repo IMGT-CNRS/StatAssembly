@@ -407,7 +407,7 @@ fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
         .rc_records()
         .filter_map(Result::ok)
         .filter_map(|f| {
-            if !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() {
+            if !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() && f.mapq() != 0 {
                 Some(usize::try_from(f.reference_end() - f.reference_start() + 1).unwrap_or(0))
             } else {
                 None
@@ -677,11 +677,15 @@ fn main() -> ExitCode {
                 let end = &Position::new(true, p.reference_end());
                 if pos.contains_key(start) {
                     if let Some(d) = pos.get_mut(start) {
-                        d.softclips += usize::try_from(p.cigar().leading_softclips()).unwrap();
+                        d.softclipsvec.push(
+                            usize::try_from(p.cigar().leading_softclips()).unwrap_or_default(),
+                        );
                     }
                 } else if pos.contains_key(end) {
                     if let Some(d) = pos.get_mut(end) {
-                        d.softclips += usize::try_from(p.cigar().trailing_softclips()).unwrap();
+                        d.softclipsvec.push(
+                            usize::try_from(p.cigar().trailing_softclips()).unwrap_or_default(),
+                        );
                     }
                 }
                 count += 1;
@@ -747,6 +751,7 @@ fn main() -> ExitCode {
                         1,
                     ))
                     .unwrap();
+                    p.recalculatesoftclips();
                 }
                 p.globalmismatch /= max(
                     std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
@@ -889,7 +894,13 @@ fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error
         .has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b',')
-        .from_path(geneloc)?;
+        .from_path(geneloc)
+        .map_err(|_| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("The file given {} is not found", geneloc.display()),
+            ))
+        })?;
     for record in csv.deserialize() {
         let record = match record {
             Ok(r) => r,
@@ -919,13 +930,26 @@ fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
         (p.start, p.end) = (p.end.clone(), p.start.clone());
     });
+    if let Some(d) = genes
+        .iter()
+        .duplicates_by(|g| (g.gene.as_str(), g.chromosome.as_str()))
+        .next()
+    {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The gene {} appears more than once (same gene and chromosome). Please provide a unique gene name or consider splitting gene list.",
+                d.gene
+            ),
+        )));
+    }
     Ok(genes)
 }
 fn extractgenelist(
     args: &Args,
     loci: &LocusInfos,
 ) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
-    let mut genes = checkgenelistformat(&args)?;
+    let mut genes = checkgenelistformat(args)?;
     //Retain genes inside the correct loci
     genes.retain(|gene| {
         gene.chromosome == loci.contig
@@ -992,7 +1016,7 @@ fn genelist(
             genegenericrange.for_each(|p| {
                 hash.insert(
                     Position::new(true, p),
-                    Posread::new(0, 0, 0, 0, args).unwrap(),
+                    Posread::new(0, 0, 0, vec![], args).unwrap(),
                 );
             });
             (hash, reader.records())
@@ -1006,9 +1030,9 @@ fn genelist(
             empty = false;
             reads += 1;
             if let Some(d) = hash.get_mut(&Position::new(true, record.reference_start())) {
-                d.softclips += usize::try_from(record.cigar().leading_softclips()).unwrap();
+                d.softclipsvec.push(usize::try_from(record.cigar().leading_softclips()).unwrap());
             } else if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end())) {
-                d.softclips += usize::try_from(record.cigar().trailing_softclips()).unwrap();
+                d.softclipsvec.push(usize::try_from(record.cigar().trailing_softclips()).unwrap());
             }
             let range = record.reference_start()..record.reference_end();
             coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
@@ -1084,6 +1108,7 @@ fn genelist(
             if p.softclips > 0 {
                 p.softclips /=
                     std::convert::TryInto::<usize>::try_into(max(p.gettotal(), 1)).unwrap();
+                p.recalculatesoftclips();
             }
         });
         //Coverage calculus
@@ -1802,7 +1827,7 @@ where
     T: DrawingBackend,
 {
     let text_style = fontstyle.into_text_style(&root);
-    let mean = mean.and_then(|mean| Some(i64::try_from(mean).unwrap_or(0)));
+    let mean = mean.map(|mean| i64::try_from(mean).unwrap_or(0));
     let max = max(
         mean.unwrap_or(0),
         pos.iter().map(|max| max.getmaxvalue()).max().unwrap(),

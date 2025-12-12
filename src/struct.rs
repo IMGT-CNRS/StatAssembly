@@ -51,7 +51,7 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) force: bool,
     /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 10 and 15 minutes.
-    #[arg(long, requires="meancoverage", default_value_t = 0)]
+    #[arg(long, requires = "meancoverage", default_value_t = 0)]
     pub(crate) extractedlength: u64,
     /// If the coverage analysis should be activated, needed if extracted length is given.
     #[arg(long)]
@@ -161,6 +161,7 @@ impl Alerting for Alertpos {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
+
 pub(crate) struct Position {
     zbased: bool,
     position: i64,
@@ -236,7 +237,7 @@ impl Position {
         self.zbased
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Posread {
     pub(crate) r#match: usize,
     pub(crate) indel: usize,
@@ -244,7 +245,8 @@ pub(crate) struct Posread {
     pub(crate) minreads: u32,
     pub(crate) percentwarning: u8,
     pub(crate) percentalerting: u8,
-    pub(crate) softclips: usize
+    pub(crate) softclips: usize,
+    pub(crate) softclipsvec: Vec<usize>
 }
 impl Alerting for Posread {
     fn iswarning(&self) -> bool {
@@ -274,7 +276,7 @@ impl Posread {
         r#match: usize,
         indel: usize,
         total: usize,
-        softclips: usize,
+        softclipsvec: Vec<usize>,
         args: &Args,
     ) -> Result<Self, MyError> {
         if r#match + indel > total {
@@ -287,8 +289,9 @@ impl Posread {
             minreads: args.minreads,
             percentwarning: args.percentwarning,
             percentalerting: args.percentalerting,
-            softclips
-        })
+            softclipsvec,
+            softclips: 0
+        }).map(|mut f| { f.recalculatesoftclips(); f })
     }
     ///Get the state of the position
     fn getstate(&self) -> Alertpos {
@@ -538,7 +541,7 @@ impl Ord for LocusInfos {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match self.locus.to_string().cmp(&other.locus.to_string()) {
             std::cmp::Ordering::Equal => (),
-            ord => return ord
+            ord => return ord,
         };
         self.haplotype.cmp(&other.haplotype)
     }
@@ -569,8 +572,10 @@ pub(crate) struct HashMapinfo {
     pub(crate) misalign: i64,
     #[serde(skip_serializing_if = "iszero")]
     pub(crate) qual: usize,
+    #[serde(skip)]
+    pub(crate) softclipsvec: Vec<usize>,
     #[serde(rename = "average-softclips")]
-    pub(crate) softclips: usize
+    pub(crate) softclips: usize,
 }
 impl PartialEq for HashMapinfo {
     fn eq(&self, other: &Self) -> bool {
@@ -603,7 +608,57 @@ impl Ord for HashMapinfo {
         self.getmaxvalue().cmp(&other.getmaxvalue())
     }
 }
+impl Posread {
+    pub(crate) fn recalculatesoftclips(&mut self) {
+        let softclipsvec = &mut self.softclipsvec;
+        if !softclipsvec.is_sorted() {
+            softclipsvec.sort_unstable();
+        }
+        if softclipsvec.iter().max().unwrap_or(&0) > &0 {
+            println!("Soft is {:?}",softclipsvec);
+        } else {
+            println!("Sad");
+        }
+        let softclips = match softclipsvec.len() {
+            0 => 0,
+            1 => *softclipsvec.first().unwrap(),
+            n if n % 2 == 0 => {
+                let split = softclipsvec.split_at(n / 2);
+                (split.0.last().unwrap() + split.1.first().unwrap()) / 2
+            }
+            n => {
+                let split = softclipsvec.split_at(n / 2);
+                *split.1.first().unwrap()
+            }
+        };
+        self.softclips = softclips;
+    }
+}
 impl HashMapinfo {
+    pub(crate) fn recalculatesoftclips(&mut self) {
+        let softclipsvec = &mut self.softclipsvec;
+        if !softclipsvec.is_sorted() {
+            softclipsvec.sort_unstable();
+        }
+        if softclipsvec.iter().max().unwrap_or(&0) > &0 {
+            println!("Soft is {:?}",softclipsvec);
+        } else {
+            println!("Sad");
+        }
+        let softclips = match softclipsvec.len() {
+            0 => 0,
+            1 => *softclipsvec.first().unwrap(),
+            n if n % 2 == 0 => {
+                let split = softclipsvec.split_at(n / 2);
+                (split.0.last().unwrap() + split.1.first().unwrap()) / 2
+            }
+            n => {
+                let split = softclipsvec.split_at(n / 2);
+                *split.1.first().unwrap()
+            }
+        };
+        self.softclips = softclips;
+    }
     #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn new(
         locuspos: Position,
@@ -618,9 +673,9 @@ impl HashMapinfo {
         mismatches: i64,
         misalign: i64,
         qual: usize,
-        softclips: usize
+        softclipsvec: Vec<usize>,
     ) -> Self {
-        HashMapinfo {
+        let mut idea = HashMapinfo {
             locuspos,
             position,
             map60,
@@ -633,8 +688,11 @@ impl HashMapinfo {
             mismatches,
             misalign,
             qual,
-            softclips
-        }
+            softclipsvec,
+            softclips: 0,
+        };
+        idea.recalculatesoftclips();
+        idea
     }
 }
 pub(crate) fn iszero(num: &usize) -> bool {
