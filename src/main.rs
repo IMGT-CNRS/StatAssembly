@@ -1186,7 +1186,7 @@ fn genelist(
                 hash.insert(
                     Position::new(true, p),
                     //Default should not trigger as no error possible
-                    Posread::new(0, 0, 0, 0f32, args)
+                    Posread::new(0, 0, 0, 0f32, &args)
                         .unwrap_or_else(|_| unreachable!("Error on Posread")),
                 );
             });
