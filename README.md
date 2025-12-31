@@ -50,14 +50,16 @@ cargo run --release
 Here is the command to execute with example files from the repository folder on linux 64bits:
 
 ```bash
-binaries/IMGT_StatAssembly_linux_x64_86 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
+binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
 ```
 
 The list of arguments used in the example (more available in software help):
 
 * -f is the BAM file with its index (in the same folder) (see [BAM file generation](##generation-of-a-bam-file))
 * -s is the species
+* --totalread to get read mismatch rate
 * -l is the locus file (see [input file section](#script-input-files-and-data))
+* --extractedlength is the length of the extracted assembly from the BAM file
 * -g (OPTIONAL) is the gene list file (see [input file section](#script-input-files-and-data))
 * -o is the path of the folder to put results (would be created if not existing and overwritten if existing)
 
@@ -183,6 +185,8 @@ The expected output from execution with test files is present in `example_files/
 
 ### Description of generated file in example folder
 
+For each assembly (in the graph named readresult.png) and for each allele (if applicable), the color of the graph would give information in the assembly and/or allele validates [IMGT criterias](#results-analysis).
+
 <details>
 <summary>Description</summary>
 
@@ -198,7 +202,6 @@ The expected output from execution with test files is present in `example_files/
     - Suspicious positions (`rgb(239, 83, 80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: percentalerting default 0.6).
   - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0, 0, 0)` (black) curve.
   - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with indels (ID). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
-
 </details>
 
 ### Results analysis

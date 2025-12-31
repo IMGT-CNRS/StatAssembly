@@ -1002,6 +1002,50 @@ fn main() -> ExitCode {
         NAME.as_str(),
         firstinstant.elapsed().as_secs_f32()
     );
+    if let Some(light) = &args.outlightbam {
+        let bam = if let Ok(r) = getreaderoffile(&args) {
+            r
+        } else {
+            eprintln!("Cannot access BAM file for light bam.");
+            return ExitCode::FAILURE;
+        };
+        let mut writer = if let Ok(files) = bam::Writer::from_path(
+            &light,
+            &bam::Header::from_template(bam.header()),
+            bam::Format::Bam,
+        ) {
+            files
+        } else {
+            let file = &light.display();
+            eprintln!("Cannot create file {file} for light bam.");
+            return ExitCode::FAILURE;
+        };
+        for f in locus.iter() {
+            let mut bam = if let Ok(r) = getreaderoffile(&args) {
+                r
+            } else {
+                eprintln!("Cannot access BAM file for light bam.");
+                continue;
+            };
+            if bam
+                .fetch((
+                    f.contig.as_bytes(),
+                    f.start.getzbasedpos(),
+                    f.end.getzbasedpos().saturating_add(1),
+                ))
+                .is_err()
+            {
+                eprintln!("Cannot read BAM file region for light bam.");
+                continue;
+            }
+            for read in bam.rc_records().filter_map(Result::ok) {
+                if writer.write(&read).is_err() {
+                    eprintln!("Cannot write BAM file region for light bam.");
+                    continue;
+                };
+            }
+        }
+    }
     ExitCode::SUCCESS
 }
 fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
