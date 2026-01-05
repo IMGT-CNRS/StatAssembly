@@ -771,7 +771,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "645cbb3a84e60b7531617d5ae4e57f7e27308f6445f5abf653209ea76dec8dff"
 
 [[package]]
-<<<<<<< HEAD
 name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -782,12 +781,6 @@ name = "flate2"
 version = "1.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b375d6465b98090a5f25b1c7703f3859783755aa9a80433b36e0379a3ec2f369"
-=======
-name = "flate2"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfe33edd8e85a12a67454e37f8c75e730830d83e313556ab9ebf9ee7fbeb3bfb"
->>>>>>> b257b58 (big modifications of statassembly with softclips and automatic validation)
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -966,12 +959,8 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
-<<<<<<< HEAD
  "wasi 0.11.1+wasi-snapshot-preview1",
  "wasm-bindgen",
-=======
- "wasi",
->>>>>>> b257b58 (big modifications of statassembly with softclips and automatic validation)
 ]
 
 [[package]]
@@ -984,7 +973,6 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi",
-<<<<<<< HEAD
  "wasi 0.14.7+wasi-0.2.4",
  "wasm-bindgen",
 ]
@@ -999,9 +987,6 @@ dependencies = [
  "proc-macro2 1.0.101",
  "quote 1.0.41",
  "syn 2.0.106",
-=======
- "wasip2",
->>>>>>> b257b58 (big modifications of statassembly with softclips and automatic validation)
 ]
 
 [[package]]
@@ -1453,15 +1438,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-<<<<<<< HEAD
 version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
-=======
-version = "0.2.178"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
->>>>>>> b257b58 (big modifications of statassembly with softclips and automatic validation)
 
 [[package]]
 name = "libloading"
@@ -3005,7 +2984,6 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
 name = "wasm-bindgen-backend"
 version = "0.2.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3033,8 +3011,6 @@ dependencies = [
 ]
 
 [[package]]
-=======
->>>>>>> b257b58 (big modifications of statassembly with softclips and automatic validation)
 name = "wasm-bindgen-macro"
 version = "0.2.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3050,17 +3026,10 @@ version = "0.2.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cefb59d5cd5f92d9dcf80e4683949f15ca4b511f4ac0a6e14d4e1ac60c6ecd40"
 dependencies = [
-<<<<<<< HEAD
  "proc-macro2 1.0.101",
  "quote 1.0.41",
  "syn 2.0.106",
  "wasm-bindgen-backend",
-=======
- "bumpalo",
- "proc-macro2",
- "quote",
- "syn",
->>>>>>> b257b58 (big modifications of statassembly with softclips and automatic validation)
  "wasm-bindgen-shared",
 ]
 
