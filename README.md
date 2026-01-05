@@ -194,7 +194,7 @@ For each assembly (in the graph named readresult.png) and for each allele (if ap
 - *mismatchresult.txt* shows two graphs.
   - The first graph shows the PHRED quality score (`rgb(0, 0, 0)` (black) curve) with the legend on the right axis. The rate of mismatches (`rgb(126, 87, 194)`) and misalign (`rgb(239, 83, 80)`) is also shown for each position with the legend on the left axis. A misalign is a read that has an indel at this position and a mismatch a read with a substitution.
   - The bottom graph shows the number of mismatch rate for all reads which alignment cover the position indicated (`rgb(255, 171, 145)`).
-- *readresult.png* shows over the locus (position on the chromosome and on the locus displayed) the number of reads based on their quality score, as well as secondary, supplementary, average soft clips, mean coverage and overlapping alignments. The number of breaks is displayed as red bars at the bottom panel if existing.
+- *readresult.png* shows over the locus (position on the chromosome and on the locus displayed) the number of reads based on their quality score, as well as secondary, supplementary, mean coverage and overlapping alignments. The number of breaks and the number of reads with soft clips is displayed as red bars and black bars at the bottom panel if existing.
 - *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph. The rate could be recalculated by dividing with the sum of reads in the column map60,map1 and map0.
 - If gene list is provided:
   - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239, 83, 80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
@@ -207,6 +207,10 @@ For each assembly (in the graph named readresult.png) and for each allele (if ap
 ### Results analysis
 
 For a better overview of IMGT rules based on this analysis, check [IMGT assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
+
+For readresult.png and each allele graph, the color of the graph would indicate if the locus and/or gene meets IMGT criterias (green for validation and red for rejection).
+* For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2).
+* For gene: At least 10 matching reads and no suspicious or warning positions.
 
 ## How to cite
 
@@ -221,7 +225,7 @@ If you use IMGT/StatAssembly in your work, please cite the article related to th
 
 ## License
 
-IMGT/StatAssembly - &copy; Copyright Guilhem Zeitoun (IMGT), 2025, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
+IMGT/StatAssembly - &copy; Copyright Guilhem Zeitoun (IMGT), 2025-2026, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
 
 The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
 
