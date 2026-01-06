@@ -223,13 +223,15 @@ If you use IMGT/StatAssembly in your work, please cite the article related to th
 > Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida
 > *Nucleic Acids Research;*, gkaf1024, [https://doi.org/10.1093/nar/gkaf1024](https://doi.org/10.1093/nar/gkaf1024)
 
+### Thanks
+
+Thanks to Christophe Klopp from Sigenae - an INRAE bioinformatic platform, who give us some ideas to improve the software.
+
 ## License
 
 IMGT/StatAssembly - &copy; Copyright Guilhem Zeitoun (IMGT), 2025-2026, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
 
 The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
-
-Biorxiv QR code is the property of Biorxiv.
 
 The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
 

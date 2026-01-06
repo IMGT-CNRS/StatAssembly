@@ -779,11 +779,32 @@ fn main() -> ExitCode {
                     && p.cigar().leading_softclips() > 0
                 {
                     d.softclips += 1.0;
+                    println!(
+                        "{:#?} and {}/{} and {}/{} and {:#?} and {:#?}",
+                        String::from_utf8_lossy(p.qname()),
+                        p.seq_len(),
+                        p.seq_len_from_cigar(false),
+                        p.reference_start(),
+                        p.reference_end(),
+                        p.aligned_block_pairs().next(),
+                        p.aligned_block_pairs_match().map(|mut f| f.next())
+                    );
+                    return ExitCode::SUCCESS;
                 } else if pos.contains_key(end)
                     && let Some(d) = pos.get_mut(end)
                     && p.cigar().trailing_softclips() > 0
                 {
                     d.softclips += 1.0;
+                    println!(
+                        "{:#?} and {}/{} and {}/{} and {:#?} and {:#?}",
+                        String::from_utf8_lossy(p.qname()),
+                        p.seq_len(),
+                        p.seq_len_from_cigar(false),
+                        p.reference_start(),
+                        p.reference_end(),
+                        p.aligned_block_pairs().last(),
+                        p.aligned_blocks_match().map(|f| f.last())
+                    );
                 }
                 let (matched, aligned) = match iteralert(&args, message, &p) {
                     (_, None, _) => {
@@ -1003,6 +1024,7 @@ fn main() -> ExitCode {
         firstinstant.elapsed().as_secs_f32()
     );
     if let Some(light) = &args.outlightbam {
+        println!("Generating small BAM for submission");
         let bam = if let Ok(r) = getreaderoffile(&args) {
             r
         } else {
@@ -1016,7 +1038,7 @@ fn main() -> ExitCode {
         ) {
             files
         } else {
-            let file = &light.display();
+            let file = light.display();
             eprintln!("Cannot create file {file} for light bam.");
             return ExitCode::FAILURE;
         };
@@ -1186,7 +1208,7 @@ fn genelist(
                 hash.insert(
                     Position::new(true, p),
                     //Default should not trigger as no error possible
-                    Posread::new(0, 0, 0, 0f32, &args)
+                    Posread::new(0, 0, 0, 0f32, args)
                         .unwrap_or_else(|_| unreachable!("Error on Posread")),
                 );
             });
