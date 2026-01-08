@@ -779,32 +779,11 @@ fn main() -> ExitCode {
                     && p.cigar().leading_softclips() > 0
                 {
                     d.softclips += 1.0;
-                    println!(
-                        "{:#?} and {}/{} and {}/{} and {:#?} and {:#?}",
-                        String::from_utf8_lossy(p.qname()),
-                        p.seq_len(),
-                        p.seq_len_from_cigar(false),
-                        p.reference_start(),
-                        p.reference_end(),
-                        p.aligned_block_pairs().next(),
-                        p.aligned_block_pairs_match().map(|mut f| f.next())
-                    );
-                    return ExitCode::SUCCESS;
                 } else if pos.contains_key(end)
                     && let Some(d) = pos.get_mut(end)
                     && p.cigar().trailing_softclips() > 0
                 {
                     d.softclips += 1.0;
-                    println!(
-                        "{:#?} and {}/{} and {}/{} and {:#?} and {:#?}",
-                        String::from_utf8_lossy(p.qname()),
-                        p.seq_len(),
-                        p.seq_len_from_cigar(false),
-                        p.reference_start(),
-                        p.reference_end(),
-                        p.aligned_block_pairs().last(),
-                        p.aligned_blocks_match().map(|f| f.last())
-                    );
                 }
                 let (matched, aligned) = match iteralert(&args, message, &p) {
                     (_, None, _) => {
@@ -1047,7 +1026,7 @@ fn main() -> ExitCode {
                 r
             } else {
                 eprintln!("Cannot access BAM file for light bam.");
-                continue;
+                return ExitCode::FAILURE;
             };
             if bam
                 .fetch((
@@ -1058,16 +1037,21 @@ fn main() -> ExitCode {
                 .is_err()
             {
                 eprintln!("Cannot read BAM file region for light bam.");
-                continue;
+                return ExitCode::FAILURE;
             }
             for read in bam.rc_records().filter_map(Result::ok) {
                 if writer.write(&read).is_err() {
                     eprintln!("Cannot write BAM file region for light bam.");
-                    continue;
+                    return ExitCode::FAILURE;
                 };
             }
         }
     }
+        println!(
+        "{} done sucessfully in {:.3} seconds.",
+        NAME.as_str(),
+        firstinstant.elapsed().as_secs_f32()
+    );
     ExitCode::SUCCESS
 }
 fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
