@@ -1,19 +1,26 @@
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
+Made by: Guilhem Zeitoun
 */
-///Assess quality of an assembly based on reads mapping
+//TODO: Soft clips dans nouveau tableai et vérifier les valeurs.
+///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
 use itertools::Itertools;
 use plotters::coord::Shift;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
+use std::{fs, io};
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
+use crate::submissions::{REQUESTCLIENT, checkifblastpresent, getspeciesfromncbi, locusposition};
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
 use lazy_static::lazy_static;
@@ -33,16 +40,21 @@ use std::{
     path::PathBuf,
 };
 mod r#struct;
+mod submissions;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
+const MINIMUMCOVERAGE: usize = 10;
+const MAXCOVERAGERATIO: usize = 2;
+const MATCHREADS: usize = 10;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
         ("sans-serif", args.fontlegendsize, &BLACK)
     };
     static ref NAME: String = env!("CARGO_PKG_NAME").replacen('_', "/", 1);
+    #[allow(clippy::unwrap_used)]
     static ref regexpword: regex::Regex = regex::Regex::new(r"[^-\w()]").unwrap();
 }
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
@@ -53,19 +65,14 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
         //There is a MD/CS tag
         (Some(d), None) => Some(
             d.into_iter()
-                .filter_map(|p| {
-                    if let CsValue::Same(d) = p.state {
-                        let pos = p.getgenomepos().unwrap();
-                        Some([
-                            pos,
-                            pos.checked_add(d.try_into().unwrap())
-                                .unwrap()
-                                .checked_sub(1)
-                                .unwrap(),
-                        ])
-                    } else {
-                        None
-                    }
+                .filter_map(|p| match (&p.state, p.getgenomepos()) {
+                    (CsValue::Same(d), Some(pos)) => Some([
+                        pos,
+                        pos.checked_add((*d).try_into().unwrap_or(0))
+                            .and_then(|f| f.checked_sub(1))
+                            .unwrap_or(0),
+                    ]),
+                    _ => None,
                 })
                 .collect(),
         ),
@@ -145,14 +152,16 @@ fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors
         std::thread::available_parallelism(),
     ) {
         (Some(d), _) => d,
+        #[allow(clippy::unwrap_used)]
         (_, Ok(d)) => min(d, NonZero::new(12).unwrap()),
+        #[allow(clippy::unwrap_used)]
         _ => NonZero::new(4).unwrap(),
     };
-    reader.set_threads(threads.get()).unwrap();
+    let _ = reader.set_threads(threads.get());
     Ok(reader)
 }
 //Check there is one alternate for one primary.
-fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
+fn mergelocus(locus: &mut Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     let mut elem: Vec<Vec<LocusInfos>> = Vec::with_capacity(locus.len());
     let mut actual: Vec<LocusInfos> = Vec::new();
     locus.sort_unstable();
@@ -161,7 +170,7 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
             .iter()
             .find(|p| p.iter().any(|f| f.locus == loci.locus))
         {
-            Some(d) if d != elem.last().unwrap() => {
+            Some(d) if Some(d) != elem.last() => {
                 eprintln!("Locus {} is splited! Aborted.", loci.locus);
                 return None;
             }
@@ -182,7 +191,7 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
                 eprintln!("Only one alternate is allowed!");
                 return None;
             }
-            Some(e) if e.locus == loci.locus && alternate => actual.push(loci),
+            Some(e) if e.locus == loci.locus && alternate => actual.push(loci.clone()),
             Some(e) if e.locus != loci.locus && alternate => {
                 eprintln!("Alternate without a corresponding primary!");
                 return None;
@@ -192,7 +201,7 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
                     elem.push(actual.clone())
                 };
                 actual.clear();
-                actual.push(loci);
+                actual.push(loci.clone());
             }
         }
     }
@@ -347,7 +356,6 @@ fn processcounting(
     for (i, targeting) in pos.range_mut(newrange) {
         let i = &i.getzbasedpos();
         let _time = Instant::now();
-        targeting.globalmismatch += getglobalmismatch(args, record);
         match record.mapq() {
             0 => targeting.map0 += 1,
             1..=59 => targeting.map1 += 1,
@@ -361,11 +369,16 @@ fn processcounting(
                 return;
             }
         };
+        targeting.globalmismatch += getglobalmismatch(args, record);
+        /* match record.mapq() {
+            0 => (),
+            _ => targeting.globalmismatch += getglobalmismatch(args, record),
+        }; */
         if i % sep == 0 {
             //Get quality of reads depending on genomic position
             if let Some(d) = record.aligned_pairs().find(|p| p[1] == *i) {
                 let index = d[0] as usize;
-                targeting.qual += *record.qual().get(index).unwrap() as usize;
+                targeting.qual += record.qual().get(index).map_or(0, |f| (*f).into());
             }
         }
         //If not a match, add to mismatches or misalign (if none is found)
@@ -407,7 +420,8 @@ fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
         .rc_records()
         .filter_map(Result::ok)
         .filter_map(|f| {
-            if !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() && f.mapq() != 0 {
+            //Remove reads with 0 as MAPQ
+            if f.mapq() != 0 && !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() {
                 Some(usize::try_from(f.reference_end() - f.reference_start() + 1).unwrap_or(0))
             } else {
                 None
@@ -431,22 +445,45 @@ fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
         .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
     let mean = values / total_mapped;
     if mean == 0 {
-        println!(
-            "Probably truncated BAM, you should give extracted length with the argument -extractedlength."
-        );
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
+        ))
+    } else {
+        println!("Calculated in {} s", time.elapsed().as_secs());
+        Ok(mean)
     }
-    println!("Calculated in {} s", time.elapsed().as_secs());
-    Ok(mean)
 }
 fn main() -> ExitCode {
     let firstinstant = Instant::now();
     let args = Args::parse();
+    let speciesblast = match getspeciesfromncbi(&REQUESTCLIENT, &args.species) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !checkifblastpresent() {
+        eprintln!("BLAST is not found");
+        return ExitCode::FAILURE;
+    }
+    println!("Species is {}.", speciesblast);
+    let pos = match locusposition(Path::new("assembly.fna"), speciesblast, &Locus::IGK) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Value is {}/{:?}", pos.0, pos.1);
+    return ExitCode::SUCCESS;
     if args.percentalerting >= args.percentwarning {
-        eprintln!("Percent warning must be greater than percent alerting.");
+        eprintln!("Percent warning must be greater or equal than percent alerting.");
         return ExitCode::FAILURE;
     }
     //Get locus, geneloc and outputdir, print errors if we have
-    let (outputdir, locus) = match (checklocusandoutput(&args), locusposparser(&args)) {
+    let (outputdir, mut locus) = match (checklocusandoutput(&args), locusposparser(&args)) {
         (Err(e), _) => {
             eprintln!("{e}");
             return ExitCode::FAILURE;
@@ -464,7 +501,7 @@ fn main() -> ExitCode {
         }
     }
     //Group between primary and alternate
-    let grouped = match mergelocus(locus) {
+    let grouped = match mergelocus(&mut locus) {
         Some(g) => g,
         None => {
             eprintln!(
@@ -474,23 +511,48 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mean = if args.meancoverage {
-        println!("Getting mean coverage, please wait.");
-        let mean = match getmeancoverage(&args) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("{e}");
+    let meanpath = outputdir.join(".mean");
+    let mean = match (
+        args.meancoverage,
+        meanpath.try_exists(),
+        fs::read_to_string(&meanpath).map(|p| p.parse::<u64>()),
+    ) {
+        //Mean is given
+        (Some(mean), ..) => {
+            println!(
+                "Mean was provided, getting given value and setting the value for further usage."
+            );
+            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
+            mean
+        }
+        //The mean was calculated with a file
+        (None, Ok(true), Ok(Ok(mean))) => {
+            println!("Mean was already calculated, retrieving...");
+            mean
+        }
+        _ => {
+            println!("Getting mean coverage from calculations, it might take some minutes.");
+            let mean = match getmeancoverage(&args) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            println!("Mean coverage is {}", mean);
+            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
+            mean
+        }
+    };
+    for locus in grouped {
+        let haplotype = locus.len();
+        let floci = match locus.first() {
+            Some(f) => f,
+            None => {
+                eprintln!("There is no locus after grouping found.");
                 return ExitCode::FAILURE;
             }
         };
-        println!("Mean coverage is {}", mean);
-        Some(mean)
-    } else {
-        None
-    };
-    for locus in grouped {
-        let floci = locus.first().unwrap();
-        let haplotype = locus.len();
         if haplotype > 2 {
             eprintln!("There is more than 2 haplotypes for {}", floci.locus);
             return ExitCode::FAILURE;
@@ -503,11 +565,11 @@ fn main() -> ExitCode {
         );
         let readresultsize = (
             1800,
-            1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+            1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
         );
         let mismatchsize = (
             1200,
-            600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap(),
+            600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
         );
         //Get infos for graph
         let mut outputfile1 = PathBuf::new();
@@ -647,10 +709,19 @@ fn main() -> ExitCode {
             } else {
                 locusrange.enumerate().collect()
             };
+            let iterator: Vec<(i64, i64)> = iterator
+                .into_iter()
+                .filter_map(|(a, b)| match i64::try_from(a) {
+                    Ok(d) => Some((d, b)),
+                    Err(_) => {
+                        eprintln!("Position {a} is too big and is not currently supported");
+                        None
+                    }
+                })
+                .collect();
             iterator.into_iter().for_each(|(i, p)| {
-                let locuspos: i64 = i.try_into().unwrap();
                 let default = HashMapinfo {
-                    locuspos: Position::new(true, locuspos),
+                    locuspos: Position::new(true, i),
                     position: Position::new(true, p),
                     ..Default::default()
                 };
@@ -675,29 +746,15 @@ fn main() -> ExitCode {
             {
                 let start = &Position::new(true, p.reference_start());
                 let end = &Position::new(true, p.reference_end());
-                if pos.contains_key(start) {
-                    if let Some(d) = pos.get_mut(start) {
-                        d.softclipsvec.push(
-                            usize::try_from(p.cigar().leading_softclips()).unwrap_or_default(),
-                        );
-                    }
-                } else if pos.contains_key(end) {
-                    if let Some(d) = pos.get_mut(end) {
-                        d.softclipsvec.push(
-                            usize::try_from(p.cigar().trailing_softclips()).unwrap_or_default(),
-                        );
-                    }
-                }
                 count += 1;
                 //Print every 100 reads done
                 if count % 100 == 0 {
-                    writeln!(
+                    let _ = writeln!(
                         lock,
-                        "Process {} reads in {} s",
+                        "Processed {} reads in {:.3} s",
                         count.to_formatted_string(&Locale::en),
                         Instant::now().saturating_duration_since(time).as_secs_f32()
-                    )
-                    .unwrap();
+                    );
                 }
                 nocount = false;
                 //Get range to put the reads inclusive pos
@@ -717,6 +774,17 @@ fn main() -> ExitCode {
                     }
                     continue;
                 }
+                if pos.contains_key(start)
+                    && let Some(d) = pos.get_mut(start)
+                    && p.cigar().leading_softclips() > 0
+                {
+                    d.softclips += 1.0;
+                } else if pos.contains_key(end)
+                    && let Some(d) = pos.get_mut(end)
+                    && p.cigar().trailing_softclips() > 0
+                {
+                    d.softclips += 1.0;
+                }
                 let (matched, aligned) = match iteralert(&args, message, &p) {
                     (_, None, _) => {
                         return ExitCode::FAILURE;
@@ -727,6 +795,11 @@ fn main() -> ExitCode {
                     }
                 };
                 processcounting(&args, &mut pos, newrange, &p, sep, &matched, &aligned);
+            }
+            if locusisokay(mean, &pos.values().collect_vec()) {
+                pos.iter_mut().for_each(|(_a, f)| {
+                    f.locusisok = true;
+                });
             }
             if nocount {
                 eprintln!(
@@ -741,20 +814,16 @@ fn main() -> ExitCode {
             pos.iter_mut().for_each(|(_, p)| {
                 if p.qual > 0 {
                     p.qual /= max(
-                        std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
+                        std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
                         1,
                     )
                 }
-                if p.softclips > 0 {
-                    p.softclips /= std::convert::TryInto::<usize>::try_into(max(
-                        p.gettotalmap() + p.secondary + p.supplementary,
-                        1,
-                    ))
-                    .unwrap();
-                    p.recalculatesoftclips();
+                if p.softclips.is_normal() {
+                    p.softclips =
+                        (p.softclips * 100f32 / max(p.gettotalmap(), 1) as f32).round() / 100f32
                 }
                 p.globalmismatch /= max(
-                    std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap(),
+                    std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
                     1,
                 );
             });
@@ -856,6 +925,17 @@ fn main() -> ExitCode {
                 eprintln!("Cannot create csv file. Error is {e}");
                 return ExitCode::FAILURE;
             }
+            let val = pos.values().collect_vec();
+            println!(
+                "Locus {} ({}) is {}",
+                loci.locus,
+                loci.haplotype,
+                if locusisokay(mean, val.as_slice()) {
+                    "validated"
+                } else {
+                    "rejected"
+                }
+            );
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
@@ -872,8 +952,53 @@ fn main() -> ExitCode {
         }
         println!("Locus {} is done!", &floci.locus);
     }
+    if let Some(light) = &args.outlightbam {
+        println!("Generating small BAM for submission");
+        let bam = if let Ok(r) = getreaderoffile(&args) {
+            r
+        } else {
+            eprintln!("Cannot access BAM file for light bam.");
+            return ExitCode::FAILURE;
+        };
+        let mut writer = if let Ok(files) = bam::Writer::from_path(
+            &light,
+            &bam::Header::from_template(bam.header()),
+            bam::Format::Bam,
+        ) {
+            files
+        } else {
+            let file = light.display();
+            eprintln!("Cannot create file {file} for light bam.");
+            return ExitCode::FAILURE;
+        };
+        for f in locus.iter() {
+            let mut bam = if let Ok(r) = getreaderoffile(&args) {
+                r
+            } else {
+                eprintln!("Cannot access BAM file for light bam.");
+                return ExitCode::FAILURE;
+            };
+            if bam
+                .fetch((
+                    f.contig.as_bytes(),
+                    f.start.getzbasedpos(),
+                    f.end.getzbasedpos().saturating_add(1),
+                ))
+                .is_err()
+            {
+                eprintln!("Cannot read BAM file region for light bam.");
+                return ExitCode::FAILURE;
+            }
+            for read in bam.rc_records().filter_map(Result::ok) {
+                if writer.write(&read).is_err() {
+                    eprintln!("Cannot write BAM file region for light bam.");
+                    return ExitCode::FAILURE;
+                };
+            }
+        }
+    }
     println!(
-        "{} done in {} s",
+        "{} done sucessfully in {:.3} seconds.",
         NAME.as_str(),
         firstinstant.elapsed().as_secs_f32()
     );
@@ -1016,7 +1141,9 @@ fn genelist(
             genegenericrange.for_each(|p| {
                 hash.insert(
                     Position::new(true, p),
-                    Posread::new(0, 0, 0, vec![], args).unwrap(),
+                    //Default should not trigger as no error possible
+                    Posread::new(0, 0, 0, 0f32, args)
+                        .unwrap_or_else(|_| unreachable!("Error on Posread")),
                 );
             });
             (hash, reader.records())
@@ -1029,10 +1156,14 @@ fn genelist(
         {
             empty = false;
             reads += 1;
-            if let Some(d) = hash.get_mut(&Position::new(true, record.reference_start())) {
-                d.softclipsvec.push(usize::try_from(record.cigar().leading_softclips()).unwrap());
-            } else if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end())) {
-                d.softclipsvec.push(usize::try_from(record.cigar().trailing_softclips()).unwrap());
+            if let Some(d) = hash.get_mut(&Position::new(true, record.reference_start()))
+                && record.cigar().leading_softclips() > 0
+            {
+                d.softclips += 1f32
+            } else if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end()))
+                && record.cigar().trailing_softclips() > 0
+            {
+                d.softclips += 1f32
             }
             let range = record.reference_start()..record.reference_end();
             coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
@@ -1049,7 +1180,7 @@ fn genelist(
                 }
             }
             if !args.force {
-                'outer: for [start, end] in iterblock(&record).unwrap() {
+                'outer: for [start, end] in iterblock(&record).unwrap_or_default() {
                     for p in start..end {
                         match hash.get_mut(&Position::new(true, p)) {
                             Some(d) => d.addmatch(1),
@@ -1080,9 +1211,7 @@ fn genelist(
             }
             if !args.force
                 && iterblock(&record)
-                    .unwrap()
-                    .into_iter()
-                    .any(|p| validrange(p, &gene.start, &gene.end))
+                    .is_some_and(|f| f.into_iter().any(|p| validrange(p, &gene.start, &gene.end)))
             {
                 reads100m += 1;
             }
@@ -1098,23 +1227,21 @@ fn genelist(
             }
         }
         if empty {
-            writeln!(lock, "Empty records for gene {}", gene.gene).unwrap();
+            let _ = writeln!(lock, "Empty records for gene {}", gene.gene);
             //PUT 0 value on the CSV
             let elem = GeneInfosFinish::make_default(gene);
             finale.push(elem);
             continue;
         }
         hash.iter_mut().for_each(|(_, p)| {
-            if p.softclips > 0 {
-                p.softclips /=
-                    std::convert::TryInto::<usize>::try_into(max(p.gettotal(), 1)).unwrap();
-                p.recalculatesoftclips();
+            if p.softclips.is_normal() {
+                p.softclips = (p.softclips * 100f32 / max(p.gettotal(), 1) as f32).round() / 100f32
             }
         });
         //Coverage calculus
         let coverage = hash
             .iter()
-            .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap())
+            .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap_or(usize::MAX))
             .count();
         //Reverse if complement
         let text = {
@@ -1172,7 +1299,7 @@ fn genelist(
         }
         let coverageperc = ((coverageperc * 1_000
             / reads
-            / usize::try_from(gene.end.length(&gene.start)).unwrap())
+            / usize::try_from(gene.end.length(&gene.start)).unwrap_or(usize::MAX))
             as f32)
             .round()
             / 1_000.0;
@@ -1185,6 +1312,7 @@ fn genelist(
             reads100m,
             coverageperc,
             coverage,
+            geneisok(reads100m, &hash),
         );
         finale.push(elem);
     }
@@ -1212,17 +1340,23 @@ fn genelist(
     println!("Gene analysis has been saved to {}", outputfile.display());
     Ok(())
 }
-fn printbreaks<T>(
+fn printbreaks(
     args: &Args,
     finalpos: i64,
-    breaks: T,
+    breaks: &[(i64, i64)],
     loci: &LocusInfos,
     outputfile: &std::path::Path,
-) -> std::io::Result<()>
-where
-    T: Iterator<Item = (i64, i64)> + Clone,
-{
-    let mut breakfile = File::create(outputfile.parent().unwrap().join(givename(
+) -> std::io::Result<()> {
+    let outputdir = match outputfile.parent() {
+        Some(d) if d.as_os_str().to_str().is_some_and(|f| !f.is_empty()) => d,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "Invalid root for directory, cannot create break file.",
+            ));
+        }
+    };
+    let mut breakfile = File::create(outputdir.join(givename(
         &args.species,
         &loci.locus,
         &loci.contig,
@@ -1233,30 +1367,30 @@ where
     let mut first = None;
     let mut prev = None;
     //Might be none if no breaks
-    let finalbreak = match breaks.clone().map(|p| p.0).max() {
+    let finalbreak = match breaks.iter().map(|p| p.0).max() {
         Some(d) => d,
         None => {
             breakfile.write_all("No breaks.".as_bytes())?;
             return Ok(());
         }
     };
-    let mut acc = breaks.fold(String::new(), |mut acc, (num, _)| {
+    let mut acc = breaks.iter().fold(String::new(), |mut acc, (num, _)| {
         if first.is_none() {
             first = Some(num);
             prev = Some(num);
         } else if let (Some(mut prev_num), Some(f)) = (prev, first) {
-            if num - prev_num != 1 || num == finalpos || num == finalbreak {
-                if num == finalpos {
-                    prev_num = finalpos;
-                } else if num == finalbreak {
-                    prev_num = finalbreak;
+            if num - prev_num != 1 || *num == finalpos || *num == finalbreak {
+                if *num == finalpos {
+                    prev_num = &finalpos;
+                } else if *num == finalbreak {
+                    prev_num = &finalbreak;
                 }
                 if f == prev_num {
                     acc.push_str(&format!("{}:{}\n", loci.contig, f));
                 } else {
                     acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
                 }
-                if num != finalpos && num != finalbreak {
+                if *num != finalpos && *num != finalbreak {
                     first = Some(num);
                     prev = Some(num);
                 } else {
@@ -1330,17 +1464,23 @@ fn genegraph<T>(
     let genename = gene.gene.to_string();
     let text_style = fontstyle.into_text_style(&root);
     let _ = root.fill(&plotters::prelude::WHITE);
-    let max = hash.values().map(|p| p.gettotal()).max().unwrap() + 5;
+    let max = hash.values().map(|p| p.gettotal()).max().unwrap_or(0) + 5;
+    let colorgene = if geneisok(reads100m, hash) {
+        full_palette::GREEN
+    } else {
+        full_palette::RED
+    };
+
     let mut chart = ChartBuilder::on(&root)
         .set_label_area_size(LabelAreaPosition::Left, 40)
-        .right_y_label_area_size(40)
+        .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption(
             format!(
                 "Reads coverage for {} ({}-{})",
                 genename, loci.haplotype, gene.strand
             ),
-            ("sans-serif", 22),
+            ("sans-serif", 22, &colorgene),
         )
         .build_cartesian_2d(1..hash.len(), 0..max)
         .unwrap();
@@ -1480,14 +1620,13 @@ fn genegraph<T>(
             .unwrap();
     } */
     //Secondary
-    let softclipmax = hash.iter().map(|(_, p)| p.softclips).max().unwrap() + 5;
     /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
     //let softclipmax = core::cmp::max(calc,max);
      */
     let mut secondary = chart.set_secondary_coord(
-        usize::try_from(loci.start.getobasedpos()).unwrap()
-            ..usize::try_from(loci.end.getobasedpos()).unwrap(),
-        0..softclipmax,
+        usize::try_from(loci.start.getobasedpos()).unwrap_or(0)
+            ..usize::try_from(loci.end.getobasedpos()).unwrap_or(0),
+        0..100usize,
     );
     secondary
         .configure_mesh()
@@ -1507,8 +1646,11 @@ fn genegraph<T>(
                 .baseline(0)
                 .margin(3)
                 .data(hash.iter().filter_map(|(pos, p)| {
-                    if p.softclips > 0 {
-                        Some((usize::try_from(pos.getobasedpos()).unwrap(), p.softclips))
+                    if p.softclips.is_normal() {
+                        Some((
+                            usize::try_from(pos.getobasedpos()).unwrap_or(0),
+                            (p.softclips * 100f32) as usize,
+                        ))
                     } else {
                         None
                     }
@@ -1526,6 +1668,7 @@ fn genegraph<T>(
     secondary
         .configure_secondary_axes()
         .y_desc("Average softclips")
+        .y_label_formatter(&|f| format!("{f}%"))
         .label_style(text_style.clone())
         //.disable_y_mesh()
         .draw()
@@ -1588,7 +1731,6 @@ fn createcsv(
     let outputfile = outputfile.as_path();
     let mut csv = csv::WriterBuilder::new()
         .comment(Some(b'#'))
-        .flexible(false)
         .has_headers(true)
         .delimiter(b'\t')
         .flexible(true)
@@ -1815,26 +1957,44 @@ fn mismatchgraph<T>(
     drawnoticetext(&root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
+fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
+    //Between a minimum and a maximum number of reads
+    graph.iter().all(|f| {
+        f.overlaps >= MINIMUMCOVERAGE.try_into().unwrap_or(i64::MAX)
+            && f.overlaps
+                < mean
+                    .saturating_mul(MAXCOVERAGERATIO.try_into().unwrap_or(u64::MAX))
+                    .try_into()
+                    .unwrap_or(i64::MAX)
+    })
+}
+fn geneisok(reads100m: usize, hash: &BTreeMap<Position, Posread>) -> bool {
+    hash.iter().all(|(_, f)| f.isvalid()) && reads100m >= MATCHREADS
+}
 fn readgraph<T>(
     outputfile: &std::path::Path,
     loci: &LocusInfos,
     pos: &[&HashMapinfo],
     args: &Args,
     root: DrawingArea<T, Shift>,
-    mean: Option<u64>,
+    mean: u64,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     T: DrawingBackend,
 {
     let text_style = fontstyle.into_text_style(&root);
-    let mean = mean.map(|mean| i64::try_from(mean).unwrap_or(0));
     let max = max(
-        mean.unwrap_or(0),
-        pos.iter().map(|max| max.getmaxvalue()).max().unwrap(),
+        i64::try_from(mean).unwrap_or(i64::MAX),
+        pos.iter().map(|max| max.getmaxvalue()).max().unwrap_or(0),
     ) + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let tenlines = loci.getlength() / 10;
+    let colorgene = if locusisokay(mean, pos) {
+        full_palette::GREEN
+    } else {
+        full_palette::RED
+    };
     let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .right_y_label_area_size(60)
@@ -1844,31 +2004,85 @@ where
                 "Reads mapping quality over the locus {} ({}-{})",
                 loci.locus, loci.contig, loci.haplotype
             ),
-            ("sans-serif", 28),
+            ("sans-serif", 28, &colorgene),
         )
         .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max)
         .unwrap();
-    /* let _ = chart
-    .configure_mesh()
-    .x_label_formatter(&|f| {
-        format!(
-            "{} ({})",
-            f.to_formatted_string(&Locale::en),
-            pos.iter()
-                .find(|p| { p.position.getobasedpos() == *f })
-                .unwrap()
-                .locuspos
-                .getobasedpos()
-                .to_formatted_string(&Locale::en)
+    let _ = chart
+        .configure_mesh()
+        .x_label_formatter(&|f| {
+            format!(
+                "{} ({})",
+                f.to_formatted_string(&Locale::en),
+                pos.iter()
+                    .find(|p| { p.position.getobasedpos() == *f })
+                    .map(|f| f.locuspos.getobasedpos().to_formatted_string(&Locale::en))
+                    .unwrap_or_default()
+            )
+        })
+        //.x_desc("Genomic position (bp)")
+        .y_desc("Coverage")
+        .label_style(text_style.clone())
+        .disable_x_mesh()
+        .y_max_light_lines(2)
+        //.disable_y_mesh()
+        .draw();
+    chart
+        .draw_series(
+            LineSeries::new(
+                pos.iter().filter_map(|p| {
+                    if (p.position.getobasedpos() - loci.start.getobasedpos())
+                        .rem_euclid(std::cmp::max(tenlines, 1))
+                        == 0
+                    {
+                        Some((
+                            p.position.getobasedpos(),
+                            mean.try_into().unwrap_or(i64::MAX),
+                        ))
+                    } else {
+                        None
+                    }
+                }),
+                full_palette::BROWN.mix(0.7).filled(),
+            )
+            .point_size(3),
         )
-    })
-    //.x_desc("Genomic position (bp)")
-    .y_desc("Coverage")
-    .label_style(text_style.clone())
-    .disable_x_mesh()
-    .y_max_light_lines(2)
-    //.disable_y_mesh()
-    .draw(); */
+        .unwrap()
+        .label("Mean coverage")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BROWN));
+    chart
+        .draw_series(
+            AreaSeries::new(
+                pos.iter().filter_map(|p| {
+                    if (p.position.getobasedpos() - loci.start.getobasedpos())
+                        .rem_euclid(std::cmp::max(tenlines, 1))
+                        == 0
+                    {
+                        Some((
+                            p.position.getobasedpos(),
+                            mean.saturating_mul(
+                                u64::try_from(MAXCOVERAGERATIO).unwrap_or(u64::MAX),
+                            )
+                            .try_into()
+                            .unwrap_or(i64::MAX),
+                        ))
+                    } else {
+                        None
+                    }
+                }),
+                MINIMUMCOVERAGE.try_into().unwrap_or(i64::MAX),
+                full_palette::GREY_A700.mix(0.4).filled(),
+            )
+            .border_style(full_palette::BLACK.mix(0.8)),
+        )
+        .unwrap()
+        .label("Coverage boundaries")
+        .legend(|(x, y)| {
+            plotters::element::Rectangle::new(
+                [(x, y), (x + 15, y + 5)],
+                full_palette::GREY_A700.filled(),
+            )
+        });
     chart
         .draw_series(AreaSeries::new(
             pos.iter().map(|p| (p.position.getobasedpos(), p.map0)),
@@ -1883,28 +2097,6 @@ where
                 full_palette::RED_300.filled(),
             )
         });
-    if let Some(mean) = mean {
-        chart
-            .draw_series(
-                LineSeries::new(
-                    pos.iter().filter_map(|p| {
-                        if (p.position.getobasedpos() - loci.start.getobasedpos())
-                            .rem_euclid(std::cmp::max(tenlines, 1))
-                            == 0
-                        {
-                            Some((p.position.getobasedpos(), mean))
-                        } else {
-                            None
-                        }
-                    }),
-                    full_palette::BROWN.mix(0.7).filled(),
-                )
-                .point_size(3),
-            )
-            .unwrap()
-            .label("Mean coverage")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BROWN));
-    }
     chart
         .draw_series(AreaSeries::new(
             pos.iter().map(|p| (p.position.getobasedpos(), p.map1)),
@@ -1959,11 +2151,10 @@ where
         .label("Overlapping reads")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300));
     //Secondary
-    let softclipmax = i64::try_from(pos.iter().map(|p| p.softclips).max().unwrap()).unwrap() + 5;
     /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
     //let softclipmax = core::cmp::max(calc,max);
      */
-    let mut secondary = chart.set_secondary_coord(
+    /* let mut secondary = chart.set_secondary_coord(
         loci.start.getobasedpos()..loci.end.getobasedpos(),
         0..softclipmax,
     );
@@ -1996,10 +2187,10 @@ where
                 .baseline(0)
                 .margin(3)
                 .data(pos.iter().filter_map(|p| {
-                    if p.softclips > 0 {
+                    if p.softclips.is_normal() {
                         Some((
-                            p.position.getobasedpos(),
-                            i64::try_from(p.softclips).unwrap(),
+                            usize::try_from(p.position.getobasedpos()).unwrap(),
+                            (p.softclips * 100f32) as i64,
                         ))
                     } else {
                         None
@@ -2021,9 +2212,9 @@ where
         .label_style(text_style.clone())
         //.disable_y_mesh()
         .draw()
-        .unwrap();
+        .unwrap();     */
     if !args.nolegend {
-        secondary
+        chart
             .configure_series_labels()
             .position(plotters::chart::SeriesLabelPosition::UpperRight)
             .background_style(WHITE.mix(0.6))
@@ -2046,35 +2237,63 @@ where
         )  */
         .build_cartesian_2d(
             (loci.start.getobasedpos()..loci.end.getobasedpos()).into_segmented(),
-            0..1i64,
+            0..100i64,
         )
         .unwrap();
     let text_style = fontstyle.into_text_style(&root);
     let _ = chart
         .configure_mesh()
         .x_desc("Genomic position (bp)")
+        .y_label_formatter(&|f| format!("{f}%"))
         .x_label_style(text_style.clone())
         .disable_x_axis()
+        .disable_y_mesh()
         .draw();
-    let breaks = pos.iter().filter_map(|elem| {
-        if elem.overlaps <= args.breaks.into() {
-            Some((elem.position.getobasedpos(), 1))
-        } else {
-            None
-        }
-    });
-    let finalpos = pos.iter().last().unwrap().position.getobasedpos();
-    printbreaks(args, finalpos, breaks.clone(), loci, outputfile)?;
+    let breaks: Vec<(i64, i64)> = pos
+        .iter()
+        .filter_map(|elem| {
+            if elem.overlaps <= args.breaks.into() {
+                Some((elem.position.getobasedpos(), 100))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let finalpos = pos
+        .iter()
+        .last()
+        .unwrap_or_else(|| unreachable!("Invalid pos variable"))
+        .position
+        .getobasedpos();
+    printbreaks(args, finalpos, &breaks, loci, outputfile)?;
     chart
         .draw_series(
             Histogram::vertical(&chart)
                 .style(full_palette::RED.filled())
                 .data(breaks)
+                .baseline(0)
                 .margin(0),
         )
         .unwrap()
         .label("Coverage break")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
+    chart
+        .draw_series(
+            Histogram::vertical(&chart)
+                .baseline(0)
+                .margin(3)
+                .data(pos.iter().filter_map(|p| {
+                    if p.softclips.is_normal() {
+                        Some((p.position.getobasedpos(), (p.softclips * 100f32) as i64))
+                    } else {
+                        None
+                    }
+                }))
+                .style(full_palette::BLACK.mix(0.8).filled()),
+        )
+        .unwrap()
+        .label("Softclips percent")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
     if !args.nolegend {
         chart
             .configure_series_labels()

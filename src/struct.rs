@@ -2,6 +2,7 @@
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
+Made by: Guilhem Zeitoun
 */
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
@@ -9,7 +10,7 @@ use std::{fmt::Display, hash::Hash, path::PathBuf};
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
-    before_help = "This script analyzes BAM files coming from reads assembled on an assembly.",
+    before_help = "This script analyzes BAM files coming from reads assembled on an assembly to assess IG/TR loci quality.",
     after_help = "This code was made by and for IMGT (the international ImMunoGeneTics information system).",
     help_template = "\
     {name} {version}
@@ -36,7 +37,7 @@ pub(crate) struct Args {
     #[arg(short, long, default_value_t = 3)]
     pub(crate) breaks: u32,
     /// Coverage to calculate on CSV
-    #[arg(short, long, default_value_t = 10)]
+    #[arg(short, long, default_value_t = 10, value_parser=greater_than_0)]
     pub(crate) coverage: u32,
     /// Minimum number of match reads (included) for warning positions
     #[arg(long, default_value_t = 10)]
@@ -51,12 +52,12 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) force: bool,
     /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 10 and 15 minutes.
-    #[arg(long, requires = "meancoverage", default_value_t = 0)]
+    #[arg(long, conflicts_with = "meancoverage", default_value_t = 0)]
     pub(crate) extractedlength: u64,
-    /// If the coverage analysis should be activated, needed if extracted length is given.
-    #[arg(long)]
-    pub(crate) meancoverage: bool,
-    /// Huge region
+    /// The mean coverage is already calculated, else will be calculated at startup (10-15 minutes) if not stored already.
+    #[arg(long, value_parser=greater_than_0)]
+    pub(crate) meancoverage: Option<u64>,
+    /// Huge region (more than 10 Mb)
     #[arg(long)]
     pub(crate) hugeregion: bool,
     /// Number of threads to decrypt bgzf files (0 for number of threads up to 12)
@@ -72,12 +73,12 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) totalread: bool,
     /// Size of legend axis (default 16)
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 16, value_parser=greater_than_0)]
     pub(crate) fontlegendsize: u32,
     /// No legend on graphs
     #[arg(long)]
     pub(crate) nolegend: bool,
-    /// Get supplementary and secondary alignments on gene graphs
+    /// Get supplementary and secondary alignments on gene graphs as well
     #[arg(long)]
     pub(crate) allreads: bool,
     /// Save as SVG images (create big images)
@@ -92,11 +93,20 @@ pub(crate) struct Args {
     ///Output directory (created or overwritten)
     #[arg(short, long)]
     pub(crate) outdir: PathBuf,
+    ///Output light BAM for submission
+    #[arg(short='z', long)]
+    pub(crate) outlightbam: Option<PathBuf>,
 }
 pub(crate) fn less_than_100(s: &str) -> Result<u8, String> {
     match s.parse::<u8>() {
         Ok(s) if (0..=100).contains(&s) => Ok(s),
         _ => Err(String::from("Bad number, must be between 0 and 100.")),
+    }
+}
+pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(s) if s != u32::MIN => Ok(s),
+        _ => Err(String::from("Bad number, must be greater than 0.")),
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
@@ -138,7 +148,9 @@ impl Alertpos {
             record.minreads,
         ) {
             (d, ..) if percent <= d.into() => Alertpos::Suspicious,
-            (_, d, e) if record.r#match <= e.try_into().unwrap() || percent <= d.into() => {
+            (_, d, e)
+                if record.r#match <= e.try_into().unwrap_or(usize::MAX) || percent <= d.into() =>
+            {
                 Alertpos::Warning
             }
             _ => Alertpos::Valid,
@@ -216,7 +228,9 @@ impl Position {
     pub(crate) fn length(&self, other: &Self) -> i64 {
         let min = std::cmp::min(self.getzbasedpos(), other.getzbasedpos());
         let max = std::cmp::max(self.getzbasedpos(), other.getzbasedpos());
-        max.checked_sub(min).unwrap().checked_add(1).unwrap() //Calculate the length
+        max.checked_sub(min)
+            .and_then(|f| f.checked_add(1))
+            .unwrap_or(0) //Calculate the length
     }
     pub(crate) fn getzbasedpos(&self) -> i64 {
         if self.zbased {
@@ -237,7 +251,7 @@ impl Position {
         self.zbased
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Copy)]
 pub(crate) struct Posread {
     pub(crate) r#match: usize,
     pub(crate) indel: usize,
@@ -245,8 +259,7 @@ pub(crate) struct Posread {
     pub(crate) minreads: u32,
     pub(crate) percentwarning: u8,
     pub(crate) percentalerting: u8,
-    pub(crate) softclips: usize,
-    pub(crate) softclipsvec: Vec<usize>
+    pub(crate) softclips: f32,
 }
 impl Alerting for Posread {
     fn iswarning(&self) -> bool {
@@ -276,7 +289,7 @@ impl Posread {
         r#match: usize,
         indel: usize,
         total: usize,
-        softclipsvec: Vec<usize>,
+        softclips: f32,
         args: &Args,
     ) -> Result<Self, MyError> {
         if r#match + indel > total {
@@ -289,9 +302,8 @@ impl Posread {
             minreads: args.minreads,
             percentwarning: args.percentwarning,
             percentalerting: args.percentalerting,
-            softclipsvec,
-            softclips: 0
-        }).map(|mut f| { f.recalculatesoftclips(); f })
+            softclips,
+        })
     }
     ///Get the state of the position
     fn getstate(&self) -> Alertpos {
@@ -301,10 +313,10 @@ impl Posread {
         self.total
     }
     pub(crate) fn getmismatchcount(&self) -> usize {
-        self.getindel().checked_sub(self.getmatch()).unwrap()
+        self.getindel().saturating_sub(self.getmatch())
     }
     pub(crate) fn getindelcount(&self) -> usize {
-        self.gettotal().checked_sub(self.getindel()).unwrap()
+        self.gettotal().saturating_sub(self.getindel())
     }
     pub(crate) fn addtotal(&mut self, count: usize) {
         self.total += count
@@ -328,7 +340,7 @@ impl Display for Locus {
             Locus::IGH => write!(f, "IGH"),
             Locus::IGK => write!(f, "IGK"),
             Locus::IGL => write!(f, "IGL"),
-            Locus::TRA => write!(f, "TRA"),
+            Locus::TRA => write!(f, "TRA_TRD"),
             Locus::TRB => write!(f, "TRB"),
             Locus::TRG => write!(f, "TRG"),
         }
@@ -466,6 +478,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100: usize,
     pub(crate) reads100m: usize,
     pub(crate) coveragex: usize,
+    accepted: bool,
 }
 impl Ord for GeneInfosFinish {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -496,6 +509,10 @@ impl PartialEq for GeneInfosFinish {
 }
 impl Eq for GeneInfosFinish {}
 impl GeneInfosFinish {
+    #[allow(dead_code)]
+    pub(crate) fn isok(&self) -> bool {
+        self.accepted
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         gene: GeneInfos,
@@ -506,6 +523,7 @@ impl GeneInfosFinish {
         reads100m: usize,
         readscoverage: f32,
         coveragex: usize,
+        accepted: bool,
     ) -> Self {
         GeneInfosFinish {
             gene: gene.gene,
@@ -521,10 +539,11 @@ impl GeneInfosFinish {
             reads100m,
             readscoverage,
             coveragex,
+            accepted,
         }
     }
     pub(crate) fn make_default(gene: GeneInfos) -> Self {
-        Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
+        Self::new(gene, 0, 0, None, 0, 0, 0.0, 0, false)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
@@ -556,7 +575,7 @@ impl LocusInfos {
         self.end.length(&self.start)
     }
 }
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct HashMapinfo {
     pub(crate) locuspos: Position,
     pub(crate) position: Position,
@@ -572,10 +591,10 @@ pub(crate) struct HashMapinfo {
     pub(crate) misalign: i64,
     #[serde(skip_serializing_if = "iszero")]
     pub(crate) qual: usize,
-    #[serde(skip)]
-    pub(crate) softclipsvec: Vec<usize>,
-    #[serde(rename = "average-softclips")]
-    pub(crate) softclips: usize,
+    #[serde(rename = "percent-softclips")]
+    pub(crate) softclips: f32,
+    #[serde(skip_deserializing)]
+    pub(crate) locusisok: bool,
 }
 impl PartialEq for HashMapinfo {
     fn eq(&self, other: &Self) -> bool {
@@ -592,10 +611,16 @@ impl HashMapinfo {
             self.secondary,
             self.supplementary,
         ];
-        elem.into_iter().max().unwrap()
+        elem.into_iter().max().unwrap_or(self.overlaps)
     }
+    /// Get the number of primary reads
     pub(crate) fn gettotalmap(&self) -> i64 {
         self.map0 + self.map1 + self.map60
+    }
+    /// Get the number of primary reads **(except map0)**
+    #[allow(dead_code)]
+    pub(crate) fn gettotalscore(&self) -> i64 {
+        self.map1 + self.map60
     }
 }
 impl PartialOrd for HashMapinfo {
@@ -608,57 +633,7 @@ impl Ord for HashMapinfo {
         self.getmaxvalue().cmp(&other.getmaxvalue())
     }
 }
-impl Posread {
-    pub(crate) fn recalculatesoftclips(&mut self) {
-        let softclipsvec = &mut self.softclipsvec;
-        if !softclipsvec.is_sorted() {
-            softclipsvec.sort_unstable();
-        }
-        if softclipsvec.iter().max().unwrap_or(&0) > &0 {
-            println!("Soft is {:?}",softclipsvec);
-        } else {
-            println!("Sad");
-        }
-        let softclips = match softclipsvec.len() {
-            0 => 0,
-            1 => *softclipsvec.first().unwrap(),
-            n if n % 2 == 0 => {
-                let split = softclipsvec.split_at(n / 2);
-                (split.0.last().unwrap() + split.1.first().unwrap()) / 2
-            }
-            n => {
-                let split = softclipsvec.split_at(n / 2);
-                *split.1.first().unwrap()
-            }
-        };
-        self.softclips = softclips;
-    }
-}
 impl HashMapinfo {
-    pub(crate) fn recalculatesoftclips(&mut self) {
-        let softclipsvec = &mut self.softclipsvec;
-        if !softclipsvec.is_sorted() {
-            softclipsvec.sort_unstable();
-        }
-        if softclipsvec.iter().max().unwrap_or(&0) > &0 {
-            println!("Soft is {:?}",softclipsvec);
-        } else {
-            println!("Sad");
-        }
-        let softclips = match softclipsvec.len() {
-            0 => 0,
-            1 => *softclipsvec.first().unwrap(),
-            n if n % 2 == 0 => {
-                let split = softclipsvec.split_at(n / 2);
-                (split.0.last().unwrap() + split.1.first().unwrap()) / 2
-            }
-            n => {
-                let split = softclipsvec.split_at(n / 2);
-                *split.1.first().unwrap()
-            }
-        };
-        self.softclips = softclips;
-    }
     #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn new(
         locuspos: Position,
@@ -673,9 +648,9 @@ impl HashMapinfo {
         mismatches: i64,
         misalign: i64,
         qual: usize,
-        softclipsvec: Vec<usize>,
+        softclips: f32,
     ) -> Self {
-        let mut idea = HashMapinfo {
+        HashMapinfo {
             locuspos,
             position,
             map60,
@@ -688,11 +663,9 @@ impl HashMapinfo {
             mismatches,
             misalign,
             qual,
-            softclipsvec,
-            softclips: 0,
-        };
-        idea.recalculatesoftclips();
-        idea
+            softclips,
+            locusisok: false,
+        }
     }
 }
 pub(crate) fn iszero(num: &usize) -> bool {
