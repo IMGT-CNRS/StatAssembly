@@ -1,16 +1,29 @@
+use bio::io::fasta::{self, FastaRead};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
 Made by: Guilhem Zeitoun
 */
+use crate::submissions::{DELIMITERFASTA, locusposition};
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
-use std::{fmt::Display, hash::Hash, path::PathBuf};
+use std::cmp::Ordering;
+use std::io::ErrorKind;
+use std::ops::RangeInclusive;
+use std::str::FromStr;
+use std::{
+    borrow::Cow,
+    fmt::Display,
+    fs::File,
+    hash::Hash,
+    io,
+    path::{Path, PathBuf},
+};
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
-    before_help = "This script analyzes BAM files coming from reads assembled on an assembly to assess IG/TR loci quality.",
+    before_help = "This script analyzes BAM files coming from reads assembled on an assembly to assess IG/TR loci quality.\nYou can also submit new sequences to IMGT.",
     after_help = "This code was made by and for IMGT (the international ImMunoGeneTics information system).",
     help_template = "\
     {name} {version}
@@ -66,11 +79,14 @@ pub(crate) struct Args {
     /// Only strand-specific alignments to reference
     #[arg(long)]
     pub(crate) forward: bool,
+    /// Assembly fasta file
+    #[arg(long, short = 'a')]
+    pub(crate) assembly: Option<PathBuf>,
     /// Query full quality PHRED score (script will be longer to execute)
     #[arg(long)]
     pub(crate) fullquality: bool,
     /// Calculate total reads mismatch
-    #[arg(long)]
+    #[arg(long, short = 't')]
     pub(crate) totalread: bool,
     /// Size of legend axis (default 16)
     #[arg(long, default_value_t = 16, value_parser=greater_than_0)]
@@ -94,8 +110,11 @@ pub(crate) struct Args {
     #[arg(short, long)]
     pub(crate) outdir: PathBuf,
     ///Output light BAM for submission
-    #[arg(short='z', long)]
+    #[arg(short = 'z', long)]
     pub(crate) outlightbam: Option<PathBuf>,
+    /// Do not submit to IMGT
+    #[arg(long)]
+    pub(crate) nosubmit: bool,
 }
 pub(crate) fn less_than_100(s: &str) -> Result<u8, String> {
     match s.parse::<u8>() {
@@ -172,7 +191,7 @@ impl Alerting for Alertpos {
         matches!(self, Alertpos::Valid)
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 
 pub(crate) struct Position {
     zbased: bool,
@@ -272,6 +291,414 @@ impl Alerting for Posread {
 
     fn isvalid(&self) -> bool {
         self.getstate().isvalid()
+    }
+}
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct Blast {
+    pub(crate) qseqid: String,
+    pub(crate) sseqid: String,
+    pub(crate) qstart: usize,
+    pub(crate) qend: usize,
+    pub(crate) sstart: usize,
+    pub(crate) send: usize,
+    pub(crate) qlen: usize,
+    pub(crate) length: usize,
+    pub(crate) pident: f32,
+    pub(crate) gaps: usize,
+    pub(crate) sseq: String,
+    #[serde(skip_deserializing)]
+    pub(crate) complement: bool,
+    #[serde(skip_deserializing)]
+    pub(crate) status: Status,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Blastmatch {
+    pub(crate) qseqid: String,
+    pub(crate) sseqid: String,
+    pub(crate) sseq: String,
+    pub(crate) sstart: usize,
+    pub(crate) send: usize,
+    pub(crate) status: Status,
+}
+impl PartialOrd for Blastmatch {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(&other))
+    }
+}
+impl Ord for Blastmatch {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.sseqid.cmp(&other.sseqid) {
+            std::cmp::Ordering::Equal => match self.sstart.cmp(&other.sstart) {
+                std::cmp::Ordering::Equal => self.send.cmp(&other.send),
+                ord => ord,
+            },
+            ord => ord,
+        }
+    }
+}
+impl PartialEq for Blastmatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.qseqid == other.qseqid && self.sstart == other.sstart && self.send == other.send
+    }
+}
+impl Eq for Blastmatch {}
+impl Blastmatch {
+    pub(crate) fn new(
+        qseqid: String,
+        sseqid: String,
+        sseq: String,
+        sstart: usize,
+        send: usize,
+        status: Status,
+    ) -> Self {
+        Self {
+            qseqid,
+            sseqid,
+            sseq,
+            sstart,
+            send,
+            status,
+        }
+    }
+}
+impl Blast {
+    pub(crate) fn getstatus(&self) -> &Status {
+        &self.status
+    }
+    pub(crate) fn setstatus(&mut self) {
+        match (self.pident, self.qlen, self.length) {
+            (100.0, a, b) if a == b => self.status = Status::Equal,
+            (100.0, ..) => self.status = Status::Shorter,
+            _ => self.status = Status::New,
+        }
+    }
+}
+impl ToString for Blastmatch {
+    fn to_string(&self) -> String {
+        return format!(
+            ">{}{DELIMITERFASTA}{}:{}-{}{DELIMITERFASTA}{}\n{}",
+            self.qseqid,
+            self.sseqid,
+            self.sstart,
+            self.send,
+            self.status.to_string(),
+            self.sseq
+        )
+        .to_string();
+    }
+}
+impl FromStr for Blastmatch {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if !s.starts_with(">") {
+            return Err("No header format".to_string());
+        }
+        let s = s.trim_start_matches('>');
+        let (split1, seq) = match s.split_once('\n') {
+            Some((a, b)) => (a, b),
+            None => return Err("No status in header format: {s}".to_string()),
+        };
+        if !seq.chars().all(|p| p.is_ascii_alphabetic()) {
+            return Err("Absence of ASCII alphabetic in sequence: {s}".to_string());
+        }
+        let (qseqid, sseqid, sstart, send, status) = match split1.splitn(3, DELIMITERFASTA) {
+            mut a if a.clone().count() == 3 => {
+                let (name, infos, status) =
+                    (a.next().unwrap(), a.next().unwrap(), a.next().unwrap());
+                let status = if let Ok(a) = Status::try_from(status) {
+                    a
+                } else {
+                    return Err("Invalid status in header: {s}".to_string());
+                };
+                let (sseqid, sstart, send) = if let Some((a, b, c)) =
+                    infos.split_once(':').and_then(|p| {
+                        if let Some((a, b)) = p.1.split_once('-') {
+                            let (start, end) = match (a.parse::<usize>(), b.parse::<usize>()) {
+                                (Ok(b), Ok(c)) => (b, c),
+                                _ => return None,
+                            };
+                            Some((p.0, start, end))
+                        } else {
+                            None
+                        }
+                    }) {
+                    (a, b, c)
+                } else {
+                    return Err("Invalid header in sequence header: {s}".to_string());
+                };
+                (name.to_string(), sseqid, sstart, send, status)
+            }
+            _ => return Err("Lacking info in sequence header: {s}".to_string()),
+        };
+        Ok(Self {
+            qseqid: qseqid.to_string(),
+            sseqid: sseqid.to_string(),
+            sseq: seq.to_string(),
+            sstart,
+            send,
+            status,
+        })
+    }
+}
+impl PartialEq for Blast {
+    fn eq(&self, other: &Self) -> bool {
+        self.qseqid == other.qseqid && self.sstart == other.sstart && self.send == other.send
+    }
+}
+impl Eq for Blast {}
+pub trait Blastcalc {
+    fn getseq<'a>(&self) -> Cow<str>;
+    fn getstatus(&self) -> &Status;
+    /// Only return new alleles
+    fn onlynewalleles(&self) -> bool {
+        self.getstatus() == &Status::New
+    }
+    fn getpos(&self) -> (usize, usize);
+    fn getstrand(&self) -> Strand {
+        match self.getpos() {
+            (a, b) if a > b => Strand::Minus,
+            _ => Strand::Plus,
+        }
+    }
+}
+impl Blastcalc for Blast {
+    fn getseq(&self) -> Cow<str> {
+        Cow::Borrowed(&self.sseq)
+    }
+    fn getstatus(&self) -> &Status {
+        &self.status
+    }
+    fn getpos(&self) -> (usize, usize) {
+        (self.sstart, self.send)
+    }
+}
+impl Blastcalc for Blastmatch {
+    fn getseq(&self) -> Cow<str> {
+        Cow::Borrowed(&self.sseq)
+    }
+    fn getstatus(&self) -> &Status {
+        &self.status
+    }
+    fn getpos(&self) -> (usize, usize) {
+        (self.sstart, self.send)
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Newfasta {
+    qseqid: String,
+    sseq: String,
+    pos: RangeInclusive<usize>,
+    status: Status,
+}
+impl Seqresult for Newfasta {
+    fn qseqid(&self) -> &str {
+        &self.qseqid
+    }
+
+    fn sseq(&self) -> &str {
+        &self.sseq
+    }
+
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    fn pos(&self) -> RangeInclusive<usize> {
+        self.pos.clone()
+    }
+}
+impl Seqresult for Blastmatch {
+    fn qseqid(&self) -> &str {
+        &self.qseqid
+    }
+
+    fn sseq(&self) -> &str {
+        &self.sseq
+    }
+
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    fn pos(&self) -> RangeInclusive<usize> {
+        self.sstart..=self.send
+    }
+}
+impl Seqresult for Blast {
+    fn qseqid(&self) -> &str {
+        &self.qseqid
+    }
+
+    fn sseq(&self) -> &str {
+        &self.sseq
+    }
+
+    fn status(&self) -> &Status {
+        &self.status
+    }
+    fn pos(&self) -> RangeInclusive<usize> {
+        self.sstart..=self.send
+    }
+}
+impl Newfasta {
+    pub(crate) fn new(reader: &Ourfasta) -> io::Result<Self> {
+        let split: Vec<&str> = reader.name.splitn(4, DELIMITERFASTA).collect();
+        if split.len() != 4 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "{DELIMITERFASTA} in fasta lacking for {reader.name}",
+            ));
+        }
+        let (a, b, c, d) = (split[0], split[1], split[2], split[3]);
+        let b = match Status::try_from(b) {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid status for {reader.name}",
+                ));
+            }
+        };
+        let (c, d) = match (c.parse::<usize>(), d.parse::<usize>()) {
+            (Ok(c), Ok(d)) => (c, d),
+            _ => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Position are invalid for {reader.name}.",
+                ));
+            }
+        };
+        Ok(Self {
+            qseqid: a.to_string(),
+            sseq: reader.seq.to_string(),
+            pos: (c..=d),
+            status: b,
+        })
+    }
+    #[allow(unused)]
+    pub(crate) fn newfromblast(blast: &Blast) -> Self {
+        Self {
+            qseqid: blast.qseqid.clone(),
+            sseq: blast.sseq.clone(),
+            pos: blast.pos().clone(),
+            status: blast.status.clone(),
+        }
+    }
+    pub(crate) fn newfromblastowner(blast: Blast) -> Self {
+        Self {
+            pos: blast.pos().clone(),
+            qseqid: blast.qseqid,
+            sseq: blast.sseq,
+            status: blast.status,
+        }
+    }
+}
+pub(crate) trait Seqresult {
+    fn qseqid(&self) -> &str;
+    fn sseq(&self) -> &str;
+    fn status(&self) -> &Status;
+    fn pos(&self) -> RangeInclusive<usize>;
+}
+impl TryFrom<&str> for Status {
+    type Error = io::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value.to_lowercase().as_str() {
+            "shorter" | "short" => Ok(Status::Shorter),
+            "equal" | "eq" => Ok(Status::Equal),
+            "new" => Ok(Self::New),
+            _ => Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "{value} is not valid, expect shorter, new or equal",
+            )),
+        }
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Status {
+    #[default]
+    Shorter,
+    Equal,
+    New,
+}
+impl Status {
+    pub(crate) fn to_serialize(&self) -> Cow<'_, str> {
+        Cow::Owned(match self {
+            Status::Shorter => "shorter".to_string(),
+            Status::Equal => "equal".to_string(),
+            Status::New => "new".to_string(),
+        })
+    }
+}
+impl ToString for Status {
+    fn to_string(&self) -> String {
+        return format!("{}", self.to_serialize()).to_string();
+    }
+}
+impl Newfasta {
+    pub(crate) fn multipledeserialize(data: String) -> io::Result<Vec<Self>> {
+        let mut elements = Vec::new();
+        for elem in data.trim().trim_matches('>').split(">") {
+            let data: Vec<&str> = elem.split([DELIMITERFASTA]).collect();
+            if data.len() == 4
+                && let Some((status, seq)) =
+                    data.iter().last().map(|p| p.split_once("\n")).flatten()
+            {
+                let (posstart, posend, status) = match (
+                    data[1].parse::<usize>(),
+                    data[2].parse::<usize>(),
+                    Status::try_from(status),
+                ) {
+                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                    _ => {
+                        return Err(io::Error::new(
+                            ErrorKind::InvalidData,
+                            "Position or status is/are wrong for line {elem}",
+                        ));
+                    }
+                };
+                let entry = Newfasta {
+                    qseqid: data[0].to_string(),
+                    sseq: seq.to_string(),
+                    pos: posstart..=posend,
+                    status,
+                };
+                elements.push(entry);
+            } else {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid format for line {elem}",
+                ));
+            }
+        }
+        Ok(elements)
+    }
+}
+impl std::fmt::Display for &dyn Seqresult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pos = self.pos();
+        write!(
+            f,
+            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
+            self.qseqid(),
+            pos.start(),
+            pos.end(),
+            self.status().to_serialize(),
+            self.sseq()
+        )
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Ourfasta {
+    pub(crate) name: String,
+    pub(crate) seq: String,
+}
+impl Serialize for Ourfasta {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let text = format!(">{}\n{}", self.name, self.seq);
+        serializer.serialize_str(&text)
     }
 }
 #[derive(Debug)]
@@ -405,6 +832,42 @@ pub(crate) struct GeneInfos {
     pub(crate) start: Position,
     pub(crate) end: Position,
 }
+impl GeneInfos {
+    pub(crate) fn extractsequence(
+        &self,
+        mut fasta: fasta::IndexedReader<File>,
+    ) -> io::Result<String> {
+        let (startpos, endpos) = match (
+            self.start.getobasedpos().try_into(),
+            self.end.getobasedpos().try_into(),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid start and end position",
+                ));
+            }
+        };
+        fasta.fetch(&self.chromosome, startpos, endpos)?;
+        let length = endpos.saturating_sub(startpos).saturating_add(1);
+        let mut cap = Vec::with_capacity(length.try_into().unwrap_or(0));
+        fasta.read(&mut cap)?;
+        return String::from_utf8(cap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+    }
+}
+impl LocusInfos {
+    pub(crate) fn extractsequence(&self, fasta: fasta::IndexedReader<File>) -> io::Result<String> {
+        let fake = GeneInfos {
+            gene: "FAKE".to_string(),
+            chromosome: self.contig.clone(),
+            start: self.start,
+            end: self.end,
+            strand: self.complement.clone(),
+        };
+        return fake.extractsequence(fasta);
+    }
+}
 impl PartialEq for GeneInfos {
     fn eq(&self, other: &Self) -> bool {
         self.gene == other.gene
@@ -433,10 +896,19 @@ impl Ord for GeneInfos {
     }
 }
 impl Eq for GeneInfos {}
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq, Hash)]
 pub(crate) enum Strand {
+    #[default]
     Plus,
     Minus,
+}
+impl Strand {
+    pub(crate) fn isrev(&self) -> bool {
+        self == &Strand::Minus
+    }
+    pub(crate) fn isfwd(&self) -> bool {
+        self == &Strand::Plus
+    }
 }
 impl<'de> Deserialize<'de> for Strand {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -547,6 +1019,60 @@ impl GeneInfosFinish {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
+pub(crate) struct FakeLocusinfo {
+    pub(crate) locus: Locus,
+    pub(crate) haplotype: Haplotype,
+    #[serde(deserialize_with = "csv::invalid_option")]
+    pub(crate) contig: Option<String>,
+    #[serde(deserialize_with = "csv::invalid_option")]
+    pub(crate) start: Option<Position>,
+    #[serde(deserialize_with = "csv::invalid_option")]
+    pub(crate) end: Option<Position>,
+    #[serde(skip)]
+    pub(crate) complement: Strand,
+}
+impl FakeLocusinfo {
+    pub(crate) fn intoloc<T>(self, subject: Option<T>, species: &str) -> io::Result<LocusInfos>
+    where
+        T: AsRef<Path>,
+    {
+        match (subject, self.contig, self.start, self.end) {
+            (_, Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(LocusInfos::new(
+                self.locus,
+                self.haplotype,
+                a,
+                b,
+                c,
+                self.complement,
+            )),
+            (None, ..) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No assembly given with auto locus",
+            )),
+            (Some(loc), ..) => {
+                let (name, pos) = locusposition(loc.as_ref(), species, &self.locus)?;
+                //TODO: Always plus
+                Ok(LocusInfos::new(
+                    self.locus,
+                    self.haplotype,
+                    name,
+                    Position::new(
+                        false,
+                        (i64::try_from(*pos.start())
+                            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
+                    ),
+                    Position::new(
+                        false,
+                        (i64::try_from(*pos.end())
+                            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
+                    ),
+                    Strand::Plus,
+                ))
+            }
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
@@ -554,7 +1080,26 @@ pub(crate) struct LocusInfos {
     pub(crate) start: Position,
     pub(crate) end: Position,
     #[serde(skip)]
-    pub(crate) complement: bool,
+    pub(crate) complement: Strand,
+}
+impl LocusInfos {
+    pub(crate) fn new(
+        locus: Locus,
+        haplotype: Haplotype,
+        contig: String,
+        start: Position,
+        end: Position,
+        complement: Strand,
+    ) -> Self {
+        Self {
+            locus,
+            haplotype,
+            contig,
+            start,
+            end,
+            complement,
+        }
+    }
 }
 impl Ord for LocusInfos {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {

@@ -22,7 +22,10 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-use crate::r#struct::Locus;
+use crate::generatelightbam;
+use crate::r#struct::{
+    Args, Blast, Blastcalc, Blastmatch, Locus, Newfasta, Ourfasta, Seqresult, Status,
+};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(10, 0))
@@ -38,386 +41,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELEASELINK: &str = "https://www.imgt.org/download/GENE-DB/RELEASE";
 const VQUESTLINK: &str = "https://www.imgt.org/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP";
 const SUBMISSIONLINK: &str = "https://www.imgt.org/submissions/";
-const DELIMITERFASTA: char = '/';
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct Blast {
-    qseqid: String,
-    sseqid: String,
-    qstart: usize,
-    qend: usize,
-    sstart: usize,
-    send: usize,
-    qlen: usize,
-    length: usize,
-    pident: f32,
-    gaps: usize,
-    sseq: String,
-    #[serde(skip_deserializing)]
-    complement: bool,
-    #[serde(skip_deserializing)]
-    status: Status,
-}
-#[derive(Clone, Debug)]
-pub(crate) struct Blastmatch {
-    qseqid: String,
-    sseqid: String,
-    sseq: String,
-    sstart: usize,
-    send: usize,
-    status: Status,
-}
-impl PartialOrd for Blastmatch {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(&other))
-    }
-}
-impl Ord for Blastmatch {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.sseqid.cmp(&other.sseqid) {
-            std::cmp::Ordering::Equal => match self.sstart.cmp(&other.sstart) {
-                std::cmp::Ordering::Equal => self.send.cmp(&other.send),
-                ord => ord,
-            },
-            ord => ord,
-        }
-    }
-}
-impl PartialEq for Blastmatch {
-    fn eq(&self, other: &Self) -> bool {
-        self.qseqid == other.qseqid && self.sstart == other.sstart && self.send == other.send
-    }
-}
-impl Eq for Blastmatch {}
-impl Blastmatch {
-    fn new(
-        qseqid: String,
-        sseqid: String,
-        sseq: String,
-        sstart: usize,
-        send: usize,
-        status: Status,
-    ) -> Self {
-        Self {
-            qseqid,
-            sseqid,
-            sseq,
-            sstart,
-            send,
-            status,
-        }
-    }
-}
-impl Blast {
-    fn getstatus(&self) -> &Status {
-        &self.status
-    }
-    fn setstatus(&mut self) {
-        match (self.pident, self.qlen, self.length) {
-            (100.0, a, b) if a == b => self.status = Status::Equal,
-            (100.0, ..) => self.status = Status::Shorter,
-            _ => self.status = Status::New,
-        }
-    }
-}
-impl ToString for Blastmatch {
-    fn to_string(&self) -> String {
-        return format!(
-            ">{}{DELIMITERFASTA}{}:{}-{}{DELIMITERFASTA}{}\n{}",
-            self.qseqid,
-            self.sseqid,
-            self.sstart,
-            self.send,
-            self.status.to_string(),
-            self.sseq
-        )
-        .to_string();
-    }
-}
-impl FromStr for Blastmatch {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim();
-        if !s.starts_with(">") {
-            return Err("No header format".to_string());
-        }
-        let s = s.trim_start_matches('>');
-        let (split1, seq) = match s.split_once('\n') {
-            Some((a, b)) => (a, b),
-            None => return Err("No status in header format: {s}".to_string()),
-        };
-        if !seq.chars().all(|p| p.is_ascii_alphabetic()) {
-            return Err("Absence of ASCII alphabetic in sequence: {s}".to_string());
-        }
-        let (qseqid, sseqid, sstart, send, status) = match split1.splitn(3, DELIMITERFASTA) {
-            mut a if a.clone().count() == 3 => {
-                let (name, infos, status) =
-                    (a.next().unwrap(), a.next().unwrap(), a.next().unwrap());
-                let status = if let Ok(a) = Status::try_from(status) {
-                    a
-                } else {
-                    return Err("Invalid status in header: {s}".to_string());
-                };
-                let (sseqid, sstart, send) = if let Some((a, b, c)) =
-                    infos.split_once(':').and_then(|p| {
-                        if let Some((a, b)) = p.1.split_once('-') {
-                            let (start, end) = match (a.parse::<usize>(), b.parse::<usize>()) {
-                                (Ok(b), Ok(c)) => (b, c),
-                                _ => return None,
-                            };
-                            Some((p.0, start, end))
-                        } else {
-                            None
-                        }
-                    }) {
-                    (a, b, c)
-                } else {
-                    return Err("Invalid header in sequence header: {s}".to_string());
-                };
-                (name.to_string(), sseqid, sstart, send, status)
-            }
-            _ => return Err("Lacking info in sequence header: {s}".to_string()),
-        };
-        Ok(Self {
-            qseqid: qseqid.to_string(),
-            sseqid: sseqid.to_string(),
-            sseq: seq.to_string(),
-            sstart,
-            send,
-            status,
-        })
-    }
-}
-impl PartialEq for Blast {
-    fn eq(&self, other: &Self) -> bool {
-        self.qseqid == other.qseqid && self.sstart == other.sstart && self.send == other.send
-    }
-}
-impl Eq for Blast {}
-pub trait Blastcalc {
-    fn getseq<'a>(&self) -> Cow<str>;
-    fn getstatus(&self) -> &Status;
-    /// Only return new alleles
-    fn onlynewalleles(&self) -> bool {
-        self.getstatus() == &Status::New
-    }
-}
-impl Blastcalc for Blast {
-    fn getseq(&self) -> Cow<str> {
-        Cow::Borrowed(&self.sseq)
-    }
-    fn getstatus(&self) -> &Status {
-        &self.status
-    }
-}
-impl Blastcalc for Blastmatch {
-    fn getseq(&self) -> Cow<str> {
-        Cow::Borrowed(&self.sseq)
-    }
-    fn getstatus(&self) -> &Status {
-        &self.status
-    }
-}
-#[derive(Clone, Debug)]
-pub(crate) struct Newfasta {
-    qseqid: String,
-    sseq: String,
-    pos: RangeInclusive<usize>,
-    status: Status,
-}
-impl Seqresult for Newfasta {
-    fn qseqid(&self) -> &str {
-        &self.qseqid
-    }
+pub(crate) const DELIMITERFASTA: char = '/';
+const LOCUSSEPARATOR: usize = 1_000_000;
 
-    fn sseq(&self) -> &str {
-        &self.sseq
-    }
-
-    fn status(&self) -> &Status {
-        &self.status
-    }
-    fn pos(&self) -> RangeInclusive<usize> {
-        self.pos.clone()
-    }
-}
-impl Seqresult for Blast {
-    fn qseqid(&self) -> &str {
-        &self.qseqid
-    }
-
-    fn sseq(&self) -> &str {
-        &self.sseq
-    }
-
-    fn status(&self) -> &Status {
-        &self.status
-    }
-    fn pos(&self) -> RangeInclusive<usize> {
-        self.sstart..=self.send
-    }
-}
-impl Newfasta {
-    pub(crate) fn new(reader: &Ourfasta) -> io::Result<Self> {
-        let split: Vec<&str> = reader.name.splitn(4, DELIMITERFASTA).collect();
-        if split.len() != 4 {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "{DELIMITERFASTA} in fasta lacking for {reader.name}",
-            ));
-        }
-        let (a, b, c, d) = (split[0], split[1], split[2], split[3]);
-        let b = match Status::try_from(b) {
-            Ok(b) => b,
-            Err(_) => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid status for {reader.name}",
-                ));
-            }
-        };
-        let (c, d) = match (c.parse::<usize>(), d.parse::<usize>()) {
-            (Ok(c), Ok(d)) => (c, d),
-            _ => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Position are invalid for {reader.name}.",
-                ));
-            }
-        };
-        Ok(Self {
-            qseqid: a.to_string(),
-            sseq: reader.seq.to_string(),
-            pos: (c..=d),
-            status: b,
-        })
-    }
-    #[allow(unused)]
-    pub(crate) fn newfromblast(blast: &Blast) -> Self {
-        Self {
-            qseqid: blast.qseqid.clone(),
-            sseq: blast.sseq.clone(),
-            pos: blast.pos().clone(),
-            status: blast.status.clone(),
-        }
-    }
-    pub(crate) fn newfromblastowner(blast: Blast) -> Self {
-        Self {
-            pos: blast.pos().clone(),
-            qseqid: blast.qseqid,
-            sseq: blast.sseq,
-            status: blast.status,
-        }
-    }
-}
-pub(crate) trait Seqresult {
-    fn qseqid(&self) -> &str;
-    fn sseq(&self) -> &str;
-    fn status(&self) -> &Status;
-    fn pos(&self) -> RangeInclusive<usize>;
-}
-impl TryFrom<&str> for Status {
-    type Error = io::Error;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value.to_lowercase().as_str() {
-            "shorter" | "short" => Ok(Status::Shorter),
-            "equal" | "eq" => Ok(Status::Equal),
-            "new" => Ok(Self::New),
-            _ => Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "{value} is not valid, expect shorter, new or equal",
-            )),
-        }
-    }
-}
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Status {
-    #[default]
-    Shorter,
-    Equal,
-    New,
-}
-impl Status {
-    pub(crate) fn to_serialize(&self) -> Cow<'_, str> {
-        Cow::Owned(match self {
-            Status::Shorter => "shorter".to_string(),
-            Status::Equal => "equal".to_string(),
-            Status::New => "new".to_string(),
-        })
-    }
-}
-impl ToString for Status {
-    fn to_string(&self) -> String {
-        return format!("{}", self.to_serialize()).to_string();
-    }
-}
-impl Newfasta {
-    pub(crate) fn multipledeserialize(data: String) -> io::Result<Vec<Self>> {
-        let mut elements = Vec::new();
-        for elem in data.trim().trim_matches('>').split(">") {
-            let data: Vec<&str> = elem.split([DELIMITERFASTA]).collect();
-            if data.len() == 4
-                && let Some((status, seq)) =
-                    data.iter().last().map(|p| p.split_once("\n")).flatten()
-            {
-                let (posstart, posend, status) = match (
-                    data[1].parse::<usize>(),
-                    data[2].parse::<usize>(),
-                    Status::try_from(status),
-                ) {
-                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                    _ => {
-                        return Err(io::Error::new(
-                            ErrorKind::InvalidData,
-                            "Position or status is/are wrong for line {elem}",
-                        ));
-                    }
-                };
-                let entry = Newfasta {
-                    qseqid: data[0].to_string(),
-                    sseq: seq.to_string(),
-                    pos: posstart..=posend,
-                    status,
-                };
-                elements.push(entry);
-            } else {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid format for line {elem}",
-                ));
-            }
-        }
-        Ok(elements)
-    }
-}
-impl std::fmt::Display for &dyn Seqresult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let pos = self.pos();
-        write!(
-            f,
-            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
-            self.qseqid(),
-            pos.start(),
-            pos.end(),
-            self.status().to_serialize(),
-            self.sseq()
-        )
-    }
-}
-#[derive(Clone, Debug)]
-pub(crate) struct Ourfasta {
-    name: String,
-    seq: String,
-}
-impl Serialize for Ourfasta {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let text = format!(">{}\n{}", self.name, self.seq);
-        serializer.serialize_str(&text)
-    }
-}
 #[must_use]
 pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
     match request.get(url).send() {
@@ -435,6 +61,12 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
         Err(e) => Err(format!("Error getting URL: {e}").to_string()),
     }
 }
+pub(crate) fn getnamefromblast(text: &str) -> Option<String> {
+    text.to_ascii_lowercase()
+        .split('|')
+        .nth(2)
+        .map(|f| f.to_string())
+}
 #[must_use]
 pub(crate) fn fastafilter(text: &str, find: &str, present: bool) -> String {
     let mut lines: Vec<&str> = Vec::with_capacity(text.lines().count());
@@ -443,17 +75,9 @@ pub(crate) fn fastafilter(text: &str, find: &str, present: bool) -> String {
         let result = line.trim();
         if result.starts_with(">") {
             keep = if present {
-                result
-                    .to_ascii_lowercase()
-                    .split('|')
-                    .nth(2)
-                    .is_some_and(|f| f.contains(&find.to_ascii_lowercase()))
+                getnamefromblast(result).is_some_and(|f| f.contains(&find.to_ascii_lowercase()))
             } else {
-                !result
-                    .to_ascii_lowercase()
-                    .split('|')
-                    .nth(2)
-                    .is_some_and(|f| f.contains(&find.to_ascii_lowercase()))
+                !getnamefromblast(result).is_some_and(|f| f.contains(&find.to_ascii_lowercase()))
             };
         }
         if keep {
@@ -525,7 +149,14 @@ pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
     Some((tempfile, releaseversion))
 }
 pub(crate) fn locusfiltering(locus: &Locus, blast: &mut Vec<Blast>) {
-    blast.retain(|p| p.qseqid.contains(&format!("{}", locus)));
+    //TRD is inside TRA locus
+    if locus == &Locus::TRA {
+        blast.retain(|p| {
+            p.qseqid.contains(&format!("{}", locus)) || p.qseqid.contains(&format!("TRD"))
+        });
+    } else {
+        blast.retain(|p| p.qseqid.contains(&format!("{}", locus)));
+    }
 }
 pub(crate) fn speciesandorphonfiltering(
     tempfile: &Path,
@@ -690,7 +321,7 @@ pub(crate) fn find_global_best_range(data: &[Blastmatch]) -> Option<(String, usi
                     break right.saturating_sub(1);
                 }
                 // Move left to ensure window is valid
-                if pairs[right].0.abs_diff(pairs[right.saturating_sub(1)].1) >= 1_000_000 {
+                if pairs[right].0.abs_diff(pairs[right.saturating_sub(1)].1) >= LOCUSSEPARATOR {
                     break right;
                 }
                 count += 1;
@@ -725,7 +356,7 @@ pub(crate) fn locusposition<T>(
     subject: &Path,
     species: T,
     locus: &Locus,
-) -> io::Result<(String, RangeInclusive<usize>)>
+) -> io::Result<(String, RangeInclusive<usize>, Vec<Blastmatch>)>
 where
     T: AsRef<str>,
 {
@@ -789,14 +420,7 @@ where
     if let Ok((name, dat)) = &range {
         data.retain(|p| p.sseqid.as_str() == name && dat.contains(&p.sstart))
     }
-    let text = data.iter().fold(String::new(), |mut acc, f| {
-        acc.push_str(&format!("\n{}", f.to_string()));
-        acc
-    });
-    let text = text.trim();
-    //TODO: Separate
-    fs::write("/tmp/genes.txt", text);
-    range
+    range.map(|f| (f.0, f.1, data))
 }
 #[must_use]
 pub(crate) fn filter_new_alleles<T>(data: &[T]) -> impl Iterator<Item = &T>
@@ -875,6 +499,7 @@ where
             }
         };
     };
+    let _ = fs::remove_file(&output);
     Ok(result)
 }
 pub(crate) fn getspeciesfromncbi<T>(
@@ -993,35 +618,78 @@ pub(crate) fn launchblast(species: &str, subject: &Path) -> Result<Vec<Newfasta>
     }
     Ok(result)
 }
-pub(crate) fn filternewandsubmit(mut c: Vec<Blast>, realspecies: String) -> () {
-    filterblast(&mut c);
-    let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
+pub(crate) fn submit(
+    args: &Args,
+    locus: &[crate::LocusInfos],
+    c: &[Blastmatch],
+    realspecies: String,
+) -> Result<(), String> {
+    //let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
     let dir = Path::new(&current_dir().unwrap_or(temp_dir())).join("archive");
     if dir.is_dir() {
-        eprintln!("Archive directory exists, remove directory to submit if needed.");
-        return;
+        return Err("Archive directory exists, remove directory to submit if needed.".to_string());
     }
     if let Err(e) = fs::create_dir(&dir) {
-        eprintln!("Cannot create archive directory, error is {e}");
-        return;
+        return Err(format!("Cannot create archive directory, error is {e}"));
     }
-    if browseropening().is_err() {
-        let _ = fs::remove_dir_all(dir);
-        return;
+    let _ = match args
+        .assembly
+        .as_ref()
+        .map(|p| fasta::IndexedReader::from_file(&p))
+    {
+        None => return Err("No assembly provided.".to_string()),
+        Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
+        Some(Ok(b)) => b,
+    };
+    let lightbam = dir.join("outlight.bam");
+    generatelightbam(args, &lightbam, locus)?;
+    let sequencefile = dir.join("sequence.fasta");
+    let mut fastawriter = fasta::Writer::to_file(sequencefile).map_err(|f| format!("{f}"))?;
+    for list in locus {
+        let assembly = match args
+            .assembly
+            .as_ref()
+            .map(|p| fasta::IndexedReader::from_file(&p))
+        {
+            None => return Err("No assembly provided.".to_string()),
+            Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
+            Some(Ok(b)) => b,
+        };
+        let seq = list.extractsequence(assembly).map_err(|f| format!("{f}"))?;
+        fastawriter
+            .write(
+                &format!("{}", list.locus),
+                Some(&format!(
+                    "{}:{}-{}/{}/{}",
+                    list.contig,
+                    list.start.getobasedpos(),
+                    list.end.getobasedpos(),
+                    list.complement,
+                    list.haplotype
+                )),
+                seq.as_bytes(),
+            )
+            .map_err(|f| {
+                format!(
+                    "Unable to write fasta sequence {}. Error is {f}",
+                    list.locus
+                )
+            })?;
     }
-    let file = dir.join("sequence.fasta");
-    let sequence = result.iter().fold(String::new(), |mut acc, f| {
+    let file = dir.join("newalleles.fasta");
+    let sequence = result.fold(String::new(), |mut acc, f| {
         let f: &dyn Seqresult = f;
         acc.push_str(&format!("\n{}", f));
         acc
     });
     if let Err(e) = fs::write(file, sequence) {
         eprintln!("An error has occured while priting sequence: {e}.");
-        return;
+        return Ok(());
     }
     println!("BLAST results was added.");
-    preparesubmission(&dir, realspecies, &REQUESTCLIENT);
+    preparesubmission(&dir, realspecies);
     let _ = fs::remove_dir_all(dir);
+    return Ok(());
     //form(&client);
 }
 pub(crate) fn browseropening() -> io::Result<()> {
@@ -1054,11 +722,7 @@ pub(crate) fn createarchive(dir: &Path) -> io::Result<NamedTempFile> {
     tar.finish()?;
     Ok(temp)
 }
-pub(crate) fn preparesubmission(
-    path: &Path,
-    species: String,
-    release: &reqwest::blocking::Client,
-) -> bool {
+pub(crate) fn preparesubmission(path: &Path, species: String) -> bool {
     println!("Please give the token provided by the submission. Type (e) to exit.");
     let token = loop {
         let mut block = io::stdin().lock().take(100);
@@ -1093,7 +757,7 @@ pub(crate) fn preparesubmission(
         }
     };
     if val == "y" {
-        if let Err(e) = submission(&token, species, archive, release) {
+        if let Err(e) = submission(&token, species, archive) {
             eprintln!("An error has occured during submission: {e}. Please retry later.");
             return false;
         }
@@ -1104,12 +768,7 @@ pub(crate) fn preparesubmission(
     }
     true
 }
-pub(crate) fn submission(
-    token: &str,
-    species: String,
-    archive: NamedTempFile,
-    release: &reqwest::blocking::Client,
-) -> io::Result<()> {
+pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -> io::Result<()> {
     /* let multipart = reqwest::blocking::multipart::Form::new()
     .file("genelist", "submission/genelist.csv")?
     .file("sequences", "submission/sequences.txt")?
@@ -1121,7 +780,7 @@ pub(crate) fn submission(
         .text("version", VERSION)
         .text("type", "submission")
         .text("species", species);
-    match release
+    match REQUESTCLIENT
         .post(SUBMISSIONLINK)
         .bearer_auth(token)
         .multipart(zip)

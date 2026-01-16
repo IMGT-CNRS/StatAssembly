@@ -11,6 +11,7 @@ Made by: Guilhem Zeitoun
 use clap::Parser;
 use itertools::Itertools;
 use plotters::coord::Shift;
+use std::collections::HashMap;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
@@ -20,7 +21,10 @@ use std::time::Instant;
 use std::{fs, io};
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
-use crate::submissions::{REQUESTCLIENT, checkifblastpresent, getspeciesfromncbi, locusposition};
+use crate::submissions::{
+    REQUESTCLIENT, checkifblastpresent, getnamefromblast, getspeciesfromncbi, locusposition,
+    preparesubmission, submit,
+};
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
 use lazy_static::lazy_static;
@@ -79,6 +83,25 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
         //We have nothing
         (None, None) => None,
     }
+}
+fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
+    let mut vec = Vec::new();
+    for elem in list.iter().filter(|p| !new || p.onlynewalleles()) {
+        let (posa, posb) = elem.getpos();
+        let (posa, posb) = match (posa.try_into(), posb.try_into()) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => (0, 0),
+        };
+        let info = GeneInfos {
+            gene: getnamefromblast(elem.qseqid()).unwrap_or("unknown".to_string()),
+            chromosome: elem.sseqid.clone(),
+            strand: elem.getstrand(),
+            start: Position::new(false, min(posa, posb)),
+            end: Position::new(false, max(posa, posb)),
+        };
+        vec.push(info);
+    }
+    vec
 }
 #[allow(clippy::type_complexity)]
 fn iteralert(
@@ -229,7 +252,7 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
     }
 }
 //Parse the location csv with locus infos
-fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
+fn locusposparser(args: &Args, realspecies: &str) -> std::io::Result<Vec<LocusInfos>> {
     let mut csv = match csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
@@ -245,9 +268,17 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
         }
     };
     let mut locus: Vec<LocusInfos> = Vec::new();
-    for record in csv.deserialize() {
-        let record = match record {
-            Ok(r) => r,
+    for record in csv.deserialize::<FakeLocusinfo>() {
+        let record: LocusInfos = match record {
+            Ok(r) => match r.intoloc(args.assembly.as_ref(), realspecies) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid CSV auto format. Cannot compute: {e}"),
+                    ));
+                }
+            },
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -288,7 +319,7 @@ fn locusposparser(args: &Args) -> std::io::Result<Vec<LocusInfos>> {
     locus.iter_mut().for_each(|r| {
         if r.start >= r.end {
             (r.end, r.start) = (r.start.clone(), r.end.clone());
-            r.complement = true;
+            r.complement = Strand::Minus;
         }
     });
     if !args.hugeregion {
@@ -347,13 +378,51 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
 fn processcounting(
     args: &Args,
     pos: &mut BTreeMap<Position, HashMapinfo>,
-    newrange: std::ops::Range<Position>,
+    mut message: bool,
+    locus: &LocusInfos,
     record: &bam::Record,
     sep: i64,
-    matched: &[RangeInclusive<i64>],
-    aligned: &[RangeInclusive<i64>],
-) {
+) -> io::Result<bool> {
+    let start = &Position::new(true, record.reference_start());
+    let end = &Position::new(true, record.reference_end());
+    //Get range to put the reads inclusive pos
+    let newrange = Position::new(
+        true,
+        max(record.reference_start(), locus.start.getzbasedpos()),
+    )
+        ..Position::new(true, min(locus.end.getobasedpos(), record.reference_end()));
+    if pos.contains_key(start)
+        && let Some(d) = pos.get_mut(start)
+        && record.cigar().leading_softclips() > 0
+    {
+        d.softclips += 1.0;
+    } else if pos.contains_key(end)
+        && let Some(d) = pos.get_mut(end)
+        && record.cigar().trailing_softclips() > 0
+    {
+        d.softclips += 1.0;
+    }
+    let (message, matched, aligned) = match iteralert(&args, message, &record) {
+        (_, None, _) => {
+            return Ok(false);
+        } //Kill software, errors sent by iteralert
+        (newmessage, Some(p), aligned) => {
+            message = newmessage;
+            (message, p, aligned)
+        }
+    };
     for (i, targeting) in pos.range_mut(newrange) {
+        if record.is_secondary() || record.is_supplementary() {
+            if record.is_secondary() {
+                targeting.secondary += 1;
+            } else {
+                targeting.supplementary += 1;
+                /* targeting
+                .supplementary
+                .push(String::from_utf8_lossy(p.qname()).to_string()); */
+            }
+            return Ok(false);
+        }
         let i = &i.getzbasedpos();
         let _time = Instant::now();
         match record.mapq() {
@@ -366,7 +435,7 @@ fn processcounting(
                     record.mapq(),
                     String::from_utf8_lossy(record.qname())
                 );
-                return;
+                return Ok(false);
             }
         };
         targeting.globalmismatch += getglobalmismatch(args, record);
@@ -408,6 +477,7 @@ fn processcounting(
             targeting.overlaps += 1;
         }
     }
+    Ok(message)
 }
 fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
     let mut reader = getreaderoffile(args)
@@ -468,22 +538,15 @@ fn main() -> ExitCode {
         eprintln!("BLAST is not found");
         return ExitCode::FAILURE;
     }
-    println!("Species is {}.", speciesblast);
-    let pos = match locusposition(Path::new("assembly.fna"), speciesblast, &Locus::IGK) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    println!("Value is {}/{:?}", pos.0, pos.1);
-    return ExitCode::SUCCESS;
     if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater or equal than percent alerting.");
         return ExitCode::FAILURE;
     }
     //Get locus, geneloc and outputdir, print errors if we have
-    let (outputdir, mut locus) = match (checklocusandoutput(&args), locusposparser(&args)) {
+    let (outputdir, mut locus) = match (
+        checklocusandoutput(&args),
+        locusposparser(&args, &speciesblast),
+    ) {
         (Err(e), _) => {
             eprintln!("{e}");
             return ExitCode::FAILURE;
@@ -544,6 +607,7 @@ fn main() -> ExitCode {
             mean
         }
     };
+    let mut locushashresult: HashMap<Locus, Vec<GeneInfosFinish>> = HashMap::new();
     for locus in grouped {
         let haplotype = locus.len();
         let floci = match locus.first() {
@@ -704,7 +768,7 @@ fn main() -> ExitCode {
             let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
             let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
             //Populate all B-Tree position, 0-based, invert if locus complement
-            let iterator: Vec<(usize, i64)> = if loci.complement {
+            let iterator: Vec<(usize, i64)> = if loci.complement.isrev() {
                 locusrange.rev().enumerate().collect()
             } else {
                 locusrange.enumerate().collect()
@@ -744,8 +808,6 @@ fn main() -> ExitCode {
                 .filter_map(Result::ok)
                 .filter(|p| !(args.forward && p.is_reverse()))
             {
-                let start = &Position::new(true, p.reference_start());
-                let end = &Position::new(true, p.reference_end());
                 count += 1;
                 //Print every 100 reads done
                 if count % 100 == 0 {
@@ -757,44 +819,17 @@ fn main() -> ExitCode {
                     );
                 }
                 nocount = false;
-                //Get range to put the reads inclusive pos
-                let newrange =
-                    Position::new(true, max(p.reference_start(), loci.start.getzbasedpos()))
-                        ..Position::new(true, min(loci.end.getobasedpos(), p.reference_end()));
-                if p.is_secondary() || p.is_supplementary() {
-                    for (_, targeting) in pos.range_mut(newrange) {
-                        if p.is_secondary() {
-                            targeting.secondary += 1;
-                        } else {
-                            targeting.supplementary += 1;
-                            /* targeting
-                            .supplementary
-                            .push(String::from_utf8_lossy(p.qname()).to_string()); */
+                match processcounting(&args, &mut pos, message, &loci, &p, sep) {
+                    Err(e) => {
+                        eprintln!("Error is {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    Ok(b) => {
+                        if !message && b {
+                            message = b;
                         }
                     }
-                    continue;
                 }
-                if pos.contains_key(start)
-                    && let Some(d) = pos.get_mut(start)
-                    && p.cigar().leading_softclips() > 0
-                {
-                    d.softclips += 1.0;
-                } else if pos.contains_key(end)
-                    && let Some(d) = pos.get_mut(end)
-                    && p.cigar().trailing_softclips() > 0
-                {
-                    d.softclips += 1.0;
-                }
-                let (matched, aligned) = match iteralert(&args, message, &p) {
-                    (_, None, _) => {
-                        return ExitCode::FAILURE;
-                    } //Kill software, errors sent by iteralert
-                    (newmessage, Some(p), aligned) => {
-                        message = newmessage;
-                        (p, aligned)
-                    }
-                };
-                processcounting(&args, &mut pos, newrange, &p, sep, &matched, &aligned);
             }
             if locusisokay(mean, &pos.values().collect_vec()) {
                 pos.iter_mut().for_each(|(_a, f)| {
@@ -925,12 +960,13 @@ fn main() -> ExitCode {
                 eprintln!("Cannot create csv file. Error is {e}");
                 return ExitCode::FAILURE;
             }
-            let val = pos.values().collect_vec();
+            let val = pos.into_values().collect_vec();
+            let info: Vec<&HashMapinfo> = val.iter().map(|f| f).collect();
             println!(
                 "Locus {} ({}) is {}",
                 loci.locus,
                 loci.haplotype,
-                if locusisokay(mean, val.as_slice()) {
+                if locusisokay(mean, &info) {
                     "validated"
                 } else {
                     "rejected"
@@ -939,9 +975,17 @@ fn main() -> ExitCode {
             //Create gene CSV
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
-                if let Err(e) = genelist(outputdir, loci, &args) {
-                    eprintln!("Cannot create gene list. Error is {e}");
-                    return ExitCode::FAILURE;
+                match genelist(outputdir, loci, &args) {
+                    Err(e) => {
+                        eprintln!("Cannot create gene list. Error is {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    Ok(b) => {
+                        if val.first().map_or(false, |f| f.locusisok) && b.iter().any(|f| f.isok())
+                        {
+                            locushashresult.insert(loci.locus.clone(), b);
+                        }
+                    }
                 }
                 println!("Gene list finished.");
             } else {
@@ -953,106 +997,82 @@ fn main() -> ExitCode {
         println!("Locus {} is done!", &floci.locus);
     }
     if let Some(light) = &args.outlightbam {
-        println!("Generating small BAM for submission");
-        let bam = if let Ok(r) = getreaderoffile(&args) {
-            r
-        } else {
-            eprintln!("Cannot access BAM file for light bam.");
-            return ExitCode::FAILURE;
-        };
-        let mut writer = if let Ok(files) = bam::Writer::from_path(
-            &light,
-            &bam::Header::from_template(bam.header()),
-            bam::Format::Bam,
-        ) {
-            files
-        } else {
-            let file = light.display();
-            eprintln!("Cannot create file {file} for light bam.");
-            return ExitCode::FAILURE;
-        };
-        for f in locus.iter() {
-            let mut bam = if let Ok(r) = getreaderoffile(&args) {
-                r
-            } else {
-                eprintln!("Cannot access BAM file for light bam.");
-                return ExitCode::FAILURE;
-            };
-            if bam
-                .fetch((
-                    f.contig.as_bytes(),
-                    f.start.getzbasedpos(),
-                    f.end.getzbasedpos().saturating_add(1),
-                ))
-                .is_err()
-            {
-                eprintln!("Cannot read BAM file region for light bam.");
+        match generatelightbam(&args, &light, &locus) {
+            Err(e) => {
+                eprintln!("{e}");
                 return ExitCode::FAILURE;
             }
-            for read in bam.rc_records().filter_map(Result::ok) {
-                if writer.write(&read).is_err() {
-                    eprintln!("Cannot write BAM file region for light bam.");
-                    return ExitCode::FAILURE;
-                };
-            }
+            Ok(_) => (),
         }
+    }
+    if !args.nosubmit && !locushashresult.is_empty() {
+        askforsubmission(&speciesblast, &args, &locushashresult);
     }
     println!(
         "{} done sucessfully in {:.3} seconds.",
         NAME.as_str(),
         firstinstant.elapsed().as_secs_f32()
     );
-    if let Some(light) = &args.outlightbam {
-        println!("Generating small BAM for submission");
-        let bam = if let Ok(r) = getreaderoffile(&args) {
+    ExitCode::SUCCESS
+}
+fn askforsubmission(
+    realspecies: &str,
+    args: &Args,
+    infos: &HashMap<Locus, Vec<GeneInfosFinish>>,
+) -> io::Result<()> {
+    let mut val = String::new();
+    let _ = io::stdin().read_line(&mut val);
+    let val = val.trim().to_ascii_lowercase();
+    if val == "y" {
+        let data: Vec<(&Locus, &Vec<GeneInfosFinish>)> =
+            infos.into_iter().map(|(l, f)| (l, f)).collect();
+        submit(&args, &infos.realspecies);
+    } else {
+        println!("Your sequences won't be submitted.");
+        return Ok(());
+    }
+    Ok(())
+}
+fn generatelightbam(args: &Args, light: &Path, locus: &[LocusInfos]) -> Result<(), String> {
+    println!("Generating small BAM for submission");
+    let bam = if let Ok(r) = getreaderoffile(&args) {
+        r
+    } else {
+        return Err("Cannot access BAM file for light bam.".to_string());
+    };
+    let mut writer = if let Ok(files) = bam::Writer::from_path(
+        &light,
+        &bam::Header::from_template(bam.header()),
+        bam::Format::Bam,
+    ) {
+        files
+    } else {
+        let file = light.display();
+        return Err(format!("Cannot create file {file} for light bam."));
+    };
+    for f in locus.iter() {
+        let mut bam = if let Ok(r) = getreaderoffile(&args) {
             r
         } else {
-            eprintln!("Cannot access BAM file for light bam.");
-            return ExitCode::FAILURE;
+            return Err(format!("Cannot access BAM file for light bam."));
         };
-        let mut writer = if let Ok(files) = bam::Writer::from_path(
-            &light,
-            &bam::Header::from_template(bam.header()),
-            bam::Format::Bam,
-        ) {
-            files
-        } else {
-            let file = light.display();
-            eprintln!("Cannot create file {file} for light bam.");
-            return ExitCode::FAILURE;
-        };
-        for f in locus.iter() {
-            let mut bam = if let Ok(r) = getreaderoffile(&args) {
-                r
-            } else {
-                eprintln!("Cannot access BAM file for light bam.");
-                return ExitCode::FAILURE;
+        if bam
+            .fetch((
+                f.contig.as_bytes(),
+                f.start.getzbasedpos(),
+                f.end.getzbasedpos().saturating_add(1),
+            ))
+            .is_err()
+        {
+            return Err(format!("Cannot read BAM file region for light bam."));
+        }
+        for read in bam.rc_records().filter_map(Result::ok) {
+            if writer.write(&read).is_err() {
+                return Err(format!("Cannot read BAM file region for light bam."));
             };
-            if bam
-                .fetch((
-                    f.contig.as_bytes(),
-                    f.start.getzbasedpos(),
-                    f.end.getzbasedpos().saturating_add(1),
-                ))
-                .is_err()
-            {
-                eprintln!("Cannot read BAM file region for light bam.");
-                return ExitCode::FAILURE;
-            }
-            for read in bam.rc_records().filter_map(Result::ok) {
-                if writer.write(&read).is_err() {
-                    eprintln!("Cannot write BAM file region for light bam.");
-                    return ExitCode::FAILURE;
-                };
-            }
         }
     }
-        println!(
-        "{} done sucessfully in {:.3} seconds.",
-        NAME.as_str(),
-        firstinstant.elapsed().as_secs_f32()
-    );
-    ExitCode::SUCCESS
+    return Ok(());
 }
 fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
     let geneloc = match &args.geneloc {
@@ -1157,10 +1177,10 @@ fn genelist(
     outputdir: &std::path::Path,
     loci: &LocusInfos,
     args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<GeneInfosFinish>, Box<dyn std::error::Error>> {
     let genes = extractgenelist(args, loci)?;
     if genes.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let outputfile = outputdir.join(givename(
         &args.species,
@@ -1372,7 +1392,7 @@ fn genelist(
         .comment(Some(b'#'))
         .delimiter(b'\t')
         .from_path(&outputfile)?;
-    for gene in finale {
+    for gene in finale.iter() {
         csv.serialize(gene)?;
     }
     csv.flush()?;
@@ -1388,7 +1408,7 @@ fn genelist(
         printpossus(args, loci, outputdir, &alertingpositions)?;
     }
     println!("Gene analysis has been saved to {}", outputfile.display());
-    Ok(())
+    Ok(finale)
 }
 fn printbreaks(
     args: &Args,
