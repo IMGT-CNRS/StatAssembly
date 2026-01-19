@@ -1,5 +1,6 @@
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
+use bio::io::fasta;
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -22,8 +23,8 @@ use std::{fs, io};
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, checkifblastpresent, getnamefromblast, getspeciesfromncbi, locusposition,
-    preparesubmission, submit,
+    REQUESTCLIENT, checkifblastpresent, genesblast, getnamefromblast, getspeciesfromncbi,
+    locusposition, preparesubmission, submit,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -163,6 +164,38 @@ fn filterread(args: &Args, record: &bam::Record) -> bool {
     }
     true
 }
+fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
+    let (assembly, index) = match (args.assembly.as_ref(), args.assemblyindex.as_ref()) {
+        (Some(a), Some(b)) => (Some(File::open(a)?), Some(File::open(b)?)),
+        (Some(a), None) => (Some(File::open(a)?), None),
+        (None, _) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No assembly provided",
+            ));
+        }
+    };
+    let elem = match (args.assembly.as_ref(), assembly, index) {
+        (_, Some(a), Some(b)) => fasta::IndexedReader::new(a, b)
+            .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
+        (Some(p), ..) => fasta::IndexedReader::from_file(&p)
+            .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No assembly provided",
+            ));
+        }
+    };
+    let elem = match elem {
+        Ok(d) => Ok(d),
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Assembly error, maybe index is missing (create it with samtools): {e}"),
+        )),
+    }?;
+    Ok(elem)
+}
 //Check we can read BAM file and return the reader with desired threads
 fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
     let mut reader = match &args.index {
@@ -252,11 +285,15 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
     }
 }
 //Parse the location csv with locus infos
-fn locusposparser(args: &Args, realspecies: &str) -> std::io::Result<Vec<LocusInfos>> {
+fn locusposparser(
+    args: &Args,
+    realspecies: &str,
+) -> std::io::Result<(Vec<LocusInfos>, Option<Vec<Blastmatch>>)> {
     let mut csv = match csv::ReaderBuilder::new()
         .has_headers(false)
         .comment(Some(b'#'))
         .delimiter(b'\t')
+        .flexible(true)
         .from_path(&args.locuspos)
     {
         Ok(c) => c,
@@ -267,32 +304,65 @@ fn locusposparser(args: &Args, realspecies: &str) -> std::io::Result<Vec<LocusIn
             ));
         }
     };
-    let mut locus: Vec<LocusInfos> = Vec::new();
+    let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
     for record in csv.deserialize::<FakeLocusinfo>() {
-        let record: LocusInfos = match record {
+        let (record, blast) = match record {
             Ok(r) => match r.intoloc(args.assembly.as_ref(), realspecies) {
-                Ok(b) => b,
+                Ok((b, c)) => {
+                    println!(
+                        "Position found is {}:{}-{} in {} strand.",
+                        b.contig,
+                        b.start.getobasedpos(),
+                        b.end.getobasedpos(),
+                        b.complement
+                    );
+                    (b, c)
+                }
                 Err(e) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Invalid CSV auto format. Cannot compute: {e}"),
+                        format!(
+                            "Invalid CSV format (tabular fields) required for file {}, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",
+                            args.locuspos.display(),
+                            e
+                        ),
                     ));
                 }
             },
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Invalid CSV format (tabular fields) required for file {}, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",
-                        args.locuspos.display(),
-                        e
-                    ),
+                    format!("Invalid CSV auto format. Cannot compute: {e}"),
                 ));
             }
         };
-        locus.push(record);
+        locusrecord.0.push(record);
+        let mut finale: Vec<Blastmatch> = Vec::new();
+        match blast {
+            None => (),
+            Some(mut b) => finale.append(&mut b),
+        };
+        locusrecord.1 = match (locusrecord.1.as_mut(), finale) {
+            (None, e) if e.is_empty() => None,
+            (Some(b), mut c) => {
+                b.append(&mut c);
+                Some(b.clone())
+            }
+            (None, c) => Some(c),
+        };
     }
-    if locus.is_empty() {
+    if locusrecord.1.is_some() {
+        let file = File::create("newloc.csv")?;
+        let mut csv = csv::WriterBuilder::new()
+            .comment(Some(b'#'))
+            .delimiter(b'\t')
+            .has_headers(false)
+            .from_writer(file);
+        for loci in locusrecord.0.iter() {
+            csv.serialize(loci)?;
+        }
+    }
+    if locusrecord.0.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -302,7 +372,7 @@ fn locusposparser(args: &Args, realspecies: &str) -> std::io::Result<Vec<LocusIn
         ));
     }
     //At least one duplicate line
-    if let Some(d) = locus.iter().duplicates().next() {
+    if let Some(d) = locusrecord.0.iter().duplicates().next() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -316,14 +386,15 @@ fn locusposparser(args: &Args, realspecies: &str) -> std::io::Result<Vec<LocusIn
         ));
     }
     //make complement if locus is complement
-    locus.iter_mut().for_each(|r| {
+    locusrecord.0.iter_mut().for_each(|r| {
         if r.start >= r.end {
             (r.end, r.start) = (r.start.clone(), r.end.clone());
             r.complement = Strand::Minus;
         }
     });
     if !args.hugeregion {
-        if let Some(big) = locus
+        if let Some(big) = locusrecord
+            .0
             .iter()
             .find(|p| p.end.length(&p.start) >= ALERTLOCUSSIZE)
         {
@@ -340,7 +411,7 @@ fn locusposparser(args: &Args, realspecies: &str) -> std::io::Result<Vec<LocusIn
             ));
         }
     }
-    Ok(locus)
+    Ok(locusrecord)
 }
 //Check BAM file exists and outputdir is created and return it
 fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
@@ -354,6 +425,10 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
                 e
             ),
         ));
+    }
+    //Check assembly is okay if existing
+    if args.assembly.is_some() {
+        getassemblyreader(&args)?;
     }
     let outputdir = match args.outdir.is_dir() {
         true => {
@@ -543,19 +618,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     //Get locus, geneloc and outputdir, print errors if we have
-    let (outputdir, mut locus) = match (
-        checklocusandoutput(&args),
-        locusposparser(&args, &speciesblast),
-    ) {
-        (Err(e), _) => {
+    let outputdir = match checklocusandoutput(&args) {
+        Ok(a) => a,
+        Err(e) => {
             eprintln!("{e}");
             return ExitCode::FAILURE;
         }
-        (_, Err(f)) => {
+    };
+    let (mut locus, blastcheck) = match locusposparser(&args, &speciesblast) {
+        Err(f) => {
             eprintln!("{f}");
             return ExitCode::FAILURE;
         }
-        (Ok(a), Ok(b)) => (a, b),
+        Ok(b) => b,
     };
     if args.geneloc.is_some() {
         if let Err(e) = checkgenelistformat(&args) {
@@ -607,7 +682,7 @@ fn main() -> ExitCode {
             mean
         }
     };
-    let mut locushashresult: HashMap<Locus, Vec<GeneInfosFinish>> = HashMap::new();
+    let mut locushashresult: HashMap<Locus, Vec<Blastmatch>> = HashMap::new();
     for locus in grouped {
         let haplotype = locus.len();
         let floci = match locus.first() {
@@ -973,7 +1048,22 @@ fn main() -> ExitCode {
                 }
             );
             //Create gene CSV
-            if args.geneloc.is_some() {
+            if let Some(blast) = &blastcheck {
+                let element: Vec<Blastmatch> = blast
+                    .iter()
+                    .filter_map(|f| {
+                        if f.sseqid == loci.contig
+                            && (loci.start.getobasedpos()..=loci.end.getobasedpos())
+                                .contains(&f.sstart.try_into().unwrap_or_default())
+                        {
+                            Some(f.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                locushashresult.insert(loci.locus.clone(), element);
+            } else if args.geneloc.is_some() {
                 println!("Gene list starting!");
                 match genelist(outputdir, loci, &args) {
                     Err(e) => {
@@ -981,9 +1071,21 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                     Ok(b) => {
-                        if val.first().map_or(false, |f| f.locusisok) && b.iter().any(|f| f.isok())
-                        {
-                            locushashresult.insert(loci.locus.clone(), b);
+                        if args.assembly.as_ref().is_some() {
+                            let geneinfo: Vec<GeneInfos> =
+                                b.iter().map(|f| f.clone().into()).collect();
+                            match genesblast(&geneinfo, &args, &speciesblast, &loci.locus) {
+                                Ok(blast) => {
+                                    if val.first().map_or(false, |f| f.locusisok)
+                                        && b.iter().any(|f| f.isok())
+                                    {
+                                        locushashresult.insert(loci.locus.clone(), blast);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Cannot blast gene list. Error is {e}");
+                                }
+                            };
                         }
                     }
                 }
@@ -992,6 +1094,19 @@ fn main() -> ExitCode {
                 eprintln!(
                     "You have not provided a gene list, skipped. Provide one to get more datas."
                 );
+                if let Some(assembly) = args.assembly.as_ref()
+                    && !args.nosubmit
+                {
+                    match locusposition(&assembly, &speciesblast, &loci.locus) {
+                        Ok((.., hash)) => {
+                            locushashresult.insert(loci.locus.clone(), hash);
+                            ()
+                        }
+                        Err(e) => {
+                            eprintln!("Cannot get gene match for gene list. Error is {e}.");
+                        }
+                    }
+                }
             }
         }
         println!("Locus {} is done!", &floci.locus);
@@ -1006,7 +1121,10 @@ fn main() -> ExitCode {
         }
     }
     if !args.nosubmit && !locushashresult.is_empty() {
-        askforsubmission(&speciesblast, &args, &locushashresult);
+        match askforsubmission(&speciesblast, &locus, &args, &locushashresult) {
+            Ok(_) => (),
+            Err(e) => println!("Error submitting sequences: {e}"),
+        }
     }
     println!(
         "{} done sucessfully in {:.3} seconds.",
@@ -1017,16 +1135,21 @@ fn main() -> ExitCode {
 }
 fn askforsubmission(
     realspecies: &str,
+    locus: &[LocusInfos],
     args: &Args,
-    infos: &HashMap<Locus, Vec<GeneInfosFinish>>,
+    infos: &HashMap<Locus, Vec<Blastmatch>>,
 ) -> io::Result<()> {
+    println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
     let mut val = String::new();
     let _ = io::stdin().read_line(&mut val);
     let val = val.trim().to_ascii_lowercase();
     if val == "y" {
-        let data: Vec<(&Locus, &Vec<GeneInfosFinish>)> =
-            infos.into_iter().map(|(l, f)| (l, f)).collect();
-        submit(&args, &infos.realspecies);
+        let mut blastmatch: Vec<Blastmatch> = Vec::new();
+        for (_, data) in infos {
+            blastmatch.append(&mut data.clone());
+        }
+        submit(&args, locus, &blastmatch, realspecies.to_string())
+            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, format!("{}", f)))?;
     } else {
         println!("Your sequences won't be submitted.");
         return Ok(());

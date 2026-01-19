@@ -22,10 +22,10 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-use crate::generatelightbam;
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastmatch, Locus, Newfasta, Ourfasta, Seqresult, Status,
+    Args, Blast, Blastcalc, Blastmatch, GeneInfos, Locus, Newfasta, Ourfasta, Seqresult, Status,
 };
+use crate::{generatelightbam, getassemblyreader, getreaderoffile};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(10, 0))
@@ -164,7 +164,7 @@ pub(crate) fn speciesandorphonfiltering(
     species: &str,
     orphonfilter: bool,
 ) -> io::Result<PathBuf> {
-    println!("Filtering based on species");
+    println!("Filtering based on species {}.", species);
     let file = std::fs::read_to_string(&tempfile).unwrap();
     let info = fastafilter(&file, species, true).replace(" ", "_");
     let info = if orphonfilter {
@@ -259,6 +259,28 @@ pub(crate) fn selectnewalleles(result: &[Blast]) -> Vec<Ourfasta> {
     }
     fastas
 }
+pub(crate) fn statusblastvs(data: &mut Vec<Blast>) {
+    data.sort_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
+        std::cmp::Ordering::Equal => a.qseqid.cmp(&b.qseqid),
+        ord => ord,
+    });
+    let mut other = Vec::new();
+    data.clone_into(&mut other);
+    data.retain(|f| {
+        other
+            .iter()
+            .any(|g| {
+                g != f
+                    && g.sseqid == f.sseqid
+                    && (g.length as f32 / g.qlen as f32 * g.pident.powf(1.1))
+                        >= (f.length as f32 / f.qlen as f32 * f.pident.powf(1.1))
+            })
+            .not()
+    });
+    for blastresult in data {
+        blastresult.setstatus();
+    }
+}
 pub(crate) fn statusblast(data: &mut Vec<Blast>) {
     data.sort_unstable_by(|a, b| match a.sstart.cmp(&b.sstart) {
         std::cmp::Ordering::Equal => a.send.cmp(&b.send),
@@ -278,16 +300,7 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
             .not()
     });
     for blastresult in data {
-        match (
-            blastresult.pident,
-            blastresult.gaps,
-            blastresult.length,
-            blastresult.qlen,
-        ) {
-            (100.0, 0, a, b) if a < b => blastresult.status = Status::Shorter,
-            (100.0, 0, ..) => blastresult.status = Status::Equal,
-            _ => blastresult.status = Status::New,
-        }
+        blastresult.setstatus();
     }
 }
 pub(crate) fn find_global_best_range(data: &[Blastmatch]) -> Option<(String, usize, usize)> {
@@ -352,6 +365,72 @@ pub(crate) fn find_global_best_range(data: &[Blastmatch]) -> Option<(String, usi
         None
     }
 }
+pub(crate) fn retainbestmatch(blast: &mut Vec<Blast>) {
+    blast.retain(|f| f.length * 100 / f.qlen > 80 && f.pident >= 75.0);
+}
+pub(crate) fn genesblast<T>(
+    subject: &[GeneInfos],
+    args: &Args,
+    species: T,
+    locus: &Locus,
+) -> io::Result<Vec<Blastmatch>>
+where
+    T: AsRef<str>,
+{
+    let mut reader = getassemblyreader(&args)?;
+    let name = temp_dir().join("genes_blast.txt");
+    let file = File::create(&name)?;
+    let mut fastawriter = fasta::Writer::new(file);
+    subject
+        .iter()
+        .map(|f| {
+            let elem = f
+                .extractsequence(&mut reader)
+                .map_err(|p| io::Error::new(ErrorKind::InvalidInput, p));
+            let bool = elem
+                .iter()
+                .any(|p| f.addtosequence(p, &mut fastawriter).is_err());
+            let elem = if bool {
+                Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "Cannot print sequence",
+                ))
+            } else {
+                elem
+            };
+            elem
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let reference = match downloadref()
+        .map(|(a, b)| speciesandorphonfiltering(&a, b, species.as_ref(), false))
+    {
+        Some(a) => a?,
+        None => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Reference from IMGT cannot be downloaded",
+            ));
+        }
+    };
+    let mut blast: Vec<Blast> = match blastcommand(reference.as_path(), name.as_path()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(io::Error::new(ErrorKind::InvalidData, e));
+        }
+    }
+    .into_iter()
+    .collect();
+    //Filter by locus
+    retainbestmatch(&mut blast);
+    locusfiltering(&locus, &mut blast);
+    blast.iter_mut().for_each(|p| {
+        if p.sstart > p.send {
+            (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
+        }
+    });
+    statusblastvs(&mut blast);
+    Ok(blast.into_iter().map(|f| f.into()).collect())
+}
 pub(crate) fn locusposition<T>(
     subject: &Path,
     species: T,
@@ -380,7 +459,7 @@ where
     .into_iter()
     .collect();
     //Filter by locus
-    blast.retain(|f| f.length * 100 / f.qlen > 80 && f.pident >= 75.0);
+    retainbestmatch(&mut blast);
     locusfiltering(&locus, &mut blast);
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
@@ -627,35 +706,42 @@ pub(crate) fn submit(
     //let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
     let dir = Path::new(&current_dir().unwrap_or(temp_dir())).join("archive");
     if dir.is_dir() {
-        return Err("Archive directory exists, remove directory to submit if needed.".to_string());
+        eprintln!("Archive directory exists, going to be deleted.");
     }
-    if let Err(e) = fs::create_dir(&dir) {
+    if let Err(e) = fs::create_dir(&dir)
+        && e.kind() != ErrorKind::AlreadyExists
+    {
         return Err(format!("Cannot create archive directory, error is {e}"));
     }
-    let _ = match args
-        .assembly
-        .as_ref()
-        .map(|p| fasta::IndexedReader::from_file(&p))
-    {
+    let _ = match args.assembly.as_ref().map(|_| getassemblyreader(&args)) {
         None => return Err("No assembly provided.".to_string()),
         Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
         Some(Ok(b)) => b,
     };
+    let locuspos =
+        File::create(dir.join("newloc.csv")).map_err(|f| format!("Locus csv, error is {f}"))?;
+    let mut csv = csv::WriterBuilder::new()
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_writer(locuspos);
+    for loci in locus.iter() {
+        csv.serialize(loci)
+            .map_err(|p| format!("Error serializing locus position: {p}"))?;
+    }
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = dir.join("sequence.fasta");
     let mut fastawriter = fasta::Writer::to_file(sequencefile).map_err(|f| format!("{f}"))?;
     for list in locus {
-        let assembly = match args
-            .assembly
-            .as_ref()
-            .map(|p| fasta::IndexedReader::from_file(&p))
-        {
+        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(&args)) {
             None => return Err("No assembly provided.".to_string()),
             Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
             Some(Ok(b)) => b,
         };
-        let seq = list.extractsequence(assembly).map_err(|f| format!("{f}"))?;
+        let seq = list
+            .extractsequence(&mut assembly)
+            .map_err(|f| format!("{f}"))?;
         fastawriter
             .write(
                 &format!("{}", list.locus),
@@ -677,7 +763,7 @@ pub(crate) fn submit(
             })?;
     }
     let file = dir.join("newalleles.fasta");
-    let sequence = result.fold(String::new(), |mut acc, f| {
+    let sequence = c.into_iter().fold(String::new(), |mut acc, f| {
         let f: &dyn Seqresult = f;
         acc.push_str(&format!("\n{}", f));
         acc

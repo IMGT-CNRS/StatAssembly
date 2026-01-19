@@ -1,4 +1,5 @@
 use bio::io::fasta::{self, FastaRead};
+use serde::ser::SerializeStruct;
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -82,6 +83,9 @@ pub(crate) struct Args {
     /// Assembly fasta file
     #[arg(long, short = 'a')]
     pub(crate) assembly: Option<PathBuf>,
+    /// Assembly Index file if not default
+    #[arg(long, short = 'j')]
+    pub(crate) assemblyindex: Option<PathBuf>,
     /// Query full quality PHRED score (script will be longer to execute)
     #[arg(long)]
     pub(crate) fullquality: bool,
@@ -128,7 +132,7 @@ pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
         _ => Err(String::from("Bad number, must be greater than 0.")),
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum Locus {
     IGH,
@@ -371,6 +375,18 @@ impl Blast {
             (100.0, ..) => self.status = Status::Shorter,
             _ => self.status = Status::New,
         }
+    }
+}
+impl Into<Blastmatch> for Blast {
+    fn into(self) -> Blastmatch {
+        Blastmatch::new(
+            self.qseqid,
+            self.sseqid,
+            self.sseq,
+            self.sstart,
+            self.send,
+            self.status,
+        )
     }
 }
 impl ToString for Blastmatch {
@@ -795,6 +811,17 @@ impl<'de> Deserialize<'de> for Haplotype {
         }
     }
 }
+impl Serialize for Haplotype {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Haplotype::Primary => serializer.serialize_str("Primary"),
+            Haplotype::Alternate => serializer.serialize_str("Alternate"),
+        }
+    }
+}
 impl Ord for Haplotype {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
@@ -833,9 +860,29 @@ pub(crate) struct GeneInfos {
     pub(crate) end: Position,
 }
 impl GeneInfos {
+    pub(crate) fn addtosequence<T>(&self, seq: T, fasta: &mut fasta::Writer<File>) -> io::Result<()>
+    where
+        T: AsRef<[u8]>,
+    {
+        fasta.write(
+            &self.gene,
+            Some(&format!(
+                "{}:{}-{}{}",
+                self.chromosome,
+                self.start.getobasedpos(),
+                self.end.getobasedpos(),
+                if self.strand == Strand::Minus {
+                    "/rc"
+                } else {
+                    ""
+                }
+            )),
+            seq.as_ref(),
+        )
+    }
     pub(crate) fn extractsequence(
         &self,
-        mut fasta: fasta::IndexedReader<File>,
+        fasta: &mut fasta::IndexedReader<File>,
     ) -> io::Result<String> {
         let (startpos, endpos) = match (
             self.start.getobasedpos().try_into(),
@@ -857,7 +904,10 @@ impl GeneInfos {
     }
 }
 impl LocusInfos {
-    pub(crate) fn extractsequence(&self, fasta: fasta::IndexedReader<File>) -> io::Result<String> {
+    pub(crate) fn extractsequence(
+        &self,
+        fasta: &mut fasta::IndexedReader<File>,
+    ) -> io::Result<String> {
         let fake = GeneInfos {
             gene: "FAKE".to_string(),
             chromosome: self.contig.clone(),
@@ -980,6 +1030,17 @@ impl PartialEq for GeneInfosFinish {
     }
 }
 impl Eq for GeneInfosFinish {}
+impl Into<GeneInfos> for GeneInfosFinish {
+    fn into(self) -> GeneInfos {
+        GeneInfos {
+            gene: self.gene,
+            chromosome: self.chromosome,
+            strand: self.strand,
+            start: self.start,
+            end: self.end,
+        }
+    }
+}
 impl GeneInfosFinish {
     #[allow(dead_code)]
     pub(crate) fn isok(&self) -> bool {
@@ -1032,47 +1093,50 @@ pub(crate) struct FakeLocusinfo {
     pub(crate) complement: Strand,
 }
 impl FakeLocusinfo {
-    pub(crate) fn intoloc<T>(self, subject: Option<T>, species: &str) -> io::Result<LocusInfos>
+    pub(crate) fn intoloc<T>(
+        self,
+        subject: Option<T>,
+        species: &str,
+    ) -> io::Result<(LocusInfos, Option<Vec<Blastmatch>>)>
     where
         T: AsRef<Path>,
     {
         match (subject, self.contig, self.start, self.end) {
-            (_, Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(LocusInfos::new(
-                self.locus,
-                self.haplotype,
-                a,
-                b,
-                c,
-                self.complement,
+            (_, Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok((
+                LocusInfos::new(self.locus, self.haplotype, a, b, c, self.complement),
+                None,
             )),
             (None, ..) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "No assembly given with auto locus",
             )),
             (Some(loc), ..) => {
-                let (name, pos) = locusposition(loc.as_ref(), species, &self.locus)?;
+                let (name, pos, elem) = locusposition(loc.as_ref(), species, &self.locus)?;
                 //TODO: Always plus
-                Ok(LocusInfos::new(
-                    self.locus,
-                    self.haplotype,
-                    name,
-                    Position::new(
-                        false,
-                        (i64::try_from(*pos.start())
-                            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
+                Ok((
+                    LocusInfos::new(
+                        self.locus,
+                        self.haplotype,
+                        name,
+                        Position::new(
+                            false,
+                            (i64::try_from(*pos.start())
+                                .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
+                        ),
+                        Position::new(
+                            false,
+                            (i64::try_from(*pos.end())
+                                .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
+                        ),
+                        Strand::Plus,
                     ),
-                    Position::new(
-                        false,
-                        (i64::try_from(*pos.end())
-                            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
-                    ),
-                    Strand::Plus,
+                    Some(elem),
                 ))
             }
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
