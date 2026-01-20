@@ -851,7 +851,7 @@ impl Haplotype {
         self == &Haplotype::Primary
     }
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct GeneInfos {
     pub(crate) gene: String,
     pub(crate) chromosome: String,
@@ -860,6 +860,21 @@ pub(crate) struct GeneInfos {
     pub(crate) end: Position,
 }
 impl GeneInfos {
+    pub(crate) fn new(
+        gene: String,
+        chromosome: String,
+        strand: Strand,
+        start: Position,
+        end: Position,
+    ) -> Self {
+        GeneInfos {
+            gene,
+            chromosome,
+            strand,
+            start,
+            end,
+        }
+    }
     pub(crate) fn addtosequence<T>(&self, seq: T, fasta: &mut fasta::Writer<File>) -> io::Result<()>
     where
         T: AsRef<[u8]>,
@@ -1111,7 +1126,7 @@ impl FakeLocusinfo {
                 "No assembly given with auto locus",
             )),
             (Some(loc), ..) => {
-                let (name, pos, elem) = locusposition(loc.as_ref(), species, &self.locus)?;
+                let (name, pos, elem) = locusposition(loc.as_ref(), species, &self.locus,false)?;
                 //TODO: Always plus
                 Ok((
                     LocusInfos::new(

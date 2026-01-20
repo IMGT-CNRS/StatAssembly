@@ -1,5 +1,5 @@
-#[deny(clippy::unwrap_used)]
-#[deny(clippy::expect_used)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 use bio::io::fasta;
 use flate2::{Compression, write::GzEncoder};
 use lazy_static::lazy_static;
@@ -35,7 +35,7 @@ lazy_static! {
         .tls_version_min(tls::Version::TLS_1_2)
         .https_only(true)
         .build()
-        .unwrap();
+        .unwrap_or_default();
 }
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELEASELINK: &str = "https://www.imgt.org/download/GENE-DB/RELEASE";
@@ -65,6 +65,12 @@ pub(crate) fn getnamefromblast(text: &str) -> Option<String> {
     text.to_ascii_lowercase()
         .split('|')
         .nth(2)
+        .map(|f| f.to_string())
+}
+pub(crate) fn getallelefromblast(text: &str) -> Option<String> {
+    text.to_ascii_uppercase()
+        .split('|')
+        .nth(1)
         .map(|f| f.to_string())
 }
 #[must_use]
@@ -129,10 +135,13 @@ pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
         );
         match sendresult(&REQUESTCLIENT, VQUESTLINK) {
             Ok(e) => {
-                let mut file =
-                    File::create(&tempfile).expect("Cannot create refseq file in temp dir");
-                file.write_all(e.as_bytes())
-                    .expect("Cannot create refseq file in temp dir.");
+                match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
+                    Ok(Ok(_)) => (),
+                    _ => {
+                        eprintln!("Cannot write refseq in sequence.");
+                        return None;
+                    }
+                }
                 println!("Success.")
             }
             Err(e) => {
@@ -152,7 +161,7 @@ pub(crate) fn locusfiltering(locus: &Locus, blast: &mut Vec<Blast>) {
     //TRD is inside TRA locus
     if locus == &Locus::TRA {
         blast.retain(|p| {
-            p.qseqid.contains(&format!("{}", locus)) || p.qseqid.contains(&format!("TRD"))
+            p.qseqid.contains(&format!("{}", locus)) || p.qseqid.contains(&"TRD".to_string())
         });
     } else {
         blast.retain(|p| p.qseqid.contains(&format!("{}", locus)));
@@ -165,7 +174,7 @@ pub(crate) fn speciesandorphonfiltering(
     orphonfilter: bool,
 ) -> io::Result<PathBuf> {
     println!("Filtering based on species {}.", species);
-    let file = std::fs::read_to_string(&tempfile).unwrap();
+    let file = std::fs::read_to_string(&tempfile)?;
     let info = fastafilter(&file, species, true).replace(" ", "_");
     let info = if orphonfilter {
         fastafilter(&info, "/OR", false)
@@ -435,19 +444,31 @@ pub(crate) fn locusposition<T>(
     subject: &Path,
     species: T,
     locus: &Locus,
+    full: bool,
 ) -> io::Result<(String, RangeInclusive<usize>, Vec<Blastmatch>)>
 where
     T: AsRef<str>,
 {
-    let reference = match downloadref()
-        .map(|(a, b)| speciesandorphonfiltering(&a, b, species.as_ref(), false))
-    {
-        Some(a) => a?,
-        None => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "Reference from IMGT cannot be downloaded",
-            ));
+    let reference = downloadref();
+    let reference = if full {
+        match reference.map(|(a,_)| a) {
+            Some(a) => a,
+            None => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Reference from IMGT cannot be downloaded",
+                ));
+            }
+        }
+    } else {
+        match reference.map(|(a, b)| speciesandorphonfiltering(&a, b, species.as_ref(), false)) {
+            Some(a) => a?,
+            None => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Reference from IMGT cannot be downloaded",
+                ));
+            }
         }
     };
     let mut blast: Vec<Blast> = match blastcommand(reference.as_path(), subject) {
@@ -707,10 +728,12 @@ pub(crate) fn submit(
     let dir = Path::new(&current_dir().unwrap_or(temp_dir())).join("archive");
     if dir.is_dir() {
         eprintln!("Archive directory exists, going to be deleted.");
+        if let Err(e) = fs::remove_dir(&dir) {
+            let dir = dir.display();
+            return Err(format!("Cannot remove the directory {dir}, error is {e}."));
+        }
     }
-    if let Err(e) = fs::create_dir(&dir)
-        && e.kind() != ErrorKind::AlreadyExists
-    {
+    if let Err(e) = fs::create_dir(&dir) {
         return Err(format!("Cannot create archive directory, error is {e}"));
     }
     let _ = match args.assembly.as_ref().map(|_| getassemblyreader(&args)) {
@@ -763,7 +786,7 @@ pub(crate) fn submit(
             })?;
     }
     let file = dir.join("newalleles.fasta");
-    let sequence = c.into_iter().fold(String::new(), |mut acc, f| {
+    let sequence = filter_new_alleles(c).fold(String::new(), |mut acc, f| {
         let f: &dyn Seqresult = f;
         acc.push_str(&format!("\n{}", f));
         acc
@@ -773,9 +796,10 @@ pub(crate) fn submit(
         return Ok(());
     }
     println!("BLAST results was added.");
+    let _ = browseropening();
     preparesubmission(&dir, realspecies);
     let _ = fs::remove_dir_all(dir);
-    return Ok(());
+    Ok(())
     //form(&client);
 }
 pub(crate) fn browseropening() -> io::Result<()> {
