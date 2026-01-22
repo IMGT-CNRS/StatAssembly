@@ -2,12 +2,13 @@
 #![deny(clippy::expect_used)]
 use bio::io::fasta;
 use flate2::{Compression, write::GzEncoder};
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use reqwest::{StatusCode, tls};
 use serde::{Deserialize, Serialize};
 use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::str::FromStr;
 use std::{
     borrow::Cow,
@@ -20,10 +21,12 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, SystemTime},
 };
+use strum::IntoEnumIterator;
 use tempfile::NamedTempFile;
 
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastmatch, GeneInfos, Locus, Newfasta, Ourfasta, Seqresult, Status,
+    Args, Blast, Blastcalc, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Newfasta,
+    Ourfasta, Position, Seqresult, Status, Strand,
 };
 use crate::{generatelightbam, getassemblyreader, getreaderoffile};
 lazy_static! {
@@ -312,67 +315,108 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
         blastresult.setstatus();
     }
 }
-pub(crate) fn find_global_best_range(data: &[Blastmatch]) -> Option<(String, usize, usize)> {
-    let mut groups: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-
-    // Group by string, storing (pos, val) pairs
-    for (s, pos, val) in data.iter().map(|f| (f.sseqid.clone(), f.sstart, f.send)) {
-        groups.entry(s).or_insert_with(Vec::new).push((pos, val));
-    }
-
-    let mut global_best_name = String::new();
-    let mut global_best_min = 0;
-    let mut global_best_max = 0;
-    let mut global_max_count = 0;
-
-    // Process each group
-    for (name, mut pairs) in groups {
-        // Sort by the second usize (index 1)
-        pairs.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let mut max_count = 0;
-        let mut best_min = 0;
-        let mut best_max = 0;
-
-        for left in 0..pairs.len() {
-            let mut count = 0;
-            let mut right = left;
-            let right = loop {
-                right += 1;
-                if pairs.get(right).is_none() {
-                    break right.saturating_sub(1);
+pub(crate) fn find_global_best_range(data: &[Blastmatch]) -> Option<Vec<LocusInfos>> {
+    let mut groups: HashMap<(Locus, Haplotype), (String, bool, usize, usize)> = HashMap::new();
+    let blastcheck = data.into_iter();
+    let blastcheck = blastcheck.sorted_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
+        Ordering::Equal => match a.sstart.cmp(&b.sstart) {
+            Ordering::Equal => b.sstart.cmp(&b.sstart),
+            ord => ord,
+        },
+        ord => ord,
+    });
+    let hash = blastcheck
+        .filter_map(|p| {
+            match Locus::try_from(
+                p.getallelename()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(3)
+                    .collect::<String>(),
+            ) {
+                Ok(d) => Some((d, p)),
+                Err(_) => None,
+            }
+        })
+        .into_group_map_by(|(l, f)| (l.clone(), f.sseqid.clone()));
+    let mut locus: HashMap<(Locus, String), BinaryHeap<&Blastmatch>> = HashMap::new();
+    for ((loci, sseqname), data) in hash.iter() {
+        for (_, elem) in data {
+            let d = match locus.get_mut(&(loci.clone().clone(), sseqname.clone())) {
+                Some(a) => a,
+                None => {
+                    let mut e = BinaryHeap::new();
+                    e.push(elem.clone());
+                    locus.insert((loci.clone().clone(), sseqname.clone()), e);
+                    continue;
                 }
-                // Move left to ensure window is valid
-                if pairs[right].0.abs_diff(pairs[right.saturating_sub(1)].1) >= LOCUSSEPARATOR {
-                    break right;
-                }
-                count += 1;
             };
-            if count > max_count {
-                max_count = count;
-                best_min = pairs[left].0;
-                best_max = pairs[right].1;
+            if let Some(b) = d.peek()
+                && max(b.sstart, b.send).abs_diff(min(elem.send, elem.sstart)) <= LOCUSSEPARATOR
+            {
+                d.push(&elem);
             }
         }
-
-        // Update global best
-        if max_count > global_max_count {
-            global_max_count = max_count;
-            global_best_name = name;
-            global_best_min = best_min;
-            global_best_max = best_max;
+    }
+    let real = locus
+        .into_iter()
+        .sorted_unstable_by(|((al, ass), av), ((bl, bs), bv)| match al.cmp(&bl) {
+            Ordering::Equal => match av.len().cmp(&bv.len()) {
+                Ordering::Equal => ass.cmp(&bs),
+                ord2 => ord2.reverse(),
+            },
+            ord => ord,
+        });
+    for ((loci, sseq), blast) in real {
+        if !groups.contains_key(&(loci.clone(), Haplotype::Primary)) {
+            let (min, max) = match (blast.iter().next(), blast.peek()) {
+                (Some(a), Some(b)) => (min(a.sstart, a.send), max(b.sstart, b.send)),
+                _ => unreachable!("vec is not empty"),
+            };
+            let split = blast.iter().into_group_map_by(|f| f.sstart > f.send);
+            let complement = if split.get(&true).map_or(0, |s| s.len())
+                > split.get(&false).map_or(0, |s| s.len())
+            {
+                true
+            } else {
+                false
+            };
+            groups.insert((loci, Haplotype::Primary), (sseq, complement, min, max));
+        } else if groups.contains_key(&(loci.clone(), Haplotype::Alternate)) {
+            let (min, max) = match (blast.iter().next(), blast.peek()) {
+                (Some(a), Some(b)) => (min(a.sstart, a.send), max(b.sstart, b.send)),
+                _ => unreachable!("vec is not empty"),
+            };
+            let split = blast.iter().into_group_map_by(|f| f.sstart > f.send);
+            let complement = if split.get(&true).map_or(0, |s| s.len())
+                > split.get(&false).map_or(0, |s| s.len())
+            {
+                true
+            } else {
+                false
+            };
+            groups.insert((loci, Haplotype::Alternate), (sseq, complement, min, max));
         }
     }
-
-    if global_max_count > 0 {
-        Some((
-            global_best_name.to_string(),
-            global_best_min,
-            global_best_max,
-        ))
-    } else {
-        None
-    }
+    Some(
+        groups
+            .into_iter()
+            .map(|((locus, hap), (sseq, complement, start, end))| {
+                LocusInfos::new(
+                    locus,
+                    hap,
+                    sseq,
+                    Position::new(false, start.try_into().unwrap_or_default()),
+                    Position::new(false, end.try_into().unwrap_or_default()),
+                    if complement {
+                        Strand::Minus
+                    } else {
+                        Strand::Plus
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 pub(crate) fn retainbestmatch(blast: &mut Vec<Blast>) {
     blast.retain(|f| f.length * 100 / f.qlen > 80 && f.pident >= 75.0);
@@ -445,22 +489,12 @@ pub(crate) fn locusposition<T>(
     species: T,
     locus: &Locus,
     full: bool,
-) -> io::Result<(String, RangeInclusive<usize>, Vec<Blastmatch>)>
+) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)>
 where
     T: AsRef<str>,
 {
     let reference = downloadref();
-    let reference = if full {
-        match reference.map(|(a,_)| a) {
-            Some(a) => a,
-            None => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Reference from IMGT cannot be downloaded",
-                ));
-            }
-        }
-    } else {
+    let reference =
         match reference.map(|(a, b)| speciesandorphonfiltering(&a, b, species.as_ref(), false)) {
             Some(a) => a?,
             None => {
@@ -469,8 +503,7 @@ where
                     "Reference from IMGT cannot be downloaded",
                 ));
             }
-        }
-    };
+        };
     let mut blast: Vec<Blast> = match blastcommand(reference.as_path(), subject) {
         Ok(b) => b,
         Err(e) => {
@@ -481,7 +514,9 @@ where
     .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
-    locusfiltering(&locus, &mut blast);
+    if !full {
+        locusfiltering(&locus, &mut blast);
+    }
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
@@ -490,7 +525,7 @@ where
     });
     let mut statusvec: BTreeMap<(String, usize, usize), Blast> = BTreeMap::new();
     for elem in blast.into_iter() {
-        if let Some((k, b)) = statusvec.clone().iter_mut().find(|((s, r1, r2), b)| {
+        if let Some((k, b)) = statusvec.iter().find(|((s, r1, r2), b)| {
             b != &&elem
                 && s.as_str() == elem.sseqid.as_str()
                 && checkoverlap(&(*r1..=*r2), &(elem.sstart..=elem.send))
@@ -511,16 +546,21 @@ where
     //Sort by name then starting then ending position
     data.sort_unstable();
     data.dedup();
-    let range = find_global_best_range(&data)
-        .and_then(|(n, pos1, pos2)| Some((n, pos1..=pos2)))
-        .ok_or(io::Error::new(
-            ErrorKind::InvalidInput,
-            "No locus found after BLAST analysis",
-        ));
-    if let Ok((name, dat)) = &range {
-        data.retain(|p| p.sseqid.as_str() == name && dat.contains(&p.sstart))
+    let range = find_global_best_range(&data).ok_or(io::Error::new(
+        ErrorKind::InvalidInput,
+        "No locus found after BLAST analysis",
+    ));
+    if !full && let Ok(e) = &range {
+        data.retain(|p| {
+            e.iter().any(|f| {
+                &f.locus == locus
+                    && f.contig == p.qseqid
+                    && (f.start.getobasedpos()..=f.end.getobasedpos())
+                        .contains(&p.sstart.try_into().unwrap_or_default())
+            })
+        })
     }
-    range.map(|f| (f.0, f.1, data))
+    range.map(|f| (f, data))
 }
 #[must_use]
 pub(crate) fn filter_new_alleles<T>(data: &[T]) -> impl Iterator<Item = &T>
@@ -559,8 +599,12 @@ where
             reference,
             "-subject",
             subject,
+            "-perc_identity",
+            "75",
             "-out",
             output,
+            "-max_target_seqs",
+            "20",
             "-max_hsps",
             "5",
             "-outfmt",
@@ -568,7 +612,10 @@ where
         ])
         .spawn()?;
     println!("Launching {} against {}", reference, subject);
-    println!("BLAST has been launched with id {}", command.id());
+    println!(
+        "BLAST has been launched with id {}. Please wait.",
+        command.id()
+    );
     let outputc = command.wait_with_output()?;
     let mut result: Vec<Blast> = Vec::new();
     {
@@ -599,7 +646,7 @@ where
             }
         };
     };
-    let _ = fs::remove_file(&output);
+    //let _ = fs::remove_file(&output);
     Ok(result)
 }
 pub(crate) fn getspeciesfromncbi<T>(
@@ -728,7 +775,7 @@ pub(crate) fn submit(
     let dir = Path::new(&current_dir().unwrap_or(temp_dir())).join("archive");
     if dir.is_dir() {
         eprintln!("Archive directory exists, going to be deleted.");
-        if let Err(e) = fs::remove_dir(&dir) {
+        if let Err(e) = fs::remove_dir_all(&dir) {
             let dir = dir.display();
             return Err(format!("Cannot remove the directory {dir}, error is {e}."));
         }
@@ -756,7 +803,7 @@ pub(crate) fn submit(
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = dir.join("sequence.fasta");
     let mut fastawriter = fasta::Writer::to_file(sequencefile).map_err(|f| format!("{f}"))?;
-    for list in locus {
+    for list in locus.iter() {
         let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(&args)) {
             None => return Err("No assembly provided.".to_string()),
             Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
@@ -796,7 +843,7 @@ pub(crate) fn submit(
         return Ok(());
     }
     println!("BLAST results was added.");
-    let _ = browseropening();
+    browseropening().map_err(|f| f.to_string())?;
     preparesubmission(&dir, realspecies);
     let _ = fs::remove_dir_all(dir);
     Ok(())
@@ -820,7 +867,7 @@ pub(crate) fn browseropening() -> io::Result<()> {
 pub(crate) fn createarchive(dir: &Path) -> io::Result<NamedTempFile> {
     let temp = tempfile::NamedTempFile::with_suffix("submission.tar.gz")?;
     let file = File::create(&temp)?;
-    let archive = GzEncoder::new(file, Compression::default());
+    let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);
     tar.append_dir_all(
         "",
@@ -871,7 +918,9 @@ pub(crate) fn preparesubmission(path: &Path, species: String) -> bool {
             eprintln!("An error has occured during submission: {e}. Please retry later.");
             return false;
         }
-        println!("Your submission has been made. Thank you for submitting your sequences to IMGT.");
+        println!(
+            "Your submission has been made successfully. Thank you for submitting your sequences to IMGT. A confirmation email has been sent."
+        );
     } else {
         println!("Exiting");
         return false;
@@ -912,12 +961,10 @@ pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -
                     a.text().unwrap_or_default()
                 ),
             )),
-            StatusCode::SERVICE_UNAVAILABLE | StatusCode::INTERNAL_SERVER_ERROR => {
-                Err(io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    "The server is unavailable. Please retry a submission.",
-                ))
-            }
+            a if a.is_server_error() => Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "The server is unavailable. Please retry a submission.",
+            )),
             e => Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
                 format!("An unexpected error has occured, please retry later. Error is {e}"),

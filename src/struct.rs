@@ -6,7 +6,7 @@ It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
 Made by: Guilhem Zeitoun
 */
-use crate::submissions::{DELIMITERFASTA, locusposition};
+use crate::submissions::{DELIMITERFASTA, getallelefromblast, locusposition};
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
@@ -21,6 +21,8 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
@@ -69,7 +71,7 @@ pub(crate) struct Args {
     #[arg(long, conflicts_with = "meancoverage", default_value_t = 0)]
     pub(crate) extractedlength: u64,
     /// The mean coverage is already calculated, else will be calculated at startup (10-15 minutes) if not stored already.
-    #[arg(long, value_parser=greater_than_0)]
+    #[arg(long, value_parser=greater_than_0_64)]
     pub(crate) meancoverage: Option<u64>,
     /// Huge region (more than 10 Mb)
     #[arg(long)]
@@ -132,7 +134,13 @@ pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
         _ => Err(String::from("Bad number, must be greater than 0.")),
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash)]
+pub(crate) fn greater_than_0_64(s: &str) -> Result<u64, String> {
+    match s.parse::<u64>() {
+        Ok(s) if s != u64::MIN => Ok(s),
+        _ => Err(String::from("Bad number, must be greater than 0.")),
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum Locus {
     IGH,
@@ -141,6 +149,23 @@ pub(crate) enum Locus {
     TRA,
     TRB,
     TRG,
+}
+impl TryFrom<String> for Locus {
+    type Error = io::Error;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "IGH" => Ok(Locus::IGH),
+            "IGK" => Ok(Locus::IGK),
+            "IGL" => Ok(Locus::IGL),
+            "TRA" | "TRD" => Ok(Locus::TRA),
+            "TRB" => Ok(Locus::TRB),
+            "TRG" => Ok(Locus::TRG),
+            _ => Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("{} is not a valid locus.", value),
+            )),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
@@ -477,6 +502,10 @@ pub trait Blastcalc {
             _ => Strand::Plus,
         }
     }
+    fn getqueryseq(&self) -> &str;
+    fn getallelename(&self) -> Option<String> {
+        getallelefromblast(self.getqueryseq())
+    }
 }
 impl Blastcalc for Blast {
     fn getseq(&self) -> Cow<str> {
@@ -487,6 +516,9 @@ impl Blastcalc for Blast {
     }
     fn getpos(&self) -> (usize, usize) {
         (self.sstart, self.send)
+    }
+    fn getqueryseq(&self) -> &str {
+        &self.qseqid
     }
 }
 impl Blastcalc for Blastmatch {
@@ -499,10 +531,14 @@ impl Blastcalc for Blastmatch {
     fn getpos(&self) -> (usize, usize) {
         (self.sstart, self.send)
     }
+    fn getqueryseq(&self) -> &str {
+        &self.qseqid
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Newfasta {
     qseqid: String,
+    sseqid: String,
     sseq: String,
     pos: RangeInclusive<usize>,
     status: Status,
@@ -515,7 +551,9 @@ impl Seqresult for Newfasta {
     fn sseq(&self) -> &str {
         &self.sseq
     }
-
+    fn sseqid(&self) -> &str {
+        &self.sseqid
+    }
     fn status(&self) -> &Status {
         &self.status
     }
@@ -527,7 +565,9 @@ impl Seqresult for Blastmatch {
     fn qseqid(&self) -> &str {
         &self.qseqid
     }
-
+    fn sseqid(&self) -> &str {
+        &self.sseqid
+    }
     fn sseq(&self) -> &str {
         &self.sseq
     }
@@ -543,7 +583,9 @@ impl Seqresult for Blast {
     fn qseqid(&self) -> &str {
         &self.qseqid
     }
-
+    fn sseqid(&self) -> &str {
+        &self.sseqid
+    }
     fn sseq(&self) -> &str {
         &self.sseq
     }
@@ -557,14 +599,14 @@ impl Seqresult for Blast {
 }
 impl Newfasta {
     pub(crate) fn new(reader: &Ourfasta) -> io::Result<Self> {
-        let split: Vec<&str> = reader.name.splitn(4, DELIMITERFASTA).collect();
-        if split.len() != 4 {
+        let split: Vec<&str> = reader.name.splitn(5, DELIMITERFASTA).collect();
+        if split.len() != 5 {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "{DELIMITERFASTA} in fasta lacking for {reader.name}",
             ));
         }
-        let (a, b, c, d) = (split[0], split[1], split[2], split[3]);
+        let (a, sseqid, b, c, d) = (split[0], split[1], split[2], split[3], split[4]);
         let b = match Status::try_from(b) {
             Ok(b) => b,
             Err(_) => {
@@ -586,6 +628,7 @@ impl Newfasta {
         Ok(Self {
             qseqid: a.to_string(),
             sseq: reader.seq.to_string(),
+            sseqid: sseqid.to_string(),
             pos: (c..=d),
             status: b,
         })
@@ -594,6 +637,7 @@ impl Newfasta {
     pub(crate) fn newfromblast(blast: &Blast) -> Self {
         Self {
             qseqid: blast.qseqid.clone(),
+            sseqid: blast.sseqid.clone(),
             sseq: blast.sseq.clone(),
             pos: blast.pos().clone(),
             status: blast.status.clone(),
@@ -603,6 +647,7 @@ impl Newfasta {
         Self {
             pos: blast.pos().clone(),
             qseqid: blast.qseqid,
+            sseqid: blast.sseqid.clone(),
             sseq: blast.sseq,
             status: blast.status,
         }
@@ -610,6 +655,7 @@ impl Newfasta {
 }
 pub(crate) trait Seqresult {
     fn qseqid(&self) -> &str;
+    fn sseqid(&self) -> &str;
     fn sseq(&self) -> &str;
     fn status(&self) -> &Status;
     fn pos(&self) -> RangeInclusive<usize>;
@@ -654,37 +700,15 @@ impl Newfasta {
     pub(crate) fn multipledeserialize(data: String) -> io::Result<Vec<Self>> {
         let mut elements = Vec::new();
         for elem in data.trim().trim_matches('>').split(">") {
-            let data: Vec<&str> = elem.split([DELIMITERFASTA]).collect();
-            if data.len() == 4
-                && let Some((status, seq)) =
-                    data.iter().last().map(|p| p.split_once("\n")).flatten()
-            {
-                let (posstart, posend, status) = match (
-                    data[1].parse::<usize>(),
-                    data[2].parse::<usize>(),
-                    Status::try_from(status),
-                ) {
-                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                    _ => {
-                        return Err(io::Error::new(
-                            ErrorKind::InvalidData,
-                            "Position or status is/are wrong for line {elem}",
-                        ));
-                    }
-                };
-                let entry = Newfasta {
-                    qseqid: data[0].to_string(),
-                    sseq: seq.to_string(),
-                    pos: posstart..=posend,
-                    status,
-                };
-                elements.push(entry);
-            } else {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid format for line {elem}",
-                ));
-            }
+            let (name, seq) = elem
+                .split_once('\n')
+                .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()))
+                .ok_or(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "Invalid fasta name sequence",
+                ))?;
+            let elem = Newfasta::new(&Ourfasta { name, seq })?;
+            elements.push(elem);
         }
         Ok(elements)
     }
@@ -694,8 +718,9 @@ impl std::fmt::Display for &dyn Seqresult {
         let pos = self.pos();
         write!(
             f,
-            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
+            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
             self.qseqid(),
+            self.sseqid(),
             pos.start(),
             pos.end(),
             self.status().to_serialize(),
@@ -789,7 +814,7 @@ impl Display for Locus {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumIter)]
 pub(crate) enum Haplotype {
     Primary,
     Alternate,
@@ -822,28 +847,12 @@ impl Serialize for Haplotype {
         }
     }
 }
-impl Ord for Haplotype {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Primary, Self::Primary) | (Self::Alternate, Self::Alternate) => {
-                std::cmp::Ordering::Equal
-            }
-            (Self::Primary, Self::Alternate) => std::cmp::Ordering::Less,
-            (Self::Alternate, Self::Primary) => std::cmp::Ordering::Greater,
-        }
-    }
-}
 impl Display for Haplotype {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Primary => write!(f, "Primary"),
             Self::Alternate => write!(f, "Alternate"),
         }
-    }
-}
-impl PartialOrd for Haplotype {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 impl Haplotype {
@@ -1126,32 +1135,26 @@ impl FakeLocusinfo {
                 "No assembly given with auto locus",
             )),
             (Some(loc), ..) => {
-                let (name, pos, elem) = locusposition(loc.as_ref(), species, &self.locus,false)?;
-                //TODO: Always plus
-                Ok((
-                    LocusInfos::new(
-                        self.locus,
-                        self.haplotype,
-                        name,
-                        Position::new(
-                            false,
-                            (i64::try_from(*pos.start())
-                                .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
+                let (name, elem) = locusposition(loc.as_ref(), species, &self.locus, true)?;
+                match (name
+                    .into_iter()
+                    .filter(|p| p.haplotype == self.haplotype && p.locus == self.locus)
+                    .next())
+                {
+                    Some(d) => Ok((d, Some(elem))),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "No locus {} with haplotype {} found",
+                            &self.locus, &self.haplotype
                         ),
-                        Position::new(
-                            false,
-                            (i64::try_from(*pos.end())
-                                .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f)))?,
-                        ),
-                        Strand::Plus,
-                    ),
-                    Some(elem),
-                ))
+                    )),
+                }
             }
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
@@ -1160,6 +1163,24 @@ pub(crate) struct LocusInfos {
     pub(crate) end: Position,
     #[serde(skip)]
     pub(crate) complement: Strand,
+}
+impl Serialize for LocusInfos {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut new = self.clone();
+        if new.complement.isrev() {
+            (new.start, new.end) = (self.end, self.start)
+        };
+        let mut se = serializer.serialize_struct("LocusInfos", 4)?;
+        se.serialize_field("Locus", &new.locus)?;
+        se.serialize_field("Haplotype", &new.haplotype)?;
+        se.serialize_field("Contig", &new.contig)?;
+        se.serialize_field("Start", &new.start)?;
+        se.serialize_field("End", &new.end)?;
+        se.end()
+    }
 }
 impl LocusInfos {
     pub(crate) fn new(

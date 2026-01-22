@@ -10,7 +10,6 @@ Made by: Guilhem Zeitoun
 //TODO: Soft clips dans nouveau tableai et vérifier les valeurs.
 ///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
-use csv::Trim;
 use itertools::Itertools;
 use plotters::coord::Shift;
 use std::collections::HashMap;
@@ -626,7 +625,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (mut locus, blastcheck) = match locusposparser(&args, &speciesblast) {
+    let (locus, blastcheck) = match locusposparser(&args, &speciesblast) {
         Err(f) => {
             eprintln!("{f}");
             return ExitCode::FAILURE;
@@ -1067,7 +1066,7 @@ fn main() -> ExitCode {
                 locushashresult.insert(loci.locus.clone(), element);
             } else if args.geneloc.is_some() {
                 println!("Gene list starting!");
-                match genelist(loci, &args,true) {
+                match genelist(loci, &args, false) {
                     Err(e) => {
                         eprintln!("Cannot create gene list. Error is {e}");
                         return ExitCode::FAILURE;
@@ -1100,7 +1099,7 @@ fn main() -> ExitCode {
                 if let Some(assembly) = args.assembly.as_ref()
                     && !args.nosubmit
                 {
-                    match locusposition(&assembly, &speciesblast, &loci.locus,true) {
+                    match locusposition(&assembly, &speciesblast, &loci.locus, true) {
                         Ok((.., hash)) => {
                             let mut finish: Vec<GeneInfos> = hash
                                 .iter()
@@ -1172,7 +1171,7 @@ fn main() -> ExitCode {
                                 }
                             }
                             args.geneloc = Some(genenamefile);
-                            let result = match genelist(&loci, &args, true) {
+                            let result = match genelist(&loci, &args, false) {
                                 Err(e) => {
                                     eprintln!("Cannot blast genes. Error is {e}");
                                     return ExitCode::FAILURE;
