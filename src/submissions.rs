@@ -484,11 +484,31 @@ where
     statusblastvs(&mut blast);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
-pub(crate) fn locusposition<T>(
+pub(crate) fn locuspos(
+    search: &Locus,
+    hap: &Haplotype,
+    locus: &[LocusInfos],
+    blast: &[Blastmatch],
+) -> Option<(LocusInfos, impl Iterator<Item = Blastmatch>)> {
+    let opt = locus
+        .iter()
+        .find(|p| &p.locus == search && &p.haplotype == hap)?;
+    let fil = |a: Blastmatch| {
+        a.getlocusname() == Some(opt.locus)
+            && a.sseqid == opt.contig
+            && (opt.start.getobasedpos()..=opt.end.getobasedpos())
+                .contains(&a.sstart.try_into().unwrap_or_default())
+    };
+    if !blast.any(fil) {
+        None
+    } else {
+        let bl = blast.iter().filter(fil).into();
+        Some((opt.clone(), bl))
+    }
+}
+pub(crate) fn locusallposition<T>(
     subject: &Path,
-    species: T,
-    locus: &Locus,
-    full: bool,
+    species: T
 ) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)>
 where
     T: AsRef<str>,
@@ -550,16 +570,6 @@ where
         ErrorKind::InvalidInput,
         "No locus found after BLAST analysis",
     ));
-    if !full && let Ok(e) = &range {
-        data.retain(|p| {
-            e.iter().any(|f| {
-                &f.locus == locus
-                    && f.contig == p.qseqid
-                    && (f.start.getobasedpos()..=f.end.getobasedpos())
-                        .contains(&p.sstart.try_into().unwrap_or_default())
-            })
-        })
-    }
     range.map(|f| (f, data))
 }
 #[must_use]

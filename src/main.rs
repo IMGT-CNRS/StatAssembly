@@ -24,7 +24,7 @@ use std::{fs, io};
 use crate::r#struct::*;
 use crate::submissions::{
     REQUESTCLIENT, checkifblastpresent, genesblast, getallelefromblast, getnamefromblast,
-    getspeciesfromncbi, locusposition, preparesubmission, submit,
+    getspeciesfromncbi, locusallposition, preparesubmission, submit,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -305,18 +305,32 @@ fn locusposparser(
         }
     };
     let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
+    let mut fullblast = None;
     for record in csv.deserialize::<FakeLocusinfo>() {
-        let (record, blast) = match record {
+        let recorda = match record {
             Ok(r) => match r.intoloc(args.assembly.as_ref(), realspecies) {
-                Ok((b, c)) => {
-                    println!(
-                        "Position found is {}:{}-{} in {} strand.",
-                        b.contig,
-                        b.start.getobasedpos(),
-                        b.end.getobasedpos(),
-                        b.complement
-                    );
-                    (b, c)
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    if fullblast.as_ref().is_none()
+                        && let Some(path) = &args.assembly.as_ref()
+                    {
+                        fullblast = Some(locusallposition(path, realspecies)?);
+                    }
+                    let d = if let Some(d) = fullblast.clone() {
+                        d
+                    } else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Issue finding loci",
+                        ));
+                    };
+                    d.0.iter()
+                        .find(|p| p.haplotype == r.haplotype && p.locus == r.locus)
+                        .ok_or(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Issue finding loci",
+                        ))?
+                        .clone()
                 }
                 Err(e) => {
                     return Err(std::io::Error::new(
@@ -336,20 +350,12 @@ fn locusposparser(
                 ));
             }
         };
-        locusrecord.0.push(record);
-        let mut finale: Vec<Blastmatch> = Vec::new();
-        match blast {
-            None => (),
-            Some(mut b) => finale.append(&mut b),
-        };
-        locusrecord.1 = match (locusrecord.1.as_mut(), finale) {
-            (None, e) if e.is_empty() => None,
-            (Some(b), mut c) => {
-                b.append(&mut c);
-                Some(b.clone())
-            }
-            (None, c) => Some(c),
-        };
+        if let Some(a) = locusrecord.0.iter_mut().find(|p| p.haplotype == recorda.haplotype && p.locus == recorda.locus) {
+            *a = recorda;
+        } else {
+            locusrecord.0.push(recorda);
+        }
+        locusrecord.1 = fullblast.map(|p| p.1);
     }
     if locusrecord.1.is_some() {
         let file = File::create("newloc.csv")?;
@@ -1101,6 +1107,7 @@ fn main() -> ExitCode {
                 {
                     match locusposition(&assembly, &speciesblast, &loci.locus, true) {
                         Ok((.., hash)) => {
+                            let hash: Vec<Blastmatch> = hash;
                             let mut finish: Vec<GeneInfos> = hash
                                 .iter()
                                 .map(|p| {

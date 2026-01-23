@@ -6,7 +6,7 @@ It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
 Made by: Guilhem Zeitoun
 */
-use crate::submissions::{DELIMITERFASTA, getallelefromblast, locusposition};
+use crate::submissions::{DELIMITERFASTA, getallelefromblast};
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
@@ -505,6 +505,11 @@ pub trait Blastcalc {
     fn getqueryseq(&self) -> &str;
     fn getallelename(&self) -> Option<String> {
         getallelefromblast(self.getqueryseq())
+    }
+    fn getlocusname(&self) -> Option<Locus> {
+        self.getallelename()
+            .map(|f| Locus::try_from(f).ok())
+            .flatten()
     }
 }
 impl Blastcalc for Blast {
@@ -1121,21 +1126,20 @@ impl FakeLocusinfo {
         self,
         subject: Option<T>,
         species: &str,
-    ) -> io::Result<(LocusInfos, Option<Vec<Blastmatch>>)>
+    ) -> io::Result<Option<LocusInfos>>
     where
         T: AsRef<Path>,
     {
         match (subject, self.contig, self.start, self.end) {
-            (_, Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok((
+            (_, Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(Some(
                 LocusInfos::new(self.locus, self.haplotype, a, b, c, self.complement),
-                None,
             )),
             (None, ..) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "No assembly given with auto locus",
             )),
             (Some(loc), ..) => {
-                let (name, elem) = locusposition(loc.as_ref(), species, &self.locus, true)?;
+                /* let (name, elem) = locusposition(loc.as_ref(), species, &self.locus, true)?;
                 match (name
                     .into_iter()
                     .filter(|p| p.haplotype == self.haplotype && p.locus == self.locus)
@@ -1149,7 +1153,8 @@ impl FakeLocusinfo {
                             &self.locus, &self.haplotype
                         ),
                     )),
-                }
+                } */
+                Ok(None)
             }
         }
     }
