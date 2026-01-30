@@ -489,20 +489,21 @@ pub(crate) fn locuspos(
     hap: &Haplotype,
     locus: &[LocusInfos],
     blast: &[Blastmatch],
-) -> Option<(LocusInfos, impl Iterator<Item = Blastmatch>)> {
+) -> Option<(LocusInfos, Vec<Blastmatch>)> {
     let opt = locus
         .iter()
         .find(|p| &p.locus == search && &p.haplotype == hap)?;
-    let fil = |a: Blastmatch| {
+    let fil = |a: &Blastmatch| {
+        let opt = opt.clone();
         a.getlocusname() == Some(opt.locus)
             && a.sseqid == opt.contig
             && (opt.start.getobasedpos()..=opt.end.getobasedpos())
                 .contains(&a.sstart.try_into().unwrap_or_default())
     };
-    if !blast.any(fil) {
+    if !blast.iter().any(fil) {
         None
     } else {
-        let bl = blast.iter().filter(fil).into();
+        let bl= blast.into_iter().filter(|f| fil(*f)).map(|p| p.clone()).collect_vec();
         Some((opt.clone(), bl))
     }
 }
@@ -534,9 +535,6 @@ where
     .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
-    if !full {
-        locusfiltering(&locus, &mut blast);
-    }
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);

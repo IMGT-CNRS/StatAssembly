@@ -308,24 +308,24 @@ fn locusposparser(
     let mut fullblast = None;
     for record in csv.deserialize::<FakeLocusinfo>() {
         let recorda = match record {
-            Ok(r) => match r.intoloc(args.assembly.as_ref(), realspecies) {
+            Ok(re) => match re.clone().intoloc(args.assembly.as_ref(), realspecies) {
                 Ok(Some(b)) => b,
                 Ok(None) => {
-                    if fullblast.as_ref().is_none()
-                        && let Some(path) = &args.assembly.as_ref()
-                    {
-                        fullblast = Some(locusallposition(path, realspecies)?);
-                    }
-                    let d = if let Some(d) = fullblast.clone() {
-                        d
-                    } else {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Issue finding loci",
-                        ));
+                    let d = match (fullblast.as_ref(), args.assembly.as_ref()) {
+                        (None, Some(path)) => {
+                            fullblast = Some(locusallposition(path, realspecies)?);
+                            fullblast.as_ref().unwrap_or_else(|| unreachable!())
+                        }
+                        (Some(f), _) => f,
+                        _ => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Issue finding loci",
+                            ));
+                        }
                     };
                     d.0.iter()
-                        .find(|p| p.haplotype == r.haplotype && p.locus == r.locus)
+                        .find(|p| p.haplotype == re.haplotype && p.locus == re.locus)
                         .ok_or(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "Issue finding loci",
@@ -350,13 +350,17 @@ fn locusposparser(
                 ));
             }
         };
-        if let Some(a) = locusrecord.0.iter_mut().find(|p| p.haplotype == recorda.haplotype && p.locus == recorda.locus) {
+        if let Some(a) = locusrecord
+            .0
+            .iter_mut()
+            .find(|p| p.haplotype == recorda.haplotype && p.locus == recorda.locus)
+        {
             *a = recorda;
         } else {
             locusrecord.0.push(recorda);
         }
-        locusrecord.1 = fullblast.map(|p| p.1);
     }
+    locusrecord.1 = fullblast.map(|p| p.1);
     if locusrecord.1.is_some() {
         let file = File::create("newloc.csv")?;
         let mut csv = csv::WriterBuilder::new()
@@ -1105,7 +1109,7 @@ fn main() -> ExitCode {
                 if let Some(assembly) = args.assembly.as_ref()
                     && !args.nosubmit
                 {
-                    match locusposition(&assembly, &speciesblast, &loci.locus, true) {
+                    match locusallposition(&assembly, &speciesblast) {
                         Ok((.., hash)) => {
                             let hash: Vec<Blastmatch> = hash;
                             let mut finish: Vec<GeneInfos> = hash
