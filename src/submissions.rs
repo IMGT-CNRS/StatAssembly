@@ -31,7 +31,7 @@ use crate::r#struct::{
 use crate::{generatelightbam, getassemblyreader, getreaderoffile};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::new(10, 0))
+        .connect_timeout(Duration::new(15, 0))
         .timeout(Duration::new(300, 0))
         .user_agent(format!("IMGT/StatAssembly version {}", VERSION))
         .referer(false)
@@ -39,13 +39,19 @@ lazy_static! {
         .https_only(true)
         .build()
         .unwrap_or_default();
+    pub static ref WEBSERVER: String = "https://imgt.org".to_string();
+    pub static ref RELEASELINK: String =
+        format!("{}{}", WEBSERVER.as_str(), "/download/GENE-DB/RELEASE");
+    pub static ref VQUESTLINK: String = format!(
+        "{}{}",
+        WEBSERVER.as_str(),
+        "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
+    );
+    pub static ref SUBMISSIONLINK: String = format!("{}{}", WEBSERVER.as_str(), "/submissions/");
 }
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const RELEASELINK: &str = "https://www.imgt.org/download/GENE-DB/RELEASE";
-const VQUESTLINK: &str = "https://www.imgt.org/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP";
-const SUBMISSIONLINK: &str = "https://www.imgt.org/submissions/";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DELIMITERFASTA: char = '/';
-const LOCUSSEPARATOR: usize = 1_000_000;
+pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 
 #[must_use]
 pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
@@ -123,7 +129,7 @@ pub(crate) fn checkifblastpresent() -> bool {
 }
 pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
     println!("Downloading reference sequence from GENE-DB");
-    let releaseversion = match sendresult(&REQUESTCLIENT, RELEASELINK) {
+    let releaseversion = match sendresult(&REQUESTCLIENT, RELEASELINK.as_str()) {
         Ok(e) => e,
         Err(e) => {
             println!("Release fetched failed because: {e}");
@@ -136,7 +142,7 @@ pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
             "Downloading GENE-DB release {}, please wait...",
             releaseversion
         );
-        match sendresult(&REQUESTCLIENT, VQUESTLINK) {
+        match sendresult(&REQUESTCLIENT, VQUESTLINK.as_str()) {
             Ok(e) => {
                 match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
                     Ok(Ok(_)) => (),
@@ -160,14 +166,31 @@ pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
     };
     Some((tempfile, releaseversion))
 }
-pub(crate) fn locusfiltering(locus: &Locus, blast: &mut Vec<Blast>) {
+pub(crate) fn positionfiltering<T>(locus: &[LocusInfos], blast: &mut Vec<T>)
+where
+    T: Blastcalc,
+{
+    blast.retain(|p| {
+        locus.iter().any(|f| {
+            let range: RangeInclusive<usize> = f.start.getobasedpos().try_into().unwrap_or_default()
+                ..=f.end.getobasedpos().try_into().unwrap_or_default();
+            f.contig.as_str() == p.getsubject()
+                && checkoverlap(&(p.getpos().0..=p.getpos().1), &range)
+        })
+    })
+}
+pub(crate) fn locusfiltering<T>(locus: &Locus, blast: &mut Vec<T>)
+where
+    T: Blastcalc,
+{
     //TRD is inside TRA locus
     if locus == &Locus::TRA {
         blast.retain(|p| {
-            p.qseqid.contains(&format!("{}", locus)) || p.qseqid.contains(&"TRD".to_string())
+            p.getqueryseq().contains(&format!("{}", locus))
+                || p.getqueryseq().contains(&"TRD".to_string())
         });
     } else {
-        blast.retain(|p| p.qseqid.contains(&format!("{}", locus)));
+        blast.retain(|p| p.getqueryseq().contains(&format!("{}", locus)));
     }
 }
 pub(crate) fn speciesandorphonfiltering(
@@ -482,6 +505,7 @@ where
         }
     });
     statusblastvs(&mut blast);
+    let _ = fs::remove_file(name);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
 pub(crate) fn locuspos(
@@ -501,15 +525,15 @@ pub(crate) fn locuspos(
                 .contains(&a.sstart.try_into().unwrap_or_default())
     };
     if !blast.iter().any(fil) {
-        None
-    } else {
-        let bl= blast.into_iter().filter(|f| fil(*f)).map(|p| p.clone()).collect_vec();
-        Some((opt.clone(), bl))
+        return None;
     }
+    let mut bl = blast.to_vec();
+    bl.retain(fil);
+    Some((opt.clone(), bl))
 }
 pub(crate) fn locusallposition<T>(
     subject: &Path,
-    species: T
+    species: T,
 ) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)>
 where
     T: AsRef<str>,
@@ -654,7 +678,7 @@ where
             }
         };
     };
-    //let _ = fs::remove_file(&output);
+    let _ = fs::remove_file(&output);
     Ok(result)
 }
 pub(crate) fn getspeciesfromncbi<T>(
@@ -858,14 +882,15 @@ pub(crate) fn submit(
     //form(&client);
 }
 pub(crate) fn browseropening() -> io::Result<()> {
+    let link = SUBMISSIONLINK.as_str();
     println!(
-        "Opening web browser to continue submission. Type (Y) to open the web browser, (N) to refuse and go by yourself to {SUBMISSIONLINK} or (e) to exit."
+        "Opening web browser to continue submission. Type (Y) to open the web browser, (N) to refuse and go by yourself to {link} or (e) to exit."
     );
     let mut val = String::new();
     let _ = io::stdin().read_line(&mut val);
     let val = val.trim().to_ascii_lowercase();
     if val == "y" {
-        let _ = webbrowser::open(SUBMISSIONLINK);
+        let _ = webbrowser::open(link);
     } else if val == "e" {
         println!("Exiting");
         return Err(io::Error::from(ErrorKind::InvalidData));
@@ -914,14 +939,14 @@ pub(crate) fn preparesubmission(path: &Path, species: String) -> bool {
     let mut val = String::new();
     let _ = io::stdin().read_line(&mut val);
     let val = val.trim().to_ascii_lowercase();
-    let archive = match createarchive(path) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Error filling archive: {e}");
-            return false;
-        }
-    };
     if val == "y" {
+        let archive = match createarchive(path) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Error filling archive: {e}");
+                return false;
+            }
+        };
         if let Err(e) = submission(&token, species, archive) {
             eprintln!("An error has occured during submission: {e}. Please retry later.");
             return false;
@@ -948,14 +973,14 @@ pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -
         .text("type", "submission")
         .text("species", species);
     match REQUESTCLIENT
-        .post(SUBMISSIONLINK)
+        .post(SUBMISSIONLINK.as_str())
         .bearer_auth(token)
         .multipart(zip)
         .send()
     {
         Ok(a) => match a.status() {
             StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::UNAUTHORIZED => Err(io::Error::new(
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "The token is invalid or has expired. Please retry a submission. Response is {}",
@@ -970,7 +995,7 @@ pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -
                 ),
             )),
             a if a.is_server_error() => Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
+                io::ErrorKind::ConnectionAborted,
                 "The server is unavailable. Please retry a submission.",
             )),
             e => Err(io::Error::new(

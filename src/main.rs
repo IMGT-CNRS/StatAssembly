@@ -10,8 +10,10 @@ Made by: Guilhem Zeitoun
 //TODO: Soft clips dans nouveau tableai et vérifier les valeurs.
 ///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
+use extended_htslib::bcf::record;
 use itertools::Itertools;
 use plotters::coord::Shift;
+use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
@@ -23,8 +25,9 @@ use std::{fs, io};
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, checkifblastpresent, genesblast, getallelefromblast, getnamefromblast,
-    getspeciesfromncbi, locusallposition, preparesubmission, submit,
+    REQUESTCLIENT, SUBMISSIONLINK, checkifblastpresent, genesblast, getallelefromblast,
+    getnamefromblast, getspeciesfromncbi, locusallposition, locusfiltering, locuspos,
+    positionfiltering, preparesubmission, retainbestmatch, submit,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -305,44 +308,10 @@ fn locusposparser(
         }
     };
     let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
-    let mut fullblast = None;
+    let mut records = Vec::new();
     for record in csv.deserialize::<FakeLocusinfo>() {
         let recorda = match record {
-            Ok(re) => match re.clone().intoloc(args.assembly.as_ref(), realspecies) {
-                Ok(Some(b)) => b,
-                Ok(None) => {
-                    let d = match (fullblast.as_ref(), args.assembly.as_ref()) {
-                        (None, Some(path)) => {
-                            fullblast = Some(locusallposition(path, realspecies)?);
-                            fullblast.as_ref().unwrap_or_else(|| unreachable!())
-                        }
-                        (Some(f), _) => f,
-                        _ => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Issue finding loci",
-                            ));
-                        }
-                    };
-                    d.0.iter()
-                        .find(|p| p.haplotype == re.haplotype && p.locus == re.locus)
-                        .ok_or(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Issue finding loci",
-                        ))?
-                        .clone()
-                }
-                Err(e) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "Invalid CSV format (tabular fields) required for file {}, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend\n{}",
-                            args.locuspos.display(),
-                            e
-                        ),
-                    ));
-                }
-            },
+            Ok(r) => r,
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -350,19 +319,43 @@ fn locusposparser(
                 ));
             }
         };
-        if let Some(a) = locusrecord
-            .0
-            .iter_mut()
-            .find(|p| p.haplotype == recorda.haplotype && p.locus == recorda.locus)
-        {
-            *a = recorda;
-        } else {
-            locusrecord.0.push(recorda);
-        }
+        records.push(recorda);
     }
-    locusrecord.1 = fullblast.map(|p| p.1);
+    match (
+        args.assembly.as_ref(),
+        records
+            .iter_mut()
+            .filter(|p| p.contig.is_none())
+            .collect::<Vec<&mut FakeLocusinfo>>(),
+    ) {
+        (Some(path), b) if !b.is_empty() => {
+            let (locus, blast) = locusallposition(path, realspecies)?;
+            b.into_iter().for_each(|p| {
+                let find = locus
+                    .iter()
+                    .find(|r| r.haplotype == p.haplotype && r.locus == p.locus);
+                if let Some(a) = find {
+                    *p = a.clone().into();
+                }
+            });
+            locusrecord.1 = Some(blast);
+        }
+        (None, b) if !b.is_empty() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Automatic detection cannot be performed without an assembly. Provide position or provide assembly."
+                ),
+            ));
+        }
+        _ => (),
+    }
+    for record in records {
+        let elem = record.intoloc()?;
+        locusrecord.0.push(elem);
+    }
     if locusrecord.1.is_some() {
-        let file = File::create("newloc.csv")?;
+        let file = File::create(args.outdir.join("newloc.csv"))?;
         let mut csv = csv::WriterBuilder::new()
             .comment(Some(b'#'))
             .delimiter(b'\t')
@@ -635,7 +628,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (locus, blastcheck) = match locusposparser(&args, &speciesblast) {
+    let (locus, mut blastcheck) = match locusposparser(&args, &speciesblast) {
         Err(f) => {
             eprintln!("{f}");
             return ExitCode::FAILURE;
@@ -1106,100 +1099,77 @@ fn main() -> ExitCode {
                 eprintln!(
                     "You have not provided a gene list, skipped. Provide one to get more datas."
                 );
-                if let Some(assembly) = args.assembly.as_ref()
-                    && !args.nosubmit
+                if !args.nosubmit
+                    && let Some(b) = args.assembly.as_ref()
                 {
-                    match locusallposition(&assembly, &speciesblast) {
-                        Ok((.., hash)) => {
-                            let hash: Vec<Blastmatch> = hash;
-                            let mut finish: Vec<GeneInfos> = hash
-                                .iter()
-                                .map(|p| {
-                                    let strand = if p.send < p.sstart {
-                                        Strand::Minus
-                                    } else {
-                                        Strand::Plus
-                                    };
-                                    GeneInfos::new(
-                                        getallelefromblast(&p.qseqid).unwrap_or_default(),
-                                        p.sseqid.clone(),
-                                        strand,
-                                        Position::new(
-                                            false,
-                                            p.sstart.try_into().unwrap_or_default(),
-                                        ),
-                                        Position::new(false, p.send.try_into().unwrap_or_default()),
-                                    )
-                                })
-                                .collect();
-                            let finishduplicate = finish.clone();
-                            let duplicates: Vec<&GeneInfos> = finishduplicate
-                                .iter()
-                                .duplicates_by(|f| f.gene.as_str())
-                                .collect();
-                            if !duplicates.is_empty() {
-                                eprintln!(
-                                    "Some genes has a BLAST match at different positions, random number would be added with a _."
-                                )
-                            }
-                            for (item, name) in finish.iter_mut().enumerate() {
-                                name.gene = if duplicates
-                                    .iter()
-                                    .any(|g| g.gene.as_str() == name.gene.as_str())
-                                {
-                                    format!("{}_{}", name.gene, item)
-                                        .replace(",", "_")
-                                        .trim()
-                                        .to_string()
-                                } else {
-                                    format!("{}", name.gene)
-                                        .replace(",", "_")
-                                        .trim()
-                                        .to_string()
-                                };
-                                name.chromosome =
-                                    name.chromosome.replace(",", "_").trim().to_string()
-                            }
-                            finish.sort_unstable();
-                            let genenamefile = args.outdir.join("genelist_new.csv");
-                            let genefile = match File::create(&genenamefile) {
-                                Err(e) => {
-                                    eprintln!("Generate gene list. Error is {e}");
-                                    return ExitCode::FAILURE;
-                                }
-                                Ok(b) => b,
-                            };
-                            let mut csv = csv::WriterBuilder::new()
-                                .delimiter(b',')
-                                .has_headers(true)
-                                .quote_style(csv::QuoteStyle::NonNumeric)
-                                .comment(Some(b'#'))
-                                .from_writer(genefile);
-                            for gene in finish.iter() {
-                                if let Err(e) = csv.serialize(gene) {
-                                    eprintln!("Cannot print gene list. Error is {e}");
-                                    return ExitCode::FAILURE;
-                                }
-                            }
-                            args.geneloc = Some(genenamefile);
-                            let result = match genelist(&loci, &args, false) {
-                                Err(e) => {
-                                    eprintln!("Cannot blast genes. Error is {e}");
-                                    return ExitCode::FAILURE;
-                                }
-                                Ok(b) => b,
-                            };
-                            if val.first().is_some_and(|f| f.locusisok)
-                                && result.iter().any(|f| f.isok())
-                            {
-                                locushashresult.insert(loci.locus.clone(), hash);
-                            }
-                        }
+                    let (_locusinfo, mut data) = match locusallposition(b, &speciesblast) {
+                        Ok(a) => a,
                         Err(e) => {
-                            eprintln!("Cannot get gene match for gene list. Error is {e}.");
+                            eprintln!("Cannot blast for gene list. Error is {e}");
                             return ExitCode::FAILURE;
                         }
+                    };
+                    blastcheck = Some(data.clone());
+                    //locusfiltering(&loci.locus, &mut data);
+                    let mergedloci: Vec<LocusInfos> = grouped.iter().flatten().cloned().collect();
+                    positionfiltering(&mergedloci, &mut data);
+                    if data.is_empty() {
+                        eprintln!("No data after filtering gene list. Skipped.");
+                    } else {
+                        let mut finish: Vec<GeneInfos> = data
+                            .iter()
+                            .map(|p| {
+                                let strand = if p.send < p.sstart {
+                                    Strand::Minus
+                                } else {
+                                    Strand::Plus
+                                };
+                                GeneInfos::new(
+                                    getallelefromblast(&p.qseqid).unwrap_or_default(),
+                                    p.sseqid.clone(),
+                                    strand,
+                                    Position::new(false, p.sstart.try_into().unwrap_or_default()),
+                                    Position::new(false, p.send.try_into().unwrap_or_default()),
+                                )
+                            })
+                            .collect();
+                        checkandcorrectgenelistduplicate(&mut finish);
+                        let genenamefile = args.outdir.join("genelist_new.csv");
+                        let genefile = match File::create(&genenamefile) {
+                            Err(e) => {
+                                eprintln!("Generate gene list. Error is {e}");
+                                return ExitCode::FAILURE;
+                            }
+                            Ok(b) => b,
+                        };
+                        let mut csv = csv::WriterBuilder::new()
+                            .delimiter(b',')
+                            .has_headers(true)
+                            .quote_style(csv::QuoteStyle::NonNumeric)
+                            .comment(Some(b'#'))
+                            .from_writer(genefile);
+                        for gene in finish.iter() {
+                            if let Err(e) = csv.serialize(gene) {
+                                eprintln!("Cannot print gene list. Error is {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                        args.geneloc = Some(genenamefile);
+                        let result = match genelist(&loci, &args, false) {
+                            Err(e) => {
+                                eprintln!("Cannot blast genes. Error is {e}");
+                                return ExitCode::FAILURE;
+                            }
+                            Ok(b) => b,
+                        };
+                        if val.first().is_some_and(|f| f.locusisok)
+                            && result.iter().any(|f| f.isok())
+                        {
+                            locushashresult.insert(loci.locus.clone(), data);
+                        }
                     }
+                } else if !args.nosubmit {
+                    eprintln!("No assembly to check gene list.");
                 }
             }
         }
@@ -1235,6 +1205,31 @@ fn askforsubmission(
     args: &Args,
     infos: &HashMap<Locus, Vec<Blastmatch>>,
 ) -> io::Result<()> {
+    let quest = REQUESTCLIENT.get(SUBMISSIONLINK.as_str());
+    match quest.send() {
+        Ok(p) if p.status().is_success() => (),
+        Ok(p) if p.status().is_client_error() => {
+            return Err(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!("IMGT does not currently support submissions."),
+            ));
+        }
+        Ok(p) => {
+            return Err(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!(
+                    "Unable to contact IMGT servers at the moment. Please retry later. Error is {}",
+                    p.status().canonical_reason().unwrap_or_default()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!("Unable to contact IMGT servers. Error is {}", e),
+            ));
+        }
+    };
     println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
     let mut val = String::new();
     let _ = io::stdin().read_line(&mut val);
@@ -1342,24 +1337,40 @@ fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error
             ),
         )));
     }
+    checkandcorrectgenelistduplicate(&mut genes);
+    Ok(genes)
+}
+/// Add underscore in case gene list has duplicates
+fn checkandcorrectgenelistduplicate(genes: &mut Vec<GeneInfos>) {
     //Invert if start >= end because strand is given and won't work
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
         (p.start, p.end) = (p.end.clone(), p.start.clone());
     });
-    if let Some(d) = genes
+    let geneclone = genes.clone();
+    let finish: Vec<&GeneInfos> = geneclone
         .iter()
         .duplicates_by(|g| (g.gene.as_str(), g.chromosome.as_str()))
-        .next()
-    {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "The gene {} appears more than once (same gene and chromosome). Please provide a unique gene name or consider splitting gene list.",
-                d.gene
-            ),
-        )));
+        .collect();
+    if !finish.is_empty() {
+        println!(
+            "Some genes has the same name on the same chromosome. Underscore (_) would be added"
+        );
+        for (item, name) in genes.iter_mut().enumerate() {
+            name.gene = if finish.iter().any(|g| g.gene.as_str() == name.gene.as_str()) {
+                format!("{}_{}", name.gene, item)
+                    .replace(",", "_")
+                    .trim()
+                    .to_string()
+            } else {
+                format!("{}", name.gene)
+                    .replace(",", "_")
+                    .trim()
+                    .to_string()
+            };
+            name.chromosome = name.chromosome.replace(",", "_").trim().to_string()
+        }
     }
-    Ok(genes)
+    genes.sort_unstable();
 }
 fn extractgenelist(
     args: &Args,
@@ -1382,19 +1393,7 @@ fn extractgenelist(
         return Ok(Vec::new());
     }
     //At least one duplicate line
-    if let Some(d) = genes
-        .iter()
-        .duplicates_by(|g| (g.gene.as_str(), loci.haplotype.isprimary()))
-        .next()
-    {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "The gene {} appears more than once (same gene and haplotype). Please provide a unique gene name or consider splitting gene list.",
-                d.gene
-            ),
-        )));
-    }
+    checkandcorrectgenelistduplicate(&mut genes);
     Ok(genes)
 }
 fn genelist(

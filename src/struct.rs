@@ -495,6 +495,8 @@ pub trait Blastcalc {
     fn onlynewalleles(&self) -> bool {
         self.getstatus() == &Status::New
     }
+    /// get subject
+    fn getsubject(&self) -> &str;
     fn getpos(&self) -> (usize, usize);
     fn getstrand(&self) -> Strand {
         match self.getpos() {
@@ -516,6 +518,9 @@ impl Blastcalc for Blast {
     fn getseq(&self) -> Cow<str> {
         Cow::Borrowed(&self.sseq)
     }
+    fn getsubject(&self) -> &str {
+        &self.sseqid
+    }
     fn getstatus(&self) -> &Status {
         &self.status
     }
@@ -527,8 +532,12 @@ impl Blastcalc for Blast {
     }
 }
 impl Blastcalc for Blastmatch {
+    /// Get sequence
     fn getseq(&self) -> Cow<str> {
         Cow::Borrowed(&self.sseq)
+    }
+    fn getsubject(&self) -> &str {
+        &self.sseqid
     }
     fn getstatus(&self) -> &Status {
         &self.status
@@ -536,6 +545,7 @@ impl Blastcalc for Blastmatch {
     fn getpos(&self) -> (usize, usize) {
         (self.sstart, self.send)
     }
+    /// Query id
     fn getqueryseq(&self) -> &str {
         &self.qseqid
     }
@@ -1121,41 +1131,33 @@ pub(crate) struct FakeLocusinfo {
     #[serde(skip)]
     pub(crate) complement: Strand,
 }
+impl From<LocusInfos> for FakeLocusinfo {
+    fn from(value: LocusInfos) -> Self {
+        FakeLocusinfo {
+            locus: value.locus,
+            haplotype: value.haplotype,
+            contig: Some(value.contig),
+            start: Some(value.start),
+            end: Some(value.end),
+            complement: value.complement,
+        }
+    }
+}
 impl FakeLocusinfo {
-    pub(crate) fn intoloc<T>(
-        self,
-        subject: Option<T>,
-        species: &str,
-    ) -> io::Result<Option<LocusInfos>>
-    where
-        T: AsRef<Path>,
-    {
-        match (subject, self.contig, self.start, self.end) {
-            (_, Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(Some(
-                LocusInfos::new(self.locus, self.haplotype, a, b, c, self.complement),
+    pub(crate) fn intoloc(self) -> io::Result<LocusInfos> {
+        match (self.contig, self.start, self.end) {
+            (Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(LocusInfos::new(
+                self.locus,
+                self.haplotype,
+                a,
+                b,
+                c,
+                self.complement,
             )),
-            (None, ..) => Err(io::Error::new(
+            _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "No assembly given with auto locus",
             )),
-            (Some(loc), ..) => {
-                /* let (name, elem) = locusposition(loc.as_ref(), species, &self.locus, true)?;
-                match (name
-                    .into_iter()
-                    .filter(|p| p.haplotype == self.haplotype && p.locus == self.locus)
-                    .next())
-                {
-                    Some(d) => Ok((d, Some(elem))),
-                    None => Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "No locus {} with haplotype {} found",
-                            &self.locus, &self.haplotype
-                        ),
-                    )),
-                } */
-                Ok(None)
-            }
         }
     }
 }
@@ -1178,7 +1180,7 @@ impl Serialize for LocusInfos {
         if new.complement.isrev() {
             (new.start, new.end) = (self.end, self.start)
         };
-        let mut se = serializer.serialize_struct("LocusInfos", 4)?;
+        let mut se = serializer.serialize_struct("LocusInfos", 5)?;
         se.serialize_field("Locus", &new.locus)?;
         se.serialize_field("Haplotype", &new.haplotype)?;
         se.serialize_field("Contig", &new.contig)?;
