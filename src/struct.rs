@@ -1,5 +1,5 @@
 use bio::io::fasta::{self, FastaRead};
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeTupleStruct, SerializeTupleVariant};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -1180,12 +1180,12 @@ impl Serialize for LocusInfos {
         if new.complement.isrev() {
             (new.start, new.end) = (self.end, self.start)
         };
-        let mut se = serializer.serialize_struct("LocusInfos", 5)?;
-        se.serialize_field("Locus", &new.locus)?;
-        se.serialize_field("Haplotype", &new.haplotype)?;
-        se.serialize_field("Contig", &new.contig)?;
-        se.serialize_field("Start", &new.start)?;
-        se.serialize_field("End", &new.end)?;
+        let mut se = serializer.serialize_tuple_struct("LocusInfos", 5)?;
+        se.serialize_field(&new.locus)?;
+        se.serialize_field(&new.haplotype)?;
+        se.serialize_field(&new.contig)?;
+        se.serialize_field(&new.start)?;
+        se.serialize_field(&new.end)?;
         se.end()
     }
 }

@@ -364,6 +364,7 @@ fn locusposparser(
         for loci in locusrecord.0.iter() {
             csv.serialize(loci)?;
         }
+        csv.flush()?;
     }
     if locusrecord.0.is_empty() {
         return Err(std::io::Error::new(
@@ -1096,12 +1097,10 @@ fn main() -> ExitCode {
                 }
                 println!("Gene list finished.");
             } else {
-                eprintln!(
-                    "You have not provided a gene list, skipped. Provide one to get more datas."
-                );
                 if !args.nosubmit
                     && let Some(b) = args.assembly.as_ref()
                 {
+                    eprintln!("You have not provided a gene list, BLASTING to get one.");
                     let (_locusinfo, mut data) = match locusallposition(b, &speciesblast) {
                         Ok(a) => a,
                         Err(e) => {
@@ -1153,6 +1152,10 @@ fn main() -> ExitCode {
                                 eprintln!("Cannot print gene list. Error is {e}");
                                 return ExitCode::FAILURE;
                             }
+                        }
+                        if let Err(e) = csv.flush() {
+                            eprintln!("Cannot print gene list. Error is {e}");
+                            return ExitCode::FAILURE;
                         }
                         args.geneloc = Some(genenamefile);
                         let result = match genelist(&loci, &args, false) {

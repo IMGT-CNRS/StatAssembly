@@ -822,6 +822,9 @@ pub(crate) fn submit(
     };
     let locuspos =
         File::create(dir.join("newloc.csv")).map_err(|f| format!("Locus csv, error is {f}"))?;
+    locuspos
+        .lock()
+        .map_err(|f| format!("Error acquiring lock. Error is {f}"))?;
     let mut csv = csv::WriterBuilder::new()
         .comment(Some(b'#'))
         .delimiter(b'\t')
@@ -831,6 +834,8 @@ pub(crate) fn submit(
         csv.serialize(loci)
             .map_err(|p| format!("Error serializing locus position: {p}"))?;
     }
+    csv.flush()
+        .map_err(|p| format!("Error serializing locus position: {p}"))?;
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = dir.join("sequence.fasta");
@@ -996,7 +1001,7 @@ pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -
             )),
             a if a.is_server_error() => Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
-                "The server is unavailable. Please retry a submission.",
+                "The server is unavailable. Please retry a submission",
             )),
             e => Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
