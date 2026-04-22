@@ -1,6 +1,7 @@
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
 use bio::io::fasta;
+use bio_types::sequence::SequenceRead;
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -22,12 +23,13 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 use std::{fs, io};
+use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, SUBMISSIONLINK, checkifblastpresent, genesblast, getallelefromblast,
-    getnamefromblast, getspeciesfromncbi, locusallposition, locusfiltering, locuspos,
-    positionfiltering, preparesubmission, retainbestmatch, submit,
+    REQUESTCLIENT, SUBMISSIONLINK, checkifblastpresent, downloadmotifs, genesblast,
+    getallelefromblast, getnamefromblast, getspeciesfromncbi, locusallposition, locusfiltering,
+    locuspos, matchmotif, positionfiltering, preparesubmission, retainbestmatch, submit,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -53,9 +55,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
+const MIN_READLENGTH: u64 = 1_000;
 const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: usize = 2;
 const MATCHREADS: usize = 10;
+const BORNES: usize = 10_000;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
@@ -292,35 +296,49 @@ fn locusposparser(
     args: &Args,
     realspecies: &str,
 ) -> std::io::Result<(Vec<LocusInfos>, Option<Vec<Blastmatch>>)> {
-    let mut csv = match csv::ReaderBuilder::new()
-        .has_headers(false)
-        .comment(Some(b'#'))
-        .delimiter(b'\t')
-        .flexible(true)
-        .from_path(&args.locuspos)
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("CSV file of location position cannot be found. Error is {e}"),
-            ));
-        }
-    };
-    let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
     let mut records = Vec::new();
-    for record in csv.deserialize::<FakeLocusinfo>() {
-        let recorda = match record {
-            Ok(r) => r,
+    if let Some(arg) = &args.locuspos {
+        let mut csv = match csv::ReaderBuilder::new()
+            .has_headers(false)
+            .comment(Some(b'#'))
+            .delimiter(b'\t')
+            .flexible(true)
+            .from_path(arg)
+        {
+            Ok(c) => c,
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Invalid CSV auto format. Cannot compute: {e}"),
+                    format!("CSV file of location position cannot be found. Error is {e}"),
                 ));
             }
         };
-        records.push(recorda);
+        for record in csv.deserialize::<FakeLocusinfo>() {
+            let recorda = match record {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid CSV auto format. Cannot compute: {e}"),
+                    ));
+                }
+            };
+            records.push(recorda);
+        }
+    } else {
+        let elem = itertools::iproduct!(Haplotype::iter(), Locus::iter());
+        for (haplo, locu) in elem {
+            records.push(FakeLocusinfo::new(
+                locu,
+                Some(haplo),
+                None,
+                None,
+                None,
+                None,
+            ));
+        }
     }
+    let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
     match (
         args.assembly.as_ref(),
         records
@@ -331,9 +349,9 @@ fn locusposparser(
         (Some(path), b) if !b.is_empty() => {
             let (locus, blast) = locusallposition(path, realspecies)?;
             b.into_iter().for_each(|p| {
-                let find = locus
-                    .iter()
-                    .find(|r| r.haplotype == p.haplotype && r.locus == p.locus);
+                let find = locus.iter().find(|r| {
+                    r.haplotype == p.haplotype.clone().unwrap_or_default() && r.locus == p.locus
+                });
                 if let Some(a) = find {
                     *p = a.clone().into();
                 }
@@ -343,13 +361,19 @@ fn locusposparser(
         (None, b) if !b.is_empty() => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!(
-                    "Automatic detection cannot be performed without an assembly. Provide position or provide assembly."
-                ),
+                "Automatic detection cannot be performed without an assembly. Provide position or provide assembly.".to_string(),
             ));
         }
         _ => (),
     }
+    for elem in records.iter().filter(|p| p.contig.is_none()) {
+        eprintln!(
+            "Locus {} for {} could not be identified and would be skipped",
+            &elem.locus,
+            elem.haplotype.as_ref().unwrap_or(&Haplotype::default())
+        );
+    }
+    records.retain(|p| p.contig.is_some());
     for record in records {
         let elem = record.intoloc()?;
         locusrecord.0.push(elem);
@@ -371,7 +395,10 @@ fn locusposparser(
             std::io::ErrorKind::InvalidData,
             format!(
                 "Empty CSV format for file {}, waiting locus\thaplotype (Primary or Alternate)\tcontig\tstart\tend. Nothing found.",
-                args.locuspos.display()
+                args.locuspos
+                    .as_ref()
+                    .map(|f| format!("{}", f.display()))
+                    .unwrap_or("no loc given".to_string())
             ),
         ));
     }
@@ -410,7 +437,11 @@ fn locusposparser(
                     big.end.getobasedpos(),
                     big.locus,
                     ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
-                    args.locuspos.display()
+                    &args
+                        .locuspos
+                        .as_ref()
+                        .map(|f| format!("{}", f.display()))
+                        .unwrap_or("no loc given".to_string())
                 ),
             ));
         }
@@ -558,19 +589,23 @@ fn processcounting(
     }
     Ok(message)
 }
-fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
-    let mut reader = getreaderoffile(args)
+fn getmeancoverageandlength(args: &Args) -> std::io::Result<(u64, u64)> {
+    let time = Instant::now();
+    let mut reader: IndexedReader = getreaderoffile(args)
         .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
     reader
         .fetch(FetchDefinition::All)
         .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
-    let time = Instant::now();
+    let mut readlength = 0;
+    let mut count = 0;
     let length = reader
         .rc_records()
         .filter_map(Result::ok)
         .filter_map(|f| {
             //Remove reads with 0 as MAPQ
             if f.mapq() != 0 && !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() {
+                readlength += f.len();
+                count += 1;
                 Some(usize::try_from(f.reference_end() - f.reference_start() + 1).unwrap_or(0))
             } else {
                 None
@@ -592,16 +627,12 @@ fn getmeancoverage(args: &Args) -> std::io::Result<u64> {
     };
     let values = u64::try_from(length)
         .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+    let readvalues = u64::try_from(readlength)
+        .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
     let mean = values / total_mapped;
-    if mean == 0 {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
-        ))
-    } else {
-        println!("Calculated in {} s", time.elapsed().as_secs());
-        Ok(mean)
-    }
+    let readavg = readvalues / count;
+    println!("Calculated in {} s", time.elapsed().as_secs());
+    Ok((mean, readavg))
 }
 fn main() -> ExitCode {
     let firstinstant = Instant::now();
@@ -636,11 +667,11 @@ fn main() -> ExitCode {
         }
         Ok(b) => b,
     };
-    if args.geneloc.is_some() {
-        if let Err(e) = checkgenelistformat(&args) {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
+    if args.geneloc.is_some()
+        && let Err(e) = checkgenelistformat(&args)
+    {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
     }
     //Group between primary and alternate
     let grouped = match mergelocus(locus) {
@@ -648,7 +679,9 @@ fn main() -> ExitCode {
         None => {
             eprintln!(
                 "Check order of loci in the file {}.",
-                args.locuspos.display()
+                args.locuspos
+                    .map(|f| format!("{}", f.display()))
+                    .unwrap_or("no loc given".to_string())
             );
             return ExitCode::FAILURE;
         }
@@ -674,14 +707,29 @@ fn main() -> ExitCode {
         }
         _ => {
             println!("Getting mean coverage from calculations, it might take some minutes.");
-            let mean = match getmeancoverage(&args) {
-                Ok(b) => b,
+            let (mean, average) = match getmeancoverageandlength(&args) {
+                Ok((0, _)) => {
+                    eprintln!(
+                        "Probably truncated BAM, you should give extracted length with the argument --extractedlength."
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Ok((_, b)) if b < MIN_READLENGTH => {
+                    eprintln!(
+                        "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software."
+                    );
+                    return ExitCode::FAILURE;
+                }
+                Ok((a, b)) => (a, b),
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };
-            println!("Mean coverage is {}", mean);
+            println!(
+                "Mean coverage is {} and average length of reads is {}",
+                mean, average
+            );
             let _ = fs::write(&meanpath, mean.to_string().as_bytes());
             mean
         }
@@ -1041,7 +1089,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             let val = pos.into_values().collect_vec();
-            let info: Vec<&HashMapinfo> = val.iter().map(|f| f).collect();
+            let info: Vec<&HashMapinfo> = val.iter().collect();
             println!(
                 "Locus {} ({}) is {}",
                 loci.locus,
@@ -1075,13 +1123,16 @@ fn main() -> ExitCode {
                         eprintln!("Cannot create gene list. Error is {e}");
                         return ExitCode::FAILURE;
                     }
+                    Ok(b) if b.is_empty() => {
+                        eprintln!("No gene list for locus {}. Skipped.", loci.locus);
+                    }
                     Ok(b) => {
-                        if args.assembly.as_ref().is_some() {
+                        if args.assembly.as_ref().is_some() && !args.nosubmit {
                             let geneinfo: Vec<GeneInfos> =
                                 b.iter().map(|f| f.clone().into()).collect();
                             match genesblast(&geneinfo, &args, &speciesblast, &loci.locus) {
                                 Ok(blast) => {
-                                    if val.first().map_or(false, |f| f.locusisok)
+                                    if val.first().is_some_and(|f| f.locusisok)
                                         && b.iter().any(|f| f.isok())
                                     {
                                         locushashresult.insert(loci.locus.clone(), blast);
@@ -1091,6 +1142,11 @@ fn main() -> ExitCode {
                                     eprintln!("Cannot blast gene list. Error is {e}");
                                     return ExitCode::FAILURE;
                                 }
+                            };
+                        } else {
+                            if let Err(e) = genelist(loci, &args, args.allreads) {
+                                eprintln!("Cannot make gene list. Error is {e}");
+                                return ExitCode::FAILURE;
                             };
                         }
                     }
@@ -1158,7 +1214,7 @@ fn main() -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                         args.geneloc = Some(genenamefile);
-                        let result = match genelist(&loci, &args, false) {
+                        let result = match genelist(loci, &args, false) {
                             Err(e) => {
                                 eprintln!("Cannot blast genes. Error is {e}");
                                 return ExitCode::FAILURE;
@@ -1239,11 +1295,11 @@ fn askforsubmission(
     let val = val.trim().to_ascii_lowercase();
     if val == "y" {
         let mut blastmatch: Vec<Blastmatch> = Vec::new();
-        for (_, data) in infos {
+        for (_, data) in infos.iter() {
             blastmatch.append(&mut data.clone());
         }
-        submit(&args, locus, &blastmatch, realspecies.to_string())
-            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, format!("{}", f)))?;
+        submit(args, locus, &blastmatch, realspecies.to_string())
+            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
     } else {
         println!("Your sequences won't be submitted.");
         return Ok(());
@@ -1365,10 +1421,7 @@ fn checkandcorrectgenelistduplicate(genes: &mut Vec<GeneInfos>) {
                     .trim()
                     .to_string()
             } else {
-                format!("{}", name.gene)
-                    .replace(",", "_")
-                    .trim()
-                    .to_string()
+                name.gene.to_string().replace(",", "_").trim().to_string()
             };
             name.chromosome = name.chromosome.replace(",", "_").trim().to_string()
         }
@@ -1559,9 +1612,10 @@ fn genelist(
             })
         };
         let text = String::from(text.trim_end_matches('-'));
-        let plots = outputdir
-            .join(format!("gene_{}", args.species))
-            .join(loci.haplotype.to_string().as_str().to_lowercase());
+        let plots = outputdir.join(format!(
+            "gene_{}",
+            loci.haplotype.to_string().as_str().to_lowercase()
+        ));
         if !std::fs::exists(&plots)? {
             println!("Creating the folder {}", plots.display());
             std::fs::create_dir_all(&plots)?;

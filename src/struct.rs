@@ -1,5 +1,7 @@
 use bio::io::fasta::{self, FastaRead};
+use clap::builder::Str;
 use serde::ser::{SerializeTupleStruct, SerializeTupleVariant};
+use serde_with::{DefaultOnError, DefaultOnNull, DisplayFromStr, serde_as};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -10,6 +12,7 @@ use crate::submissions::{DELIMITERFASTA, getallelefromblast};
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
+use std::fmt::Write;
 use std::io::ErrorKind;
 use std::ops::RangeInclusive;
 use std::str::FromStr;
@@ -46,9 +49,9 @@ pub(crate) struct Args {
     /// Index file if not default
     #[arg(short, long)]
     pub(crate) index: Option<PathBuf>,
-    ///CSV containing locus infos. See example file for blueprint.
+    ///CSV containing locus infos. See example file for blueprint. If unset, will try all loci on both haplotypes
     #[arg(short, long)]
-    pub(crate) locuspos: PathBuf,
+    pub(crate) locuspos: Option<PathBuf>,
     /// Minimal number of reads (included) to declare a break in coverage
     #[arg(short, long, default_value_t = 3)]
     pub(crate) breaks: u32,
@@ -186,7 +189,10 @@ pub(crate) trait Alerting {
 impl Alertpos {
     fn new(record: &Posread) -> Self {
         let percent = if record.total > 0 {
-            record.r#match * 100 / record.total
+            record
+                .r#match
+                .saturating_mul(100)
+                .saturating_div(record.total)
         } else {
             0
         };
@@ -245,6 +251,13 @@ impl Serialize for Position {
         serializer.serialize_i64(self.getobasedpos())
     }
 }
+impl FromStr for Position {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Position::new(false, s.parse()?))
+    }
+}
 impl<'de> Deserialize<'de> for Position {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -256,7 +269,7 @@ impl<'de> Deserialize<'de> for Position {
             Ok(pos) => Ok(Position::new(false, pos)),
             Err(_) => Err(de::Error::invalid_type(
                 de::Unexpected::Str(s),
-                &"expected i32",
+                &"expected i64",
             )),
         }
     }
@@ -340,25 +353,26 @@ pub(crate) struct Blast {
     #[serde(skip_deserializing)]
     pub(crate) status: Status,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Blastmatch {
     pub(crate) qseqid: String,
     pub(crate) sseqid: String,
     pub(crate) sseq: String,
     pub(crate) sstart: usize,
     pub(crate) send: usize,
+    pub(crate) complement: Strand,
     pub(crate) status: Status,
 }
 impl PartialOrd for Blastmatch {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(&other))
+        Some(self.cmp(other))
     }
 }
 impl Ord for Blastmatch {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.sseqid.cmp(&other.sseqid) {
             std::cmp::Ordering::Equal => match self.sstart.cmp(&other.sstart) {
-                std::cmp::Ordering::Equal => self.send.cmp(&other.send),
+                std::cmp::Ordering::Equal => self.send.cmp(&other.send).reverse(),
                 ord => ord,
             },
             ord => ord,
@@ -378,6 +392,7 @@ impl Blastmatch {
         sseq: String,
         sstart: usize,
         send: usize,
+        complement: Strand,
         status: Status,
     ) -> Self {
         Self {
@@ -386,6 +401,7 @@ impl Blastmatch {
             sseq,
             sstart,
             send,
+            complement,
             status,
         }
     }
@@ -402,6 +418,8 @@ impl Blast {
         }
     }
 }
+#[allow(clippy::from_over_into)]
+//Blastmatch is for matches, should not be converted
 impl Into<Blastmatch> for Blast {
     fn into(self) -> Blastmatch {
         Blastmatch::new(
@@ -410,22 +428,27 @@ impl Into<Blastmatch> for Blast {
             self.sseq,
             self.sstart,
             self.send,
+            if self.complement {
+                Strand::Minus
+            } else {
+                Strand::Plus
+            },
             self.status,
         )
     }
 }
-impl ToString for Blastmatch {
-    fn to_string(&self) -> String {
-        return format!(
-            ">{}{DELIMITERFASTA}{}:{}-{}{DELIMITERFASTA}{}\n{}",
+impl Display for Blastmatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            ">{}{DELIMITERFASTA}{}:{}-{}-{}{DELIMITERFASTA}{}\n{}",
             self.qseqid,
             self.sseqid,
             self.sstart,
             self.send,
-            self.status.to_string(),
+            self.complement,
+            self.status,
             self.sseq
-        )
-        .to_string();
+        ))
     }
 }
 impl FromStr for Blastmatch {
@@ -443,41 +466,44 @@ impl FromStr for Blastmatch {
         if !seq.chars().all(|p| p.is_ascii_alphabetic()) {
             return Err("Absence of ASCII alphabetic in sequence: {s}".to_string());
         }
-        let (qseqid, sseqid, sstart, send, status) = match split1.splitn(3, DELIMITERFASTA) {
-            mut a if a.clone().count() == 3 => {
-                let (name, infos, status) =
-                    (a.next().unwrap(), a.next().unwrap(), a.next().unwrap());
-                let status = if let Ok(a) = Status::try_from(status) {
-                    a
-                } else {
-                    return Err("Invalid status in header: {s}".to_string());
-                };
-                let (sseqid, sstart, send) = if let Some((a, b, c)) =
-                    infos.split_once(':').and_then(|p| {
-                        if let Some((a, b)) = p.1.split_once('-') {
-                            let (start, end) = match (a.parse::<usize>(), b.parse::<usize>()) {
-                                (Ok(b), Ok(c)) => (b, c),
-                                _ => return None,
-                            };
-                            Some((p.0, start, end))
-                        } else {
-                            None
-                        }
-                    }) {
-                    (a, b, c)
-                } else {
-                    return Err("Invalid header in sequence header: {s}".to_string());
-                };
-                (name.to_string(), sseqid, sstart, send, status)
-            }
-            _ => return Err("Lacking info in sequence header: {s}".to_string()),
-        };
+        let (qseqid, sseqid, sstart, send, complement, status) =
+            match split1.splitn(3, DELIMITERFASTA) {
+                mut a if a.clone().count() == 3 => {
+                    let (name, infos, status) =
+                        (a.next().unwrap(), a.next().unwrap(), a.next().unwrap());
+                    let status = if let Ok(a) = Status::try_from(status) {
+                        a
+                    } else {
+                        return Err("Invalid status in header: {s}".to_string());
+                    };
+                    let (sseqid, sstart, send, complement) = if let Some((a, b, c)) =
+                        infos.split_once(':').and_then(|p| {
+                            if let Some((a, b)) = p.1.split_once('-') {
+                                let (start, end) = match (a.parse::<usize>(), b.parse::<usize>()) {
+                                    (Ok(b), Ok(c)) => (b, c),
+                                    _ => return None,
+                                };
+                                Some((p.0, start, end))
+                            } else {
+                                None
+                            }
+                        }) {
+                        let d = if b > c { Strand::Minus } else { Strand::Plus };
+                        (a, b, c, d)
+                    } else {
+                        return Err("Invalid header in sequence header: {s}".to_string());
+                    };
+                    (name.to_string(), sseqid, sstart, send, complement, status)
+                }
+                _ => return Err("Lacking info in sequence header: {s}".to_string()),
+            };
         Ok(Self {
             qseqid: qseqid.to_string(),
             sseqid: sseqid.to_string(),
             sseq: seq.to_string(),
             sstart,
             send,
+            complement,
             status,
         })
     }
@@ -498,6 +524,10 @@ pub trait Blastcalc {
     /// get subject
     fn getsubject(&self) -> &str;
     fn getpos(&self) -> (usize, usize);
+    fn getposrange(&self) -> RangeInclusive<usize> {
+        let r = self.getpos();
+        r.0..=r.1
+    }
     fn getstrand(&self) -> Strand {
         match self.getpos() {
             (a, b) if a > b => Strand::Minus,
@@ -697,6 +727,14 @@ pub(crate) enum Status {
     Equal,
     New,
 }
+impl Serialize for Status {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_serialize())
+    }
+}
 impl Status {
     pub(crate) fn to_serialize(&self) -> Cow<'_, str> {
         Cow::Owned(match self {
@@ -706,9 +744,9 @@ impl Status {
         })
     }
 }
-impl ToString for Status {
-    fn to_string(&self) -> String {
-        return format!("{}", self.to_serialize()).to_string();
+impl Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("{}", self.to_serialize()))
     }
 }
 impl Newfasta {
@@ -829,10 +867,22 @@ impl Display for Locus {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, EnumIter)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, PartialOrd, Ord, Hash, EnumIter)]
 pub(crate) enum Haplotype {
+    #[default]
     Primary,
     Alternate,
+}
+impl FromStr for Haplotype {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "primary" | "pri" | "p" => Ok(Haplotype::Primary),
+            "alternate" | "alt" | "a" => Ok(Haplotype::Alternate),
+            _ => Err("Invalid haplotype".to_string()),
+        }
+    }
 }
 impl<'de> Deserialize<'de> for Haplotype {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -840,15 +890,9 @@ impl<'de> Deserialize<'de> for Haplotype {
         D: de::Deserializer<'de>,
     {
         let s: &str = de::Deserialize::deserialize(deserializer)?;
-
-        match s.to_lowercase().as_str() {
-            "primary" | "pri" | "p" => Ok(Haplotype::Primary),
-            "alternate" | "alt" | "a" => Ok(Haplotype::Alternate),
-            _ => Err(de::Error::unknown_variant(
-                s,
-                &["primary or pri or p", "alternate or alt or a"],
-            )),
-        }
+        Haplotype::from_str(s).map_err(|_| {
+            de::Error::unknown_variant(s, &["primary or pri or p", "alternate or alt or a"])
+        })
     }
 }
 impl Serialize for Haplotype {
@@ -939,7 +983,7 @@ impl GeneInfos {
         let length = endpos.saturating_sub(startpos).saturating_add(1);
         let mut cap = Vec::with_capacity(length.try_into().unwrap_or(0));
         fasta.read(&mut cap)?;
-        return String::from_utf8(cap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        String::from_utf8(cap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 impl LocusInfos {
@@ -1118,15 +1162,21 @@ impl GeneInfosFinish {
         Self::new(gene, 0, 0, None, 0, 0, 0.0, 0, false)
     }
 }
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct FakeLocusinfo {
     pub(crate) locus: Locus,
-    pub(crate) haplotype: Haplotype,
-    #[serde(deserialize_with = "csv::invalid_option")]
+    #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    #[serde(default)]
+    pub(crate) haplotype: Option<Haplotype>,
+    #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    #[serde(default)]
     pub(crate) contig: Option<String>,
-    #[serde(deserialize_with = "csv::invalid_option")]
+    //#[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    #[serde(default)]
     pub(crate) start: Option<Position>,
-    #[serde(deserialize_with = "csv::invalid_option")]
+    //#[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    #[serde(default)]
     pub(crate) end: Option<Position>,
     #[serde(skip)]
     pub(crate) complement: Strand,
@@ -1135,7 +1185,7 @@ impl From<LocusInfos> for FakeLocusinfo {
     fn from(value: LocusInfos) -> Self {
         FakeLocusinfo {
             locus: value.locus,
-            haplotype: value.haplotype,
+            haplotype: Some(value.haplotype),
             contig: Some(value.contig),
             start: Some(value.start),
             end: Some(value.end),
@@ -1144,11 +1194,28 @@ impl From<LocusInfos> for FakeLocusinfo {
     }
 }
 impl FakeLocusinfo {
+    pub(crate) fn new(
+        locus: Locus,
+        haplotype: Option<Haplotype>,
+        contig: Option<String>,
+        start: Option<Position>,
+        end: Option<Position>,
+        complement: Option<Strand>,
+    ) -> Self {
+        FakeLocusinfo {
+            locus,
+            haplotype,
+            contig,
+            start,
+            end,
+            complement: complement.unwrap_or_default(),
+        }
+    }
     pub(crate) fn intoloc(self) -> io::Result<LocusInfos> {
         match (self.contig, self.start, self.end) {
             (Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(LocusInfos::new(
                 self.locus,
-                self.haplotype,
+                self.haplotype.unwrap_or_default(),
                 a,
                 b,
                 c,

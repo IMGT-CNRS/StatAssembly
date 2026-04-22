@@ -4,7 +4,7 @@ description = "Assess quality of assemblies and allele confidence on IG and TR l
 version = "3.0.0"
 edition = "2024"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>"]
-rust-version = "1.85"
+rust-version = "1.92"
 license-file = "LICENSE.txt"
 keywords = ["immunogenetics", "reads", "assembly quality"]
 publish = false
@@ -36,5 +36,6 @@ tar = "0.4.44"
 webbrowser = "1.0.6"
 strum = { version = "0.27.2", features = ["strum_macros"] }
 strum_macros = "0.27.2"
+serde_with = "3.17.0"
 [lints.rust]
 unsafe_code = "deny"
