@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::fmt::Write;
 use std::io::ErrorKind;
-use std::ops::RangeInclusive;
+use std::ops::{Neg, Not, RangeInclusive};
 use std::str::FromStr;
 use std::{
     borrow::Cow,
@@ -413,7 +413,7 @@ impl Blast {
     pub(crate) fn setstatus(&mut self) {
         match (self.pident, self.qlen, self.length) {
             (100.0, a, b) if a == b => self.status = Status::Equal,
-            (100.0, ..) => self.status = Status::Shorter,
+            (100.0, a, b) if b < a => self.status = Status::Shorter,
             _ => self.status = Status::New,
         }
     }
@@ -987,6 +987,57 @@ impl GeneInfos {
     }
 }
 impl LocusInfos {
+    pub(crate) fn positioninlocus(
+        &self,
+        start: &Position,
+        end: &Position,
+        complement: &Strand,
+    ) -> Option<(Position, Position, Strand)> {
+        if start > end || end.length(start) > self.getlength() {
+            return None;
+        }
+        if self.complement == Strand::Minus {
+            let newend = self
+                .end
+                .getobasedpos()
+                .try_into()
+                .unwrap_or(u32::MIN)
+                .saturating_sub(self.getlength().try_into().unwrap_or_default())
+                .saturating_add(end.getobasedpos().try_into().unwrap_or_default());
+            let newstart = self
+                .end
+                .getobasedpos()
+                .try_into()
+                .unwrap_or(u32::MIN)
+                .saturating_sub(self.getlength().try_into().unwrap_or_default())
+                .saturating_add(start.getobasedpos().try_into().unwrap_or_default());
+            let complement = !complement.clone();
+            Some((
+                Position::new(false, newstart.into()),
+                Position::new(false, newend.into()),
+                complement,
+            ))
+        } else {
+            let newstart = self
+                .start
+                .getobasedpos()
+                .try_into()
+                .unwrap_or(u32::MIN)
+                .saturating_add(start.getobasedpos().try_into().unwrap_or_default());
+            let newend = self
+                .start
+                .getobasedpos()
+                .try_into()
+                .unwrap_or(u32::MIN)
+                .saturating_add(end.getobasedpos().try_into().unwrap_or_default());
+            let complement = complement.clone();
+            Some((
+                Position::new(false, newstart.into()),
+                Position::new(false, newend.into()),
+                complement,
+            ))
+        }
+    }
     pub(crate) fn extractsequence(
         &self,
         fasta: &mut fasta::IndexedReader<File>,
@@ -998,7 +1049,7 @@ impl LocusInfos {
             end: self.end,
             strand: self.complement.clone(),
         };
-        return fake.extractsequence(fasta);
+        fake.extractsequence(fasta)
     }
 }
 impl PartialEq for GeneInfos {
@@ -1041,6 +1092,16 @@ impl Strand {
     }
     pub(crate) fn isfwd(&self) -> bool {
         self == &Strand::Plus
+    }
+}
+impl Not for Strand {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Strand::Plus => Strand::Minus,
+            Strand::Minus => Strand::Plus,
+        }
     }
 }
 impl<'de> Deserialize<'de> for Strand {

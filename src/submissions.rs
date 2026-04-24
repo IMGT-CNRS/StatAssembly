@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::fmt::Debug;
 use std::ops::{BitAnd, BitOr, BitXor};
 use std::str::FromStr;
+use std::thread::yield_now;
 use std::{
     borrow::Cow,
     env::{self, current_dir, temp_dir},
@@ -49,7 +51,7 @@ lazy_static! {
         "/statassembly/downloadmotif.txt"
     ); */
     pub static ref MOTIFLINK: String = format!(
-        "http://localhost/StatAssembly/newmotif_fusionne.txt"
+        "http://localhost:25000/StatAssembly/newmotif_fusionne.txt"
     );
     pub static ref VQUESTLINK: String = format!(
         "{}{}",
@@ -62,7 +64,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DELIMITERFASTA: char = '/';
 pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 
-#[must_use]
 pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
     match request.get(url).send() {
         Ok(e) => {
@@ -132,10 +133,10 @@ pub(crate) fn checkifblastpresent() -> bool {
         .is_ok_and(|f| f.success());
     if !command {
         eprintln!("BLAST was not found. Check if present in PATH.");
-        return false;
+        false
     } else {
         println!("BLAST is working. Continuing");
-        return true;
+        true
     }
 }
 pub(crate) fn downloadmotifs() -> Option<PathBuf> {
@@ -283,6 +284,7 @@ pub(crate) fn speciesandorphonfiltering(
     }
     println!("Filtering based on species {}.", species);
     let file = std::fs::read_to_string(tempfile)?;
+    let file = file.replace(" ", "_");
     let info = fastafilter(&file, species, true, true).replace(" ", "_");
     let info = if orphonfilter {
         println!("Orphon filtering");
@@ -402,6 +404,17 @@ pub(crate) fn selectnewalleles(result: &[Blast]) -> Vec<Ourfasta> {
         fastas.push(name);
     }
     fastas
+}
+pub(crate) fn statusblastmotifs(data: &mut Vec<Blast>) {
+    data.sort_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
+        std::cmp::Ordering::Equal => a.qseqid.cmp(&b.qseqid),
+        ord => ord,
+    });
+    let mut other = Vec::new();
+    data.clone_into(&mut other);
+    for blastresult in data {
+        blastresult.setstatus();
+    }
 }
 pub(crate) fn statusblastvs(data: &mut Vec<Blast>) {
     data.sort_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
@@ -589,6 +602,7 @@ where
     .into_iter()
     .collect();
     //Filter by locus
+    fs::write("blastbefore.txt", format!("{:#?}", blast));
     retainbestmatch(&mut blast);
     if let Some(a) = locus {
         locusfiltering(a, &mut blast);
@@ -598,7 +612,9 @@ where
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
         }
     });
-    statusblastvs(&mut blast);
+    fs::write("blastafter.txt", format!("{:#?}", blast));
+    statusblastmotifs(&mut blast);
+    fs::write("final.txt", format!("{:#?}", blast));
     //let _ = fs::remove_file(name);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
@@ -762,12 +778,12 @@ where
 }
 pub(crate) fn filter_new_alleles<'a, T>(data: &'a [T], motifs: &[T]) -> impl Iterator<Item = &'a T>
 where
-    T: Blastcalc,
+    T: Blastcalc + Debug,
 {
     data.iter().filter(|p| p.onlynewalleles()).filter(move |f| {
         motifs.iter().any(|p| {
-            checkoverlap(&p.getposrange(), &f.getposrange())
-                && p.getstatus() == &Status::New
+            p.getsubject().contains(f.getsubject())
+                && checkoverlap(&p.getposrange(), &f.getposrange())
                 && p.getposrange() != f.getposrange()
         })
     })
@@ -791,8 +807,8 @@ where
     }
     let reference = &format!("{}", reference.display()).replace(" ", "_");
     let subject = &format!("{}", subject.display()).replace(" ", "_");
-    let output = Path::join(&env::temp_dir(), "blast.txt");
-    let output = &format!("{}", output.display());
+    let output = NamedTempFile::new()?;
+    let output = &format!("{}", output.path().display());
     let command = Command::new("blastn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -849,7 +865,7 @@ where
             }
         };
     };
-    let _ = fs::remove_file(output);
+    //let _ = fs::remove_file(output);
     Ok(result)
 }
 pub(crate) fn getspeciesfromncbi<T>(
@@ -1017,7 +1033,7 @@ pub(crate) fn submit(
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = dir.join("sequence.fasta");
-    let mut fastawriter = fasta::Writer::to_file(sequencefile).map_err(|f| format!("{f}"))?;
+    let mut fastawriter = fasta::Writer::to_file(&sequencefile).map_err(|f| format!("{f}"))?;
     for list in locus.iter() {
         let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
             None => return Err("No assembly provided.".to_string()),
@@ -1029,10 +1045,10 @@ pub(crate) fn submit(
             .map_err(|f| format!("{f}"))?;
         fastawriter
             .write(
-                &format!("{}", list.locus),
+                &format!("{}:{}", list.locus, list.contig),
                 Some(&format!(
                     "{}:{}-{}/{}/{}",
-                    list.contig,
+                    list.locus,
                     list.start.getobasedpos(),
                     list.end.getobasedpos(),
                     list.complement,
@@ -1047,8 +1063,26 @@ pub(crate) fn submit(
                 )
             })?;
     }
-    let motifs = matchmotif(&dir.join("sequence.fasta"), &realspecies, None)
+    let mut motifs = matchmotif(&sequencefile, &realspecies, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
+    fs::write("firstmotif.txt", format!("{:#?}", motifs));
+    motifs.iter_mut().for_each(|p| {
+        if let Some(find) = locus
+            .iter()
+            .find(|k| format!("{}:{}", k.locus, k.contig) == p.sseqid)
+            && let Some((newstart, newend, newcomplement)) = find.positioninlocus(
+                &Position::new(false, p.sstart.try_into().unwrap_or_default()),
+                &Position::new(false, p.send.try_into().unwrap_or_default()),
+                &p.complement,
+            )
+        {
+            p.sstart = newstart.getobasedpos().try_into().unwrap_or_default();
+            p.send = newend.getobasedpos().try_into().unwrap_or_default();
+            p.complement = newcomplement;
+        }
+    });
+    fs::write("secondmotif.txt", format!("{:#?}", motifs));
+    fs::write("secondmotif2.txt", format!("{:#?}", c));
     let file = dir.join("newalleles.fasta");
     let sequence = filter_new_alleles(c, &motifs).fold(String::new(), |mut acc, f| {
         let f: &dyn Seqresult = f;
@@ -1056,6 +1090,7 @@ pub(crate) fn submit(
         acc
     });
     if sequence.trim().is_empty() {
+        yield_now();
         eprintln!("No new alleles found, exiting submission.");
         return Ok(());
     }
@@ -1087,7 +1122,7 @@ pub(crate) fn browseropening() -> io::Result<()> {
     Ok(())
 }
 pub(crate) fn createarchive(dir: &Path) -> io::Result<NamedTempFile> {
-    let temp = tempfile::NamedTempFile::with_suffix("submission.tar.gz")?;
+    let temp = tempfile::NamedTempFile::with_suffix_in(dir, "submission.tar.gz")?;
     let file = File::create(&temp)?;
     let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);

@@ -1235,11 +1235,11 @@ fn main() -> ExitCode {
         println!("Locus {} is done!", &floci.locus);
     }
     let mergedloci: Vec<LocusInfos> = grouped.iter().flatten().cloned().collect();
-    if let Some(light) = &args.outlightbam {
-        if let Err(e) = generatelightbam(&args, &light, &mergedloci) {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
+    if let Some(light) = &args.outlightbam
+        && let Err(e) = generatelightbam(&args, light, &mergedloci)
+    {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
     }
     if !args.nosubmit
         && locushashresult
@@ -2340,7 +2340,7 @@ where
     ) + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
-    let tenlines = loci.getlength() / 10;
+    let tenlines = loci.getlength() / 9;
     let colorgene = if locusisokay(mean, pos) {
         full_palette::GREEN
     } else {
