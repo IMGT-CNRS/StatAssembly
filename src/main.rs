@@ -27,9 +27,10 @@ use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, SUBMISSIONLINK, checkifblastpresent, downloadmotifs, genesblast,
-    getallelefromblast, getnamefromblast, getspeciesfromncbi, locusallposition, locusfiltering,
-    locuspos, matchmotif, positionfiltering, preparesubmission, retainbestmatch, submit,
+    REQUESTCLIENT, SUBMISSIONLINK, askforsubmission, checkifblastpresent, downloadmotifs,
+    generatelightbam, genesblast, getallelefromblast, getnamefromblast, getspeciesfromncbi,
+    locusallposition, locusfiltering, locuspos, matchmotif, positionfiltering, preparesubmission,
+    retainbestmatch, submit,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -882,12 +883,13 @@ fn main() -> ExitCode {
                 .is_err()
             {
                 eprintln!(
-                    "The region {}:{}-{} cannot be found, exiting.",
+                    "The region {}:{}-{} cannot be found, skipped.",
                     loci.contig,
                     loci.start.getobasedpos(),
                     loci.end.getobasedpos()
                 );
-                return ExitCode::FAILURE;
+                continue;
+                //return ExitCode::FAILURE;
             };
             let mut nocount = true;
             //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
@@ -966,12 +968,13 @@ fn main() -> ExitCode {
             }
             if nocount {
                 eprintln!(
-                    "The region {}:{}-{} cannot be found, exiting.",
+                    "The region {}:{}-{} has no data, skipped.",
                     loci.contig,
                     loci.start.getobasedpos(),
                     loci.end.getobasedpos()
                 );
-                return ExitCode::FAILURE;
+                continue;
+                //return ExitCode::FAILURE;
             }
             //Quality and mismatch is the sum of reads so dividing to get real results
             pos.iter_mut().for_each(|(_, p)| {
@@ -1116,7 +1119,8 @@ fn main() -> ExitCode {
                     })
                     .collect();
                 locushashresult.insert(loci.locus.clone(), element);
-            } else if args.geneloc.is_some() {
+            }
+            if args.geneloc.is_some() {
                 println!("Gene list starting!");
                 match genelist(loci, &args, false) {
                     Err(e) => {
@@ -1127,6 +1131,7 @@ fn main() -> ExitCode {
                         eprintln!("No gene list for locus {}. Skipped.", loci.locus);
                     }
                     Ok(b) => {
+                        println!("Blasting gene list");
                         if args.assembly.as_ref().is_some() && !args.nosubmit {
                             let geneinfo: Vec<GeneInfos> =
                                 b.iter().map(|f| f.clone().into()).collect();
@@ -1252,100 +1257,12 @@ fn main() -> ExitCode {
         }
     }
     println!(
-        "{} done sucessfully in {:.3} seconds.",
+        "{} done sucessfully in {:.3} seconds. Output files are present in {}.",
         NAME.as_str(),
-        firstinstant.elapsed().as_secs_f32()
+        firstinstant.elapsed().as_secs_f32(),
+        args.outdir.display()
     );
     ExitCode::SUCCESS
-}
-fn askforsubmission(
-    realspecies: &str,
-    locus: &[LocusInfos],
-    args: &Args,
-    infos: &HashMap<Locus, Vec<Blastmatch>>,
-) -> io::Result<()> {
-    let quest = REQUESTCLIENT.get(SUBMISSIONLINK.as_str());
-    match quest.send() {
-        Ok(p) if p.status().is_success() => (),
-        Ok(p) if p.status().is_client_error() => {
-            return Err(io::Error::new(
-                io::ErrorKind::NetworkUnreachable,
-                format!("IMGT does not currently support submissions."),
-            ));
-        }
-        Ok(p) => {
-            return Err(io::Error::new(
-                io::ErrorKind::NetworkUnreachable,
-                format!(
-                    "Unable to contact IMGT servers at the moment. Please retry later. Error is {}",
-                    p.status().canonical_reason().unwrap_or_default()
-                ),
-            ));
-        }
-        Err(e) => {
-            return Err(io::Error::new(
-                io::ErrorKind::NetworkUnreachable,
-                format!("Unable to contact IMGT servers. Error is {}", e),
-            ));
-        }
-    };
-    println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
-    let mut val = String::new();
-    let _ = io::stdin().read_line(&mut val);
-    let val = val.trim().to_ascii_lowercase();
-    if val == "y" {
-        let mut blastmatch: Vec<Blastmatch> = Vec::new();
-        for (_, data) in infos.iter() {
-            blastmatch.append(&mut data.clone());
-        }
-        submit(args, locus, &blastmatch, realspecies.to_string())
-            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
-    } else {
-        println!("Your sequences won't be submitted.");
-        return Ok(());
-    }
-    Ok(())
-}
-fn generatelightbam(args: &Args, light: &Path, locus: &[LocusInfos]) -> Result<(), String> {
-    println!("Generating small BAM for submission");
-    let bam = if let Ok(r) = getreaderoffile(&args) {
-        r
-    } else {
-        return Err("Cannot access BAM file for light bam.".to_string());
-    };
-    let mut writer = if let Ok(files) = bam::Writer::from_path(
-        &light,
-        &bam::Header::from_template(bam.header()),
-        bam::Format::Bam,
-    ) {
-        files
-    } else {
-        let file = light.display();
-        return Err(format!("Cannot create file {file} for light bam."));
-    };
-    for f in locus.iter() {
-        let mut bam = if let Ok(r) = getreaderoffile(&args) {
-            r
-        } else {
-            return Err(format!("Cannot access BAM file for light bam."));
-        };
-        if bam
-            .fetch((
-                f.contig.as_bytes(),
-                f.start.getzbasedpos(),
-                f.end.getzbasedpos().saturating_add(1),
-            ))
-            .is_err()
-        {
-            return Err(format!("Cannot read BAM file region for light bam."));
-        }
-        for read in bam.rc_records().filter_map(Result::ok) {
-            if writer.write(&read).is_err() {
-                return Err(format!("Cannot read BAM file region for light bam."));
-            };
-        }
-    }
-    return Ok(());
 }
 fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
     let geneloc = match &args.geneloc {

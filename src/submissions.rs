@@ -1,6 +1,7 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 use bio::io::fasta;
+use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -18,7 +19,7 @@ use std::{
     env::{self, current_dir, temp_dir},
     error::Error,
     fs::{self, File},
-    io::{self, BufRead, BufReader, ErrorKind, Read, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Read as _, Write},
     ops::{Not, Range, RangeInclusive},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -31,7 +32,7 @@ use crate::r#struct::{
     Args, Blast, Blastcalc, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Newfasta,
     Ourfasta, Position, Seqresult, Status, Strand,
 };
-use crate::{BORNES, generatelightbam, getassemblyreader, getreaderoffile};
+use crate::{BORNES, getassemblyreader, getreaderoffile};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(15, 0))
@@ -51,7 +52,7 @@ lazy_static! {
         "/statassembly/downloadmotif.txt"
     ); */
     pub static ref MOTIFLINK: String = format!(
-        "http://localhost:25000/StatAssembly/newmotif_fusionne.txt"
+        "http://localhost/StatAssembly/newmotif_fusionne.txt"
     );
     pub static ref VQUESTLINK: String = format!(
         "{}{}",
@@ -284,7 +285,6 @@ pub(crate) fn speciesandorphonfiltering(
     }
     println!("Filtering based on species {}.", species);
     let file = std::fs::read_to_string(tempfile)?;
-    let file = file.replace(" ", "_");
     let info = fastafilter(&file, species, true, true).replace(" ", "_");
     let info = if orphonfilter {
         println!("Orphon filtering");
@@ -523,7 +523,6 @@ pub(crate) fn find_global_best_range(blastcheck: &[Blastmatch]) -> Option<Vec<Lo
                 },
                 ord => ord,
             });
-    fs::write(Path::join(&temp_dir(), "out.txt"), format!("{:#?}", real));
     for ((loci, sseq, _), blast) in real {
         if !groups.contains_key(&(loci.clone(), Haplotype::Primary)) {
             let (min, max) = match (blast.first(), blast.last()) {
@@ -602,7 +601,6 @@ where
     .into_iter()
     .collect();
     //Filter by locus
-    fs::write("blastbefore.txt", format!("{:#?}", blast));
     retainbestmatch(&mut blast);
     if let Some(a) = locus {
         locusfiltering(a, &mut blast);
@@ -612,9 +610,7 @@ where
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
         }
     });
-    fs::write("blastafter.txt", format!("{:#?}", blast));
     statusblastmotifs(&mut blast);
-    fs::write("final.txt", format!("{:#?}", blast));
     //let _ = fs::remove_file(name);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
@@ -1014,7 +1010,7 @@ pub(crate) fn submit(
         Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
         Some(Ok(b)) => b,
     };
-    let locuspos =
+    /* let locuspos =
         File::create(dir.join("newloc.csv")).map_err(|f| format!("Locus csv, error is {f}"))?;
     locuspos
         .lock()
@@ -1029,7 +1025,7 @@ pub(crate) fn submit(
             .map_err(|p| format!("Error serializing locus position: {p}"))?;
     }
     csv.flush()
-        .map_err(|p| format!("Error serializing locus position: {p}"))?;
+        .map_err(|p| format!("Error serializing locus position: {p}"))?; */
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = dir.join("sequence.fasta");
@@ -1042,7 +1038,7 @@ pub(crate) fn submit(
         };
         let seq = list
             .extractsequence(&mut assembly)
-            .map_err(|f| format!("{f}"))?;
+            .unwrap_or("Sequence is unavailable".to_string());
         fastawriter
             .write(
                 &format!("{}:{}", list.locus, list.contig),
@@ -1065,7 +1061,6 @@ pub(crate) fn submit(
     }
     let mut motifs = matchmotif(&sequencefile, &realspecies, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
-    fs::write("firstmotif.txt", format!("{:#?}", motifs));
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
             .iter()
@@ -1081,8 +1076,6 @@ pub(crate) fn submit(
             p.complement = newcomplement;
         }
     });
-    fs::write("secondmotif.txt", format!("{:#?}", motifs));
-    fs::write("secondmotif2.txt", format!("{:#?}", c));
     let file = dir.join("newalleles.fasta");
     let sequence = filter_new_alleles(c, &motifs).fold(String::new(), |mut acc, f| {
         let f: &dyn Seqresult = f;
@@ -1090,20 +1083,123 @@ pub(crate) fn submit(
         acc
     });
     if sequence.trim().is_empty() {
-        yield_now();
-        eprintln!("No new alleles found, exiting submission.");
-        return Ok(());
+        eprintln!(
+            "No new alleles found. IMGT can still process your data, do you want to continue (Y/n):"
+        );
+        let mut val = String::new();
+        let _ = io::stdin().read_line(&mut val);
+        let val = val.trim().to_ascii_lowercase();
+        if val != "y" {
+            println!("Exiting");
+            return Ok(());
+        }
     }
     if let Err(e) = fs::write(file, sequence) {
         eprintln!("An error has occured while priting sequence: {e}.");
         return Ok(());
     }
-    println!("BLAST results was added.");
+    println!("BLAST results were added.");
     browseropening().map_err(|f| f.to_string())?;
-    preparesubmission(dir, realspecies);
+    preparesubmission(dir, realspecies, args);
     //let _ = fs::remove_dir_all(dir);
     Ok(())
     //form(&client);
+}
+pub(crate) fn askforsubmission(
+    realspecies: &str,
+    locus: &[LocusInfos],
+    args: &Args,
+    infos: &HashMap<Locus, Vec<Blastmatch>>,
+) -> io::Result<()> {
+    let quest = REQUESTCLIENT
+        .get(SUBMISSIONLINK.as_str())
+        .query(&[("ping", "1")]);
+    match quest.send() {
+        Ok(p) if p.status().is_success() => (),
+        Ok(p) if p.status().is_client_error() => {
+            /* return Err(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                "IMGT does not currently support automatic submissions.".to_string(),
+            )); */
+            return Ok(());
+        }
+        Ok(p) => {
+            return Err(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!(
+                    "Unable to contact IMGT servers at the moment. Please retry later. Error is {}",
+                    p.status().canonical_reason().unwrap_or_default()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(io::Error::new(
+                io::ErrorKind::NetworkUnreachable,
+                format!("Unable to contact IMGT servers. Error is {}", e),
+            ));
+        }
+    };
+    println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
+    let mut val = String::new();
+    let _ = io::stdin().read_line(&mut val);
+    let val = val.trim().to_ascii_lowercase();
+    if val == "y" {
+        let mut blastmatch: Vec<Blastmatch> = Vec::new();
+        for (_, data) in infos.iter() {
+            blastmatch.append(&mut data.clone());
+        }
+        submit(args, locus, &blastmatch, realspecies.to_string())
+            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
+    } else {
+        println!("Your sequences won't be submitted.");
+        return Ok(());
+    }
+    Ok(())
+}
+pub(crate) fn generatelightbam(
+    args: &Args,
+    light: &Path,
+    locus: &[LocusInfos],
+) -> Result<(), String> {
+    println!("Generating small BAM for submission");
+    let bam = if let Ok(r) = getreaderoffile(&args) {
+        r
+    } else {
+        return Err("Cannot access BAM file for light bam.".to_string());
+    };
+    let mut writer = if let Ok(files) = bam::Writer::from_path(
+        &light,
+        &bam::Header::from_template(bam.header()),
+        bam::Format::Bam,
+    ) {
+        files
+    } else {
+        let file = light.display();
+        return Err(format!("Cannot create file {file} for light bam."));
+    };
+    for f in locus.iter() {
+        let mut bam = if let Ok(r) = getreaderoffile(&args) {
+            r
+        } else {
+            return Err(format!("Cannot access BAM file for light bam."));
+        };
+        if bam
+            .fetch((
+                f.contig.as_bytes(),
+                f.start.getzbasedpos(),
+                f.end.getzbasedpos().saturating_add(1),
+            ))
+            .is_err()
+        {
+            return Err(format!("Cannot read BAM file region for light bam."));
+        }
+        for read in bam.rc_records().filter_map(Result::ok) {
+            if writer.write(&read).is_err() {
+                return Err(format!("Cannot read BAM file region for light bam."));
+            };
+        }
+    }
+    return Ok(());
 }
 pub(crate) fn browseropening() -> io::Result<()> {
     let link = SUBMISSIONLINK.as_str();
@@ -1121,22 +1217,16 @@ pub(crate) fn browseropening() -> io::Result<()> {
     }
     Ok(())
 }
-pub(crate) fn createarchive(dir: &Path) -> io::Result<NamedTempFile> {
-    let temp = tempfile::NamedTempFile::with_suffix_in(dir, "submission.tar.gz")?;
+pub(crate) fn createarchive(args: &Args) -> io::Result<NamedTempFile> {
+    let temp = tempfile::NamedTempFile::with_suffix("submission.tar.gz")?;
     let file = File::create(&temp)?;
     let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);
-    tar.append_dir_all(
-        "",
-        dir.file_name()
-            .map(|f| f.to_str())
-            .unwrap_or_default()
-            .unwrap_or_default(),
-    )?;
+    tar.append_dir_all(".", &args.outdir)?;
     tar.finish()?;
     Ok(temp)
 }
-pub(crate) fn preparesubmission(path: &Path, species: String) -> bool {
+pub(crate) fn preparesubmission(path: &Path, species: String, args: &Args) -> bool {
     println!("Please give the token provided by the submission. Type (e) to exit.");
     let token = loop {
         let mut block = io::stdin().lock().take(100);
@@ -1164,13 +1254,14 @@ pub(crate) fn preparesubmission(path: &Path, species: String) -> bool {
     let _ = io::stdin().read_line(&mut val);
     let val = val.trim().to_ascii_lowercase();
     if val == "y" {
-        let archive = match createarchive(path) {
+        let archive = match createarchive(args) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Error filling archive: {e}");
                 return false;
             }
         };
+        std::thread::sleep(Duration::new(10, 0));
         if let Err(e) = submission(&token, species, archive) {
             eprintln!("An error has occured during submission: {e}. Please retry later.");
             return false;
