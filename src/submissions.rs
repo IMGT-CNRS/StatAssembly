@@ -11,6 +11,7 @@ use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Debug;
+use std::io::IsTerminal;
 use std::ops::{BitAnd, BitOr, BitXor};
 use std::str::FromStr;
 use std::thread::yield_now;
@@ -43,23 +44,23 @@ lazy_static! {
         .https_only(true)
         .build()
         .unwrap_or_default();
-    pub static ref WEBSERVER: String = "https://imgt.org".to_string();
+    pub static ref WEBSERVER: String = obfstr::obfstring!("https://imgt.org");
     pub static ref RELEASELINK: String =
-        format!("{}{}", WEBSERVER.as_str(), "/download/GENE-DB/RELEASE");
+        format!("{}{}", WEBSERVER.as_str(), obfstr::obfstr!("/download/GENE-DB/RELEASE"));
     /* pub static ref MOTIFLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
         "/statassembly/downloadmotif.txt"
     ); */
-    pub static ref MOTIFLINK: String = format!(
+    pub static ref MOTIFLINK: String = obfstr::obfstring!(
         "http://localhost/StatAssembly/newmotif_fusionne.txt"
     );
-    pub static ref VQUESTLINK: String = format!(
-        "{}{}",
+    pub static ref VQUESTLINK: String =
+        format!("{}{}",
         WEBSERVER.as_str(),
-        "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
+        obfstr::obfstring!("/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP")
     );
-    pub static ref SUBMISSIONLINK: String = format!("{}{}", WEBSERVER.as_str(), "/submissions/");
+    pub static ref SUBMISSIONLINK: String = format!("{}{}", WEBSERVER.as_str(), obfstr::obfstring!("/submissions/"));
 }
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DELIMITERFASTA: char = '/';
@@ -75,6 +76,26 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
             }
         }
         Err(e) => Err(format!("Error getting URL: {e}").to_string()),
+    }
+}
+pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
+    let io = io::stdin();
+    if !io.is_terminal() {
+        return false;
+    }
+    let mut data = String::new();
+    loop {
+        data.clear();
+        if io.read_line(&mut data).is_err() {
+            return false;
+        }
+        if data.to_lowercase().trim().chars().all(|p| &p == yes) {
+            return true;
+        } else if data.to_lowercase().trim().chars().all(|p| &p == no) {
+            return false;
+        } else if !force {
+            return false;
+        }
     }
 }
 pub(crate) fn getnamefromblast(text: &str) -> Option<String> {
@@ -128,15 +149,15 @@ pub(crate) fn checkifblastpresent() -> bool {
     println!("Detect if BLAST is operating.");
     let command = Command::new("blastn")
         .arg("-version")
-        .stdout(Stdio::piped())
-        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stdin(Stdio::null())
         .status()
         .is_ok_and(|f| f.success());
     if !command {
-        eprintln!("BLAST was not found. Check if present in PATH.");
+        eprintln!("BLAST was not found or has failed. Check if present in PATH.");
         false
     } else {
-        println!("BLAST is working. Continuing");
+        println!("BLAST is working. Continuing.");
         true
     }
 }
@@ -704,6 +725,7 @@ pub(crate) fn locuspos(
 pub(crate) fn locusallposition<T>(
     subject: &Path,
     species: T,
+    args: &Args,
 ) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)>
 where
     T: AsRef<str>,
@@ -1082,14 +1104,11 @@ pub(crate) fn submit(
         acc.push_str(&format!("\n{}", f));
         acc
     });
-    if sequence.trim().is_empty() {
+    if !args.nosubmit && sequence.trim().is_empty() {
         eprintln!(
             "No new alleles found. IMGT can still process your data, do you want to continue (Y/n):"
         );
-        let mut val = String::new();
-        let _ = io::stdin().read_line(&mut val);
-        let val = val.trim().to_ascii_lowercase();
-        if val != "y" {
+        if !readfromterminal(&'y', &'n', false) {
             println!("Exiting");
             return Ok(());
         }
@@ -1139,20 +1158,23 @@ pub(crate) fn askforsubmission(
             ));
         }
     };
-    println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
-    let mut val = String::new();
-    let _ = io::stdin().read_line(&mut val);
-    let val = val.trim().to_ascii_lowercase();
-    if val == "y" {
-        let mut blastmatch: Vec<Blastmatch> = Vec::new();
-        for (_, data) in infos.iter() {
-            blastmatch.append(&mut data.clone());
+    if !args.nosubmit {
+        println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
+        if !readfromterminal(&'y', &'n', false) {
+            println!("Your sequences won't be submitted.");
+            return Ok(());
+        } else {
+            let mut blastmatch: Vec<Blastmatch> = Vec::new();
+            for (_, data) in infos.iter() {
+                blastmatch.append(&mut data.clone());
+            }
+            if let Err(e) = submit(args, locus, &blastmatch, realspecies.to_string())
+                .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))
+            {
+                println!("{}", e);
+                return Ok(());
+            }
         }
-        submit(args, locus, &blastmatch, realspecies.to_string())
-            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
-    } else {
-        println!("Your sequences won't be submitted.");
-        return Ok(());
     }
     Ok(())
 }
@@ -1204,21 +1226,20 @@ pub(crate) fn generatelightbam(
 pub(crate) fn browseropening() -> io::Result<()> {
     let link = SUBMISSIONLINK.as_str();
     println!(
-        "Opening web browser to continue submission. Type (Y) to open the web browser, (N) to refuse and go by yourself to {link} or (e) to exit."
+        "Opening web browser to continue submission. Type (Y) to open the web browser, (e) to exit or (n) and go by yourself to {link}."
     );
-    let mut val = String::new();
-    let _ = io::stdin().read_line(&mut val);
-    let val = val.trim().to_ascii_lowercase();
-    if val == "y" {
+    if readfromterminal(&'y', &'e', false) {
         let _ = webbrowser::open(link);
-    } else if val == "e" {
-        println!("Exiting");
-        return Err(io::Error::from(ErrorKind::InvalidData));
+    } else {
+        return Err(io::Error::new(
+            ErrorKind::ConnectionAborted,
+            "Your sequences won't be submitted",
+        ));
     }
     Ok(())
 }
-pub(crate) fn createarchive(args: &Args) -> io::Result<NamedTempFile> {
-    let temp = tempfile::NamedTempFile::with_suffix("submission.tar.gz")?;
+pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<NamedTempFile> {
+    let temp = tempfile::NamedTempFile::with_suffix_in("submission.tar.gz", dir)?;
     let file = File::create(&temp)?;
     let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);
@@ -1227,7 +1248,9 @@ pub(crate) fn createarchive(args: &Args) -> io::Result<NamedTempFile> {
     Ok(temp)
 }
 pub(crate) fn preparesubmission(path: &Path, species: String, args: &Args) -> bool {
-    println!("Please give the token provided by the submission. Type (e) to exit.");
+    println!(
+        "Please give the token provided by the submission. Type (e) to exit. Analysis files and new sequences would be sent to IMGT for submission."
+    );
     let token = loop {
         let mut block = io::stdin().lock().take(100);
         let mut string = String::new();
@@ -1247,32 +1270,20 @@ pub(crate) fn preparesubmission(path: &Path, species: String, args: &Args) -> bo
             }
         };
     };
-    println!(
-        "Analysis files and new sequences would be sent to IMGT for submission. Type (Y) to validate or something else to exit"
-    );
-    let mut val = String::new();
-    let _ = io::stdin().read_line(&mut val);
-    let val = val.trim().to_ascii_lowercase();
-    if val == "y" {
-        let archive = match createarchive(args) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("Error filling archive: {e}");
-                return false;
-            }
-        };
-        std::thread::sleep(Duration::new(10, 0));
-        if let Err(e) = submission(&token, species, archive) {
-            eprintln!("An error has occured during submission: {e}. Please retry later.");
+    let archive = match createarchive(args, path) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error filling archive: {e}");
             return false;
         }
-        println!(
-            "Your submission has been made successfully. Thank you for submitting your sequences to IMGT. A confirmation email has been sent."
-        );
-    } else {
-        println!("Exiting");
+    };
+    if let Err(e) = submission(&token, species, archive) {
+        eprintln!("An error has occured during submission: {e}. Please retry later.");
         return false;
     }
+    println!(
+        "Your submission has been made successfully. Thank you for submitting your sequences to IMGT. A confirmation email has been sent."
+    );
     true
 }
 pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -> io::Result<()> {

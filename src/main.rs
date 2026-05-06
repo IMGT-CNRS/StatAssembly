@@ -107,6 +107,7 @@ fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
             strand: elem.getstrand(),
             start: Position::new(false, min(posa, posb)),
             end: Position::new(false, max(posa, posb)),
+            status: OkStatus::default(),
         };
         vec.push(info);
     }
@@ -296,11 +297,19 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
 fn locusposparser(
     args: &Args,
     realspecies: &str,
+    blastpresent: bool,
 ) -> std::io::Result<(Vec<LocusInfos>, Option<Vec<Blastmatch>>)> {
     let mut records = Vec::new();
     if let Some(arg) = &args.locuspos {
+        let detectheaders = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_path(arg)
+            .is_ok_and(|mut f| {
+                f.headers()
+                    .is_ok_and(|p| p.as_slice().to_ascii_lowercase().contains("locus"))
+            });
         let mut csv = match csv::ReaderBuilder::new()
-            .has_headers(false)
+            .has_headers(detectheaders)
             .comment(Some(b'#'))
             .delimiter(b'\t')
             .flexible(true)
@@ -347,8 +356,8 @@ fn locusposparser(
             .filter(|p| p.contig.is_none())
             .collect::<Vec<&mut FakeLocusinfo>>(),
     ) {
-        (Some(path), b) if !b.is_empty() => {
-            let (locus, blast) = locusallposition(path, realspecies)?;
+        (Some(path), b) if !b.is_empty() && blastpresent => {
+            let (locus, blast) = locusallposition(path, realspecies, args)?;
             b.into_iter().for_each(|p| {
                 let find = locus.iter().find(|r| {
                     r.haplotype == p.haplotype.clone().unwrap_or_default() && r.locus == p.locus
@@ -358,6 +367,13 @@ fn locusposparser(
                 }
             });
             locusrecord.1 = Some(blast);
+        }
+        (Some(_), b) if !b.is_empty() && !blastpresent => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Cannot perform automatic detection without BLAST. Please provide position."
+                    .to_string(),
+            ));
         }
         (None, b) if !b.is_empty() => {
             return Err(std::io::Error::new(
@@ -378,18 +394,6 @@ fn locusposparser(
     for record in records {
         let elem = record.intoloc()?;
         locusrecord.0.push(elem);
-    }
-    if locusrecord.1.is_some() {
-        let file = File::create(args.outdir.join("newloc.csv"))?;
-        let mut csv = csv::WriterBuilder::new()
-            .comment(Some(b'#'))
-            .delimiter(b'\t')
-            .has_headers(false)
-            .from_writer(file);
-        for loci in locusrecord.0.iter() {
-            csv.serialize(loci)?;
-        }
-        csv.flush()?;
     }
     if locusrecord.0.is_empty() {
         return Err(std::io::Error::new(
@@ -420,34 +424,47 @@ fn locusposparser(
     //make complement if locus is complement
     locusrecord.0.iter_mut().for_each(|r| {
         if r.start >= r.end {
-            (r.end, r.start) = (r.start.clone(), r.end.clone());
+            (r.end, r.start) = (r.start, r.end);
             r.complement = Strand::Minus;
         }
     });
-    if !args.hugeregion {
-        if let Some(big) = locusrecord
+    if !args.hugeregion
+        && let Some(big) = locusrecord
             .0
             .iter()
             .find(|p| p.end.length(&p.start) >= ALERTLOCUSSIZE)
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "The region {}-{} ({}) is more than {} bp and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
-                    big.start.getobasedpos(),
-                    big.end.getobasedpos(),
-                    big.locus,
-                    ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
-                    &args
-                        .locuspos
-                        .as_ref()
-                        .map(|f| format!("{}", f.display()))
-                        .unwrap_or("no loc given".to_string())
-                ),
-            ));
-        }
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "The region {}-{} ({}) is more than {} bp and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
+                big.start.getobasedpos(),
+                big.end.getobasedpos(),
+                big.locus,
+                ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
+                &args
+                    .locuspos
+                    .as_ref()
+                    .map(|f| format!("{}", f.display()))
+                    .unwrap_or("no loc given".to_string())
+            ),
+        ));
     }
     Ok(locusrecord)
+}
+fn printnewloc(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
+    let file = File::create(args.outdir.join("newloc.csv"))?;
+    let mut csv = csv::WriterBuilder::new()
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_writer(file);
+    csv.write_record(["locus", "haplotype", "contig", "start", "end", "status"])?;
+    for loci in locus.iter() {
+        csv.serialize(loci)?;
+    }
+    csv.flush()?;
+    Ok(())
 }
 //Check BAM file exists and outputdir is created and return it
 fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
@@ -635,6 +652,54 @@ fn getmeancoverageandlength(args: &Args) -> std::io::Result<(u64, u64)> {
     println!("Calculated in {} s", time.elapsed().as_secs());
     Ok((mean, readavg))
 }
+fn calculatemean(meanpath: &Path, args: &Args) -> io::Result<u64> {
+    match (
+        args.meancoverage,
+        meanpath.try_exists(),
+        fs::read_to_string(&meanpath).map(|p| p.parse::<u64>()),
+    ) {
+        //Mean is given
+        (Some(mean), ..) => {
+            println!(
+                "Mean was provided, getting given value and setting the value for further usage."
+            );
+            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
+            Ok(mean)
+        }
+        //The mean was calculated with a file
+        (None, Ok(true), Ok(Ok(mean))) => {
+            println!("Mean was already calculated, retrieving...");
+            Ok(mean)
+        }
+        _ => {
+            println!("Getting mean coverage from calculations, it might take some minutes.");
+            let (mean, average) = match getmeancoverageandlength(&args) {
+                Ok((0, _)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
+                    ));
+                }
+                Ok((_, b)) if b < MIN_READLENGTH => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software.",
+                    ));
+                }
+                Ok((a, b)) => (a, b),
+                Err(e) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format! {"{e}"}));
+                }
+            };
+            println!(
+                "Mean coverage is {} and average length of reads is {}",
+                mean, average
+            );
+            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
+            Ok(mean)
+        }
+    }
+}
 fn main() -> ExitCode {
     let firstinstant = Instant::now();
     let mut args = Args::parse();
@@ -645,13 +710,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if !checkifblastpresent() {
-        eprintln!("BLAST is not found");
-        return ExitCode::FAILURE;
-    }
     if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater or equal than percent alerting.");
         return ExitCode::FAILURE;
+    }
+    let blastpresent = checkifblastpresent();
+    if !blastpresent {
+        eprintln!("BLAST is not found and won't be used, some analysis won't be performed");
+        args.nosubmit = true;
     }
     //Get locus, geneloc and outputdir, print errors if we have
     let outputdir = match checklocusandoutput(&args) {
@@ -661,7 +727,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (locus, mut blastcheck) = match locusposparser(&args, &speciesblast) {
+    let (locus, mut blastcheck) = match locusposparser(&args, &speciesblast, blastpresent) {
         Err(f) => {
             eprintln!("{f}");
             return ExitCode::FAILURE;
@@ -674,8 +740,9 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
+    let initiallocus = &locus;
     //Group between primary and alternate
-    let grouped = match mergelocus(locus) {
+    let mut grouped = match mergelocus(locus.clone()) {
         Some(g) => g,
         None => {
             eprintln!(
@@ -688,55 +755,15 @@ fn main() -> ExitCode {
         }
     };
     let meanpath = outputdir.join(".mean");
-    let mean = match (
-        args.meancoverage,
-        meanpath.try_exists(),
-        fs::read_to_string(&meanpath).map(|p| p.parse::<u64>()),
-    ) {
-        //Mean is given
-        (Some(mean), ..) => {
-            println!(
-                "Mean was provided, getting given value and setting the value for further usage."
-            );
-            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
-            mean
-        }
-        //The mean was calculated with a file
-        (None, Ok(true), Ok(Ok(mean))) => {
-            println!("Mean was already calculated, retrieving...");
-            mean
-        }
-        _ => {
-            println!("Getting mean coverage from calculations, it might take some minutes.");
-            let (mean, average) = match getmeancoverageandlength(&args) {
-                Ok((0, _)) => {
-                    eprintln!(
-                        "Probably truncated BAM, you should give extracted length with the argument --extractedlength."
-                    );
-                    return ExitCode::FAILURE;
-                }
-                Ok((_, b)) if b < MIN_READLENGTH => {
-                    eprintln!(
-                        "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software."
-                    );
-                    return ExitCode::FAILURE;
-                }
-                Ok((a, b)) => (a, b),
-                Err(e) => {
-                    eprintln!("{e}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            println!(
-                "Mean coverage is {} and average length of reads is {}",
-                mean, average
-            );
-            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
-            mean
+    let mean = match calculatemean(&meanpath, &args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
         }
     };
     let mut locushashresult: HashMap<Locus, Vec<Blastmatch>> = HashMap::new();
-    for locus in grouped.iter() {
+    for locus in grouped.iter_mut() {
         let haplotype = locus.len();
         let nlocus = locus.clone();
         let floci = match nlocus.first() {
@@ -865,7 +892,7 @@ fn main() -> ExitCode {
         };
         let mut lock = stdout().lock();
         //For each individual haplotype inside locus
-        for loci in locus.iter() {
+        for loci in locus.iter_mut() {
             let mut reader = match getreaderoffile(&args) {
                 Ok(r) => r,
                 Err(e) => {
@@ -962,6 +989,9 @@ fn main() -> ExitCode {
                 }
             }
             if locusisokay(mean, &pos.values().collect_vec()) {
+                loci.status = OkStatus::Accepted;
+            }
+            if loci.status.isvalid() {
                 pos.iter_mut().for_each(|(_a, f)| {
                     f.locusisok = true;
                 });
@@ -1091,13 +1121,11 @@ fn main() -> ExitCode {
                 eprintln!("Cannot create csv file. Error is {e}");
                 return ExitCode::FAILURE;
             }
-            let val = pos.into_values().collect_vec();
-            let info: Vec<&HashMapinfo> = val.iter().collect();
             println!(
                 "Locus {} ({}) is {}",
                 loci.locus,
                 loci.haplotype,
-                if locusisokay(mean, &info) {
+                if loci.status.isvalid() {
                     "validated"
                 } else {
                     "rejected"
@@ -1131,15 +1159,13 @@ fn main() -> ExitCode {
                         eprintln!("No gene list for locus {}. Skipped.", loci.locus);
                     }
                     Ok(b) => {
-                        println!("Blasting gene list");
-                        if args.assembly.as_ref().is_some() && !args.nosubmit {
+                        if args.assembly.as_ref().is_some() && !args.nosubmit && blastpresent {
+                            println!("Blasting gene list");
                             let geneinfo: Vec<GeneInfos> =
                                 b.iter().map(|f| f.clone().into()).collect();
                             match genesblast(&geneinfo, &args, &speciesblast, &loci.locus) {
                                 Ok(blast) => {
-                                    if val.first().is_some_and(|f| f.locusisok)
-                                        && b.iter().any(|f| f.isok())
-                                    {
+                                    if loci.status.isvalid() && b.iter().any(|f| f.isok()) {
                                         locushashresult.insert(loci.locus.clone(), blast);
                                     }
                                 }
@@ -1147,11 +1173,6 @@ fn main() -> ExitCode {
                                     eprintln!("Cannot blast gene list. Error is {e}");
                                     return ExitCode::FAILURE;
                                 }
-                            };
-                        } else {
-                            if let Err(e) = genelist(loci, &args, args.allreads) {
-                                eprintln!("Cannot make gene list. Error is {e}");
-                                return ExitCode::FAILURE;
                             };
                         }
                     }
@@ -1162,7 +1183,7 @@ fn main() -> ExitCode {
                     && let Some(b) = args.assembly.as_ref()
                 {
                     eprintln!("You have not provided a gene list, BLASTING to get one.");
-                    let (_locusinfo, mut data) = match locusallposition(b, &speciesblast) {
+                    let (_locusinfo, mut data) = match locusallposition(b, &speciesblast, &args) {
                         Ok(a) => a,
                         Err(e) => {
                             eprintln!("Cannot blast for gene list. Error is {e}");
@@ -1171,8 +1192,7 @@ fn main() -> ExitCode {
                     };
                     blastcheck = Some(data.clone());
                     //locusfiltering(&loci.locus, &mut data);
-                    let mergedloci: Vec<LocusInfos> = grouped.iter().flatten().cloned().collect();
-                    positionfiltering(&mergedloci, &mut data);
+                    positionfiltering(initiallocus, &mut data);
                     if data.is_empty() {
                         eprintln!("No data after filtering gene list. Skipped.");
                     } else {
@@ -1226,9 +1246,7 @@ fn main() -> ExitCode {
                             }
                             Ok(b) => b,
                         };
-                        if val.first().is_some_and(|f| f.locusisok)
-                            && result.iter().any(|f| f.isok())
-                        {
+                        if loci.status.isvalid() && result.iter().any(|f| f.isok()) {
                             locushashresult.insert(loci.locus.clone(), data);
                         }
                     }
@@ -1246,6 +1264,10 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
+    match printnewloc(&args, &mergedloci) {
+        Ok(_) => (),
+        Err(e) => eprintln!("Error setting new locus result: {e}"),
+    }
     if !args.nosubmit
         && locushashresult
             .iter()
@@ -1253,11 +1275,11 @@ fn main() -> ExitCode {
     {
         match askforsubmission(&speciesblast, &mergedloci, &args, &locushashresult) {
             Ok(_) => (),
-            Err(e) => println!("Error submitting sequences: {e}"),
+            Err(e) => eprintln!("Error submitting sequences: {e}"),
         }
     }
     println!(
-        "{} done sucessfully in {:.3} seconds. Output files are present in {}.",
+        "{} done sucessfully in {:.3} seconds. Output files are located in {}.",
         NAME.as_str(),
         firstinstant.elapsed().as_secs_f32(),
         args.outdir.display()
@@ -2258,7 +2280,7 @@ where
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let tenlines = loci.getlength() / 9;
-    let colorgene = if locusisokay(mean, pos) {
+    let colorgene = if loci.status.isvalid() {
         full_palette::GREEN
     } else {
         full_palette::RED

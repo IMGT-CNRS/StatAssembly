@@ -121,14 +121,30 @@ pub(crate) struct Args {
     ///Output light BAM for submission
     #[arg(short = 'z', long)]
     pub(crate) outlightbam: Option<PathBuf>,
+    ///Haploid status (only if locuspos is not set)
+    #[arg(short, long, conflicts_with = "locuspos")]
+    pub(crate) haploid: bool,
     /// Do not submit to IMGT
     #[arg(long)]
     pub(crate) nosubmit: bool,
+    /// Automatic token to submit
+    #[arg(long, value_parser=checktoken, conflicts_with = "nosubmit")]
+    pub(crate) mytoken: Option<String>,
+}
+fn checktoken(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    if !s.is_ascii() || s.len() != 24 || !s.chars().any(|p| p.is_ascii_alphanumeric()) {
+        Err(String::from(
+            "Invalid token, please remove it to process or verify its value.",
+        ))
+    } else {
+        Ok(String::from(s))
+    }
 }
 pub(crate) fn less_than_100(s: &str) -> Result<u8, String> {
     match s.parse::<u8>() {
         Ok(s) if (0..=100).contains(&s) => Ok(s),
-        _ => Err(String::from("Bad number, must be between 0 and 100.")),
+        _ => Err(String::from("Bad number, must be greater than 0.")),
     }
 }
 pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
@@ -152,6 +168,35 @@ pub(crate) enum Locus {
     TRA,
     TRB,
     TRG,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Hash)]
+pub(crate) enum OkStatus {
+    #[default]
+    Unknown,
+    Accepted,
+    Rejected,
+}
+impl Not for OkStatus {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        match self {
+            OkStatus::Unknown => Self::Unknown,
+            OkStatus::Accepted => Self::Rejected,
+            OkStatus::Rejected => Self::Accepted,
+        }
+    }
+}
+impl OkStatus {
+    pub(crate) fn isvalid(&self) -> bool {
+        *self == OkStatus::Accepted
+    }
+    pub(crate) fn isinvalid(&self) -> bool {
+        *self == OkStatus::Rejected
+    }
+    pub(crate) fn isunknown(&self) -> bool {
+        *self == OkStatus::Unknown
+    }
 }
 impl TryFrom<String> for Locus {
     type Error = io::Error;
@@ -353,6 +398,7 @@ pub(crate) struct Blast {
     #[serde(skip_deserializing)]
     pub(crate) status: Status,
 }
+#[repr(C)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Blastmatch {
     pub(crate) qseqid: String,
@@ -926,6 +972,8 @@ pub(crate) struct GeneInfos {
     pub(crate) strand: Strand,
     pub(crate) start: Position,
     pub(crate) end: Position,
+    #[serde(skip_deserializing)]
+    pub(crate) status: OkStatus,
 }
 impl GeneInfos {
     pub(crate) fn new(
@@ -941,6 +989,7 @@ impl GeneInfos {
             strand,
             start,
             end,
+            status: OkStatus::default(),
         }
     }
     pub(crate) fn addtosequence<T>(&self, seq: T, fasta: &mut fasta::Writer<File>) -> io::Result<()>
@@ -1048,6 +1097,7 @@ impl LocusInfos {
             start: self.start,
             end: self.end,
             strand: self.complement.clone(),
+            status: OkStatus::default(),
         };
         fake.extractsequence(fasta)
     }
@@ -1174,6 +1224,7 @@ impl PartialEq for GeneInfosFinish {
     }
 }
 impl Eq for GeneInfosFinish {}
+#[allow(clippy::from_over_into)]
 impl Into<GeneInfos> for GeneInfosFinish {
     fn into(self) -> GeneInfos {
         GeneInfos {
@@ -1182,6 +1233,7 @@ impl Into<GeneInfos> for GeneInfosFinish {
             strand: self.strand,
             start: self.start,
             end: self.end,
+            status: OkStatus::default(),
         }
     }
 }
@@ -1290,6 +1342,7 @@ impl FakeLocusinfo {
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
+#[repr(C)]
 pub(crate) struct LocusInfos {
     pub(crate) locus: Locus,
     pub(crate) haplotype: Haplotype,
@@ -1298,6 +1351,8 @@ pub(crate) struct LocusInfos {
     pub(crate) end: Position,
     #[serde(skip)]
     pub(crate) complement: Strand,
+    #[serde(skip_deserializing)]
+    pub(crate) status: OkStatus,
 }
 impl Serialize for LocusInfos {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -1308,12 +1363,13 @@ impl Serialize for LocusInfos {
         if new.complement.isrev() {
             (new.start, new.end) = (self.end, self.start)
         };
-        let mut se = serializer.serialize_tuple_struct("LocusInfos", 5)?;
+        let mut se = serializer.serialize_tuple_struct("LocusInfos", 6)?;
         se.serialize_field(&new.locus)?;
         se.serialize_field(&new.haplotype)?;
         se.serialize_field(&new.contig)?;
         se.serialize_field(&new.start)?;
         se.serialize_field(&new.end)?;
+        se.serialize_field(&new.status)?;
         se.end()
     }
 }
@@ -1333,6 +1389,7 @@ impl LocusInfos {
             start,
             end,
             complement,
+            status: OkStatus::default(),
         }
     }
 }
