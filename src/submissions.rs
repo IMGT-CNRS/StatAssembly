@@ -6,32 +6,27 @@ use flate2::{Compression, write::GzEncoder};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use reqwest::{StatusCode, tls};
-use serde::{Deserialize, Serialize};
 use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::io::IsTerminal;
-use std::ops::{BitAnd, BitOr, BitXor};
-use std::str::FromStr;
-use std::thread::yield_now;
 use std::{
-    borrow::Cow,
-    env::{self, current_dir, temp_dir},
+    env::{self, temp_dir},
     error::Error,
     fs::{self, File},
     io::{self, BufRead, BufReader, ErrorKind, Read as _, Write},
-    ops::{Not, Range, RangeInclusive},
+    ops::{Not, RangeInclusive},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 use strum::IntoEnumIterator;
-use tempfile::{NamedTempFile, TempDir, tempfile};
+use tempfile::{NamedTempFile, TempDir};
 
 use crate::r#struct::{
     Args, Blast, Blastcalc, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Newfasta,
-    Ourfasta, Position, Seqresult, Status, Strand,
+    Ourfasta, Position, Seqresult, Strand,
 };
 use crate::{BORNES, getassemblyreader, getreaderoffile};
 lazy_static! {
@@ -91,9 +86,7 @@ pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
         }
         if data.to_lowercase().trim().chars().all(|p| &p == yes) {
             return true;
-        } else if data.to_lowercase().trim().chars().all(|p| &p == no) {
-            return false;
-        } else if !force {
+        } else if data.to_lowercase().trim().chars().all(|p| &p == no) || !force {
             return false;
         }
     }
@@ -290,6 +283,7 @@ pub(crate) fn speciesandorphonfiltering(
     releaseversion: String,
     species: &str,
     orphonfilter: bool,
+    force: bool,
 ) -> io::Result<PathBuf> {
     let outfile = Path::join(
         &env::temp_dir(),
@@ -300,7 +294,7 @@ pub(crate) fn speciesandorphonfiltering(
             locus.map_or("".to_string(), |l| format!("-{}", l))
         ),
     );
-    if outfile.exists() {
+    if outfile.exists() && !force {
         println!("Filtering already done, retrieving...");
         return Ok(outfile);
     }
@@ -313,7 +307,7 @@ pub(crate) fn speciesandorphonfiltering(
     } else {
         info
     };
-    let tempnew = NamedTempFile::new()?;
+    let tempnew = NamedTempFile::new_in(temp_dir())?;
     fs::write(&tempnew, &info)?;
     let read = fasta::Reader::from_file(&tempnew)
         .map_err(|f| io::Error::new(ErrorKind::InvalidInput, f))?;
@@ -333,13 +327,15 @@ pub(crate) fn speciesandorphonfiltering(
         });
         count.iter().all(|(_, f)| *f > 0)
     };
-    let info = if info.is_empty() || !allmatch {
-        if info.is_empty() {
+    let finale = match (info.is_empty(), allmatch) {
+        (true, _) => {
             println!(
                 "No match with IMGT/GENE-DB, the species {} might be a new species.",
                 species
             );
-        } else if !allmatch {
+            file
+        }
+        (false, false) => {
             if let Some(a) = locus {
                 println!(
                     "No match with IMGT/GENE-DB with {} and {} loci.",
@@ -348,10 +344,29 @@ pub(crate) fn speciesandorphonfiltering(
             } else {
                 println!("No match with IMGT/GENE-DB with {} and some loci.", species);
             }
+            file
         }
-        file
+        _ => info,
+    };
+    let info = if let Some(l) = locus {
+        let read = fasta::Reader::from_file(&tempnew)
+            .map_err(|f| io::Error::new(ErrorKind::InvalidInput, f))?;
+        let records = read
+            .records()
+            .filter_map(Result::ok)
+            .filter(|p| checklocus(&p, l));
+        let seq = records.fold(String::new(), |mut acc, f| {
+            acc.push_str(&format!(
+                ">{} {}\n{}",
+                f.id(),
+                f.desc().unwrap_or_default(),
+                String::from_utf8_lossy(f.seq())
+            ));
+            acc
+        });
+        seq
     } else {
-        info
+        finale
     };
     /* let newdata = if newdata.is_empty() {
         println!("New species!!");
@@ -517,20 +532,20 @@ pub(crate) fn find_global_best_range(blastcheck: &[Blastmatch]) -> Option<Vec<Lo
                 Some(a) => a,
                 None => {
                     let mut e = BTreeSet::new();
-                    e.insert(elem.clone().clone());
-                    locus.insert((loci.clone().clone(), sseqname.to_string(), index), e);
+                    e.insert((*elem).clone());
+                    locus.insert((loci.clone(), sseqname.to_string(), index), e);
                     continue;
                 }
             };
             if let Some(b) = d.last()
                 && max(b.sstart, b.send).abs_diff(min(elem.send, elem.sstart)) <= LOCUSSEPARATOR
             {
-                d.insert(elem.clone().clone());
+                d.insert((*elem).clone());
             } else {
                 index += 1;
                 let mut e = BTreeSet::new();
-                e.insert(elem.clone().clone());
-                locus.insert((loci.clone().clone(), sseqname.clone(), index), e);
+                e.insert((*elem).clone());
+                locus.insert((loci.clone(), sseqname.clone(), index), e);
             }
         }
     }
@@ -603,7 +618,14 @@ where
     T: AsRef<str>,
 {
     let reference = match downloadmotifs().map(|a| {
-        speciesandorphonfiltering(&a, locus, "motifs".to_string(), species.as_ref(), false)
+        speciesandorphonfiltering(
+            &a,
+            locus,
+            "motifs".to_string(),
+            species.as_ref(),
+            false,
+            false,
+        )
     }) {
         Some(a) => a?,
         None => {
@@ -668,9 +690,9 @@ where
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let reference = match downloadref()
-        .map(|(a, b)| speciesandorphonfiltering(&a, Some(locus), b, species.as_ref(), false))
-    {
+    let reference = match downloadref().map(|(a, b)| {
+        speciesandorphonfiltering(&a, Some(locus), b, species.as_ref(), false, args.cacheerase)
+    }) {
         Some(a) => a?,
         None => {
             return Err(io::Error::new(
@@ -731,9 +753,9 @@ where
     T: AsRef<str>,
 {
     let reference = downloadref();
-    let reference = match reference
-        .map(|(a, b)| speciesandorphonfiltering(&a, None, b, species.as_ref(), true))
-    {
+    let reference = match reference.map(|(a, b)| {
+        speciesandorphonfiltering(&a, None, b, species.as_ref(), true, args.cacheerase)
+    }) {
         Some(a) => a?,
         None => {
             return Err(io::Error::new(
@@ -782,7 +804,7 @@ where
         .delimiter(b',')
         .comment(Some(b'#'))
         .has_headers(true)
-        .from_path("test2.txt");
+        .from_path(Path::join(&temp_dir(), "test2.txt"));
     if let Ok(mut r) = writer {
         for elem in data.iter() {
             let _ = r.serialize(elem);
@@ -958,6 +980,7 @@ pub(crate) fn launchblast(
     species: &str,
     locus: &Locus,
     subject: &Path,
+    args: &Args,
 ) -> Result<Vec<Newfasta>, ()> {
     let realspecies = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
         Err(e) => {
@@ -971,14 +994,20 @@ pub(crate) fn launchblast(
         None => return Err(()),
         Some((a, b)) => (a, b),
     };
-    let filtering =
-        match speciesandorphonfiltering(&path, Some(locus), releaseversion, &realspecies, false) {
-            Err(e) => {
-                eprintln!("{e}");
-                return Err(());
-            }
-            Ok(b) => b,
-        };
+    let filtering = match speciesandorphonfiltering(
+        &path,
+        Some(locus),
+        releaseversion,
+        &realspecies,
+        false,
+        args.cacheerase,
+    ) {
+        Err(e) => {
+            eprintln!("{e}");
+            return Err(());
+        }
+        Ok(b) => b,
+    };
     let result: Vec<Newfasta> = match blastcommand(filtering.as_path(), subject) {
         Err(e) => {
             eprintln!("{e}");
@@ -986,7 +1015,7 @@ pub(crate) fn launchblast(
         }
         Ok(mut c) => {
             statusblast(&mut c);
-            let status: Vec<Newfasta> = c.iter().map(|b| Newfasta::newfromblast(b)).collect();
+            let status: Vec<Newfasta> = c.iter().map(Newfasta::newfromblast).collect();
             let sequence = status.iter().fold(String::new(), |mut acc, f| {
                 let f: &dyn Seqresult = f;
                 acc.push_str(&format!("\n{}", f));
@@ -1184,13 +1213,13 @@ pub(crate) fn generatelightbam(
     locus: &[LocusInfos],
 ) -> Result<(), String> {
     println!("Generating small BAM for submission");
-    let bam = if let Ok(r) = getreaderoffile(&args) {
+    let bam = if let Ok(r) = getreaderoffile(args) {
         r
     } else {
         return Err("Cannot access BAM file for light bam.".to_string());
     };
     let mut writer = if let Ok(files) = bam::Writer::from_path(
-        &light,
+        light,
         &bam::Header::from_template(bam.header()),
         bam::Format::Bam,
     ) {
@@ -1200,10 +1229,10 @@ pub(crate) fn generatelightbam(
         return Err(format!("Cannot create file {file} for light bam."));
     };
     for f in locus.iter() {
-        let mut bam = if let Ok(r) = getreaderoffile(&args) {
+        let mut bam = if let Ok(r) = getreaderoffile(args) {
             r
         } else {
-            return Err(format!("Cannot access BAM file for light bam."));
+            return Err("Cannot access BAM file for light bam.".to_string());
         };
         if bam
             .fetch((
@@ -1213,15 +1242,15 @@ pub(crate) fn generatelightbam(
             ))
             .is_err()
         {
-            return Err(format!("Cannot read BAM file region for light bam."));
+            return Err("Cannot read BAM file region for light bam.".to_string());
         }
         for read in bam.rc_records().filter_map(Result::ok) {
             if writer.write(&read).is_err() {
-                return Err(format!("Cannot read BAM file region for light bam."));
+                return Err("Cannot read BAM file region for light bam.".to_string());
             };
         }
     }
-    return Ok(());
+    Ok(())
 }
 pub(crate) fn browseropening() -> io::Result<()> {
     let link = SUBMISSIONLINK.as_str();

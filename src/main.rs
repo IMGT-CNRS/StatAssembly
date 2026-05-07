@@ -53,6 +53,7 @@ const AUTHOR: &str = "IMGT";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
 const MIN_READLENGTH: u64 = 1_000;
+const READGAPMESSAGE: u64 = 200;
 const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: usize = 2;
 const MATCHREADS: usize = 10;
@@ -652,14 +653,14 @@ fn calculatemean(meanpath: &Path, args: &Args) -> io::Result<u64> {
     match (
         args.meancoverage,
         meanpath.try_exists(),
-        fs::read_to_string(&meanpath).map(|p| p.parse::<u64>()),
+        fs::read_to_string(meanpath).map(|p| p.parse::<u64>()),
     ) {
         //Mean is given
         (Some(mean), ..) => {
             println!(
                 "Mean was provided, getting given value and setting the value for further usage."
             );
-            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
+            let _ = fs::write(meanpath, mean.to_string().as_bytes());
             Ok(mean)
         }
         //The mean was calculated with a file
@@ -669,7 +670,7 @@ fn calculatemean(meanpath: &Path, args: &Args) -> io::Result<u64> {
         }
         _ => {
             println!("Getting mean coverage from calculations, it might take some minutes.");
-            let (mean, average) = match getmeancoverageandlength(&args) {
+            let (mean, average) = match getmeancoverageandlength(args) {
                 Ok((0, _)) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -691,43 +692,47 @@ fn calculatemean(meanpath: &Path, args: &Args) -> io::Result<u64> {
                 "Mean coverage is {} and average length of reads is {}",
                 mean, average
             );
-            let _ = fs::write(&meanpath, mean.to_string().as_bytes());
+            let _ = fs::write(meanpath, mean.to_string().as_bytes());
             Ok(mean)
         }
     }
 }
+#[allow(clippy::complexity)]
 fn paintgraph<T>(
-    outputfile: &std::path::Path,
+    outputfileread: &std::path::Path,
+    outputfilemismatch: &std::path::Path,
     loci: &LocusInfos,
     pos: &BTreeMap<Position, HashMapinfo>,
     args: &Args,
-    readgraphelem: T,
-    mismatchgraphelem: T,
+    readgraphelem: DrawingArea<T, Shift>,
+    mismatchgraphelem: DrawingArea<T, Shift>,
     mean: u64,
 ) -> io::Result<()>
 where
     T: DrawingBackend,
 {
     if let Err(e) = readgraph(
-        outputfile,
+        outputfileread,
         loci,
         pos.values().collect_vec().as_slice(),
         args,
-        readgraphelem.into(),
+        readgraphelem,
         mean,
-    ) {
+    )
+    .and_then(|_| {
+        mismatchgraph(
+            outputfilemismatch,
+            loci,
+            pos.values().collect_vec().as_slice(),
+            args,
+            mismatchgraphelem,
+        )
+    }) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{}", e),
         ));
     };
-    mismatchgraph(
-        outputfile,
-        loci,
-        pos.values().collect_vec().as_slice(),
-        args,
-        mismatchgraphelem.into(),
-    );
     Ok(())
 }
 fn main() -> ExitCode {
@@ -753,13 +758,13 @@ fn main() -> ExitCode {
     let outputdir = match checklocusandoutput(&args) {
         Ok(a) => a.clone(),
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("Error with locus file or output: {e}");
             return ExitCode::FAILURE;
         }
     };
     let (locus, mut blastcheck) = match locusposparser(&args, &speciesblast, blastpresent) {
         Err(f) => {
-            eprintln!("{f}");
+            eprintln!("Error locus parser: {f}");
             return ExitCode::FAILURE;
         }
         Ok(b) => b,
@@ -767,7 +772,7 @@ fn main() -> ExitCode {
     if args.geneloc.is_some()
         && let Err(e) = checkgenelistformat(&args)
     {
-        eprintln!("{e}");
+        eprintln!("Error gene list: {e}");
         return ExitCode::FAILURE;
     }
     let initiallocus = &locus;
@@ -852,7 +857,7 @@ fn main() -> ExitCode {
                 if haplotypebool {
                     let (top, bottom) = root.split_vertically((50).percent_height());
                     (Some(top), Some(bottom), None, None)
-                    //readgraph(outputfile, locus.first().unwrap(), &pos, &args, root);
+                    //readgraph(outpufile, locus.first().unwrap(), &pos, &args, root);
                 } else {
                     (Some(root), None, None, None)
                 }
@@ -996,8 +1001,8 @@ fn main() -> ExitCode {
                 .filter(|p| !(args.forward && p.is_reverse()))
             {
                 count += 1;
-                //Print every 300 reads done
-                if count % 300 == 0 {
+                //Print every x reads done
+                if count % READGAPMESSAGE == 0 {
                     let _ = writeln!(
                         lock,
                         "Processed {} reads in {:.3} s",
@@ -1006,7 +1011,7 @@ fn main() -> ExitCode {
                     );
                 }
                 nocount = false;
-                match processcounting(&args, &mut pos, message, &loci, &p, sep) {
+                match processcounting(&args, &mut pos, message, loci, &p, sep) {
                     Err(e) => {
                         eprintln!("Error is {e}");
                         return ExitCode::FAILURE;
@@ -1059,89 +1064,77 @@ fn main() -> ExitCode {
                 readgraphbottom2.clone(),
                 mismatchgraphbottom2.clone(),
             ) {
-                (true, true, Some(readgraphtop), Some(mismatchgraphtop), ..) => {
-                    let f = readgraph(
+                (true, true, Some(readgraphtop), Some(mismatchgraphtop), ..)
+                    if !outputfile1.file_name().is_none_or(|p| p.is_empty())
+                        && !outputfile3.file_name().is_none_or(|p| p.is_empty()) =>
+                {
+                    if let Err(e) = paintgraph(
                         &outputfile1,
-                        loci,
-                        pos.values().collect_vec().as_slice(),
-                        &args,
-                        readgraphtop.clone(),
-                        mean,
-                    );
-                    if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {e}");
-                        return ExitCode::FAILURE;
-                    }
-                    mismatchgraph(
                         &outputfile3,
                         loci,
-                        pos.values().collect_vec().as_slice(),
+                        &pos,
                         &args,
-                        mismatchgraphtop.clone(),
-                    );
-                }
-                (false, true, _, _, Some(readgraphbottom), Some(mismatchgraphbottom), ..) => {
-                    let f = readgraph(
-                        &outputfile1,
-                        loci,
-                        pos.values().collect_vec().as_slice(),
-                        &args,
-                        readgraphbottom.clone(),
+                        readgraphtop,
+                        mismatchgraphtop,
                         mean,
-                    );
-                    if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {e}");
+                    ) {
+                        eprintln!("Cannot create read graphs. Error is {e}");
                         return ExitCode::FAILURE;
                     }
-                    mismatchgraph(
+                }
+                (false, true, _, _, Some(readgraphbottom), Some(mismatchgraphbottom), ..)
+                    if !outputfile1.file_name().is_none_or(|p| p.is_empty())
+                        && !outputfile3.file_name().is_none_or(|p| p.is_empty()) =>
+                {
+                    if let Err(e) = paintgraph(
+                        &outputfile1,
                         &outputfile3,
                         loci,
-                        pos.values().collect_vec().as_slice(),
+                        &pos,
                         &args,
-                        mismatchgraphbottom.clone(),
-                    );
-                }
-                (true, false, _, _, _, _, Some(readgraphtop2), Some(mismatchgraphtop2), ..) => {
-                    let f = readgraph(
-                        &outputfile2,
-                        loci,
-                        pos.values().collect_vec().as_slice(),
-                        &args,
-                        readgraphtop2.clone(),
+                        readgraphbottom,
+                        mismatchgraphbottom,
                         mean,
-                    );
-                    if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {e}");
+                    ) {
+                        eprintln!("Cannot create read graphs. Error is {e}");
                         return ExitCode::FAILURE;
                     }
-                    mismatchgraph(
+                }
+                (true, false, _, _, _, _, Some(readgraphtop2), Some(mismatchgraphtop2), ..)
+                    if !outputfile2.file_name().is_none_or(|p| p.is_empty())
+                        && !outputfile4.file_name().is_none_or(|p| p.is_empty()) =>
+                {
+                    if let Err(e) = paintgraph(
+                        &outputfile2,
                         &outputfile4,
                         loci,
-                        pos.values().collect_vec().as_slice(),
+                        &pos,
                         &args,
-                        mismatchgraphtop2.clone(),
-                    );
-                }
-                (false, false, .., Some(readgraphbottom2), Some(mismatchgraphbottom2)) => {
-                    let f = readgraph(
-                        &outputfile2,
-                        loci,
-                        pos.values().collect_vec().as_slice(),
-                        &args,
-                        readgraphbottom2.clone(),
+                        readgraphtop2,
+                        mismatchgraphtop2,
                         mean,
-                    );
-                    if let Err(e) = f {
-                        eprintln!("Cannot create read graph. Error is {e}");
+                    ) {
+                        eprintln!("Cannot create read graphs. Error is {e}");
                         return ExitCode::FAILURE;
                     }
-                    mismatchgraph(
+                }
+                (false, false, .., Some(readgraphbottom2), Some(mismatchgraphbottom2))
+                    if !outputfile2.file_name().is_none_or(|p| p.is_empty())
+                        && !outputfile4.file_name().is_none_or(|p| p.is_empty()) =>
+                {
+                    if let Err(e) = paintgraph(
+                        &outputfile2,
                         &outputfile4,
                         loci,
-                        pos.values().collect_vec().as_slice(),
+                        &pos,
                         &args,
-                        mismatchgraphbottom2.clone(),
-                    );
+                        readgraphbottom2,
+                        mismatchgraphbottom2,
+                        mean,
+                    ) {
+                        eprintln!("Cannot create read graphs. Error is {e}");
+                        return ExitCode::FAILURE;
+                    }
                 }
                 _ => {
                     eprintln!(
@@ -1163,7 +1156,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             println!(
-                "Locus {} ({}) is {}",
+                "Locus {} ({}) is {}.",
                 loci.locus, loci.haplotype, loci.status
             );
             //Create gene CSV
@@ -1207,7 +1200,7 @@ fn main() -> ExitCode {
                                 }
                                 Err(e) => {
                                     eprintln!("Cannot blast gene list. Error is {e}");
-                                    return ExitCode::FAILURE;
+                                    continue;
                                 }
                             };
                         }
@@ -1375,12 +1368,12 @@ fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error
     Ok(genes)
 }
 /// Add underscore in case gene list has duplicates
-fn checkandcorrectgenelistduplicate(genes: &mut Vec<GeneInfos>) {
+fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
     //Invert if start >= end because strand is given and won't work
     genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
-        (p.start, p.end) = (p.end.clone(), p.start.clone());
+        (p.start, p.end) = (p.end, p.start);
     });
-    let geneclone = genes.clone();
+    let geneclone = genes.to_vec();
     let finish: Vec<&GeneInfos> = geneclone
         .iter()
         .duplicates_by(|g| (g.gene.as_str(), g.chromosome.as_str()))
@@ -1609,7 +1602,7 @@ fn genelist(
                 root,
                 &mut alertingpositions,
                 reads100m,
-            );
+            )?;
         } else {
             output.set_extension("svg");
             let root = SVGBackend::new(&output, (700, 400)).into_drawing_area();
@@ -1622,7 +1615,7 @@ fn genelist(
                 root,
                 &mut alertingpositions,
                 reads100m,
-            );
+            )?;
         }
         let coverageperc = ((coverageperc * 1_000
             / reads
@@ -1674,8 +1667,8 @@ fn printbreaks(
     outputfile: &std::path::Path,
 ) -> std::io::Result<()> {
     let outputdir = match outputfile.parent() {
-        Some(d) if d.as_os_str().to_str().is_some_and(|f| !f.is_empty()) => d,
-        _ => {
+        Some(d) => d,
+        None => {
             return Err(io::Error::new(
                 io::ErrorKind::NotADirectory,
                 "Invalid root for directory, cannot create break file.",
@@ -2011,8 +2004,8 @@ where
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
-    drawnoticetext(&root);
-    root.present().map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
+    drawnoticetext(&root)?;
+    root.present().map_err(|_e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())
 }
 fn givename(
@@ -2070,7 +2063,7 @@ fn createcsv(
     println!("CSV analysis has been saved to {}", outputfile.display());
     Ok(())
 }
-fn drawnoticetext<T>(root: &DrawingArea<T, Shift>)
+fn drawnoticetext<T>(root: &DrawingArea<T, Shift>) -> Result<(), Box<dyn std::error::Error>>
 where
     T: DrawingBackend,
 {
@@ -2081,12 +2074,16 @@ where
         AUTHOR
     );
     let text_style = ("Georgia", 11, FontStyle::Oblique, &BLACK).into_text_style(root);
-    let size = root.estimate_text_size(&text, &text_style).unwrap();
+    let size = root
+        .estimate_text_size(&text, &text_style)
+        .unwrap_or_default();
     let size = (
         (root.dim_in_pixel().0 - size.0 - 10) as i32,
         (root.dim_in_pixel().1 - size.1 - 10) as i32,
     );
-    root.draw_text(&text, &text_style, size).unwrap();
+    Ok(root
+        .draw_text(&text, &text_style, size)
+        .map_err(|p| Box::new(io::Error::other(p.to_string())))?)
 }
 fn mismatchgraph<T>(
     _outputfile: &std::path::Path,
@@ -2094,7 +2091,8 @@ fn mismatchgraph<T>(
     pos: &[&HashMapinfo],
     args: &Args,
     root: DrawingArea<T, Shift>,
-) where
+) -> Result<(), Box<dyn std::error::Error>>
+where
     T: DrawingBackend,
 {
     let _ = root.fill(&plotters::prelude::WHITE);
@@ -2118,7 +2116,7 @@ fn mismatchgraph<T>(
             ("sans-serif", 28),
         )
         .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..100)
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     if !args.force {
         chart
             .draw_series(LineSeries::new(
@@ -2132,7 +2130,7 @@ fn mismatchgraph<T>(
                 }),
                 full_palette::DEEPPURPLE_400.mix(0.8).filled(),
             ))
-            .unwrap()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Mismatches (%)")
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPPURPLE_400)
@@ -2150,7 +2148,7 @@ fn mismatchgraph<T>(
             }),
             full_palette::RED_400.mix(0.8).filled(),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
     let mut secondary = chart.set_secondary_coord(
@@ -2166,10 +2164,8 @@ fn mismatchgraph<T>(
                 f.to_formatted_string(&Locale::en),
                 pos.iter()
                     .find(|p| { p.position.getobasedpos() == *f })
-                    .unwrap()
-                    .locuspos
-                    .getobasedpos()
-                    .to_formatted_string(&Locale::en)
+                    .map(|p| p.locuspos.getobasedpos().to_formatted_string(&Locale::en))
+                    .unwrap_or("Unknown".to_string())
             )
         })
         .x_desc("Genomic position (bp)")
@@ -2179,7 +2175,7 @@ fn mismatchgraph<T>(
         .y_max_light_lines(2)
         //.disable_y_mesh()
         .draw()
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
     secondary
         .draw_secondary_series(LineSeries::new(
@@ -2192,7 +2188,7 @@ fn mismatchgraph<T>(
             }),
             full_palette::BLACK.mix(0.4),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Quality")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
     secondary
@@ -2201,7 +2197,7 @@ fn mismatchgraph<T>(
         //.disable_y_mesh()
         .label_style(text_style.clone())
         .draw()
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     if !args.nolegend {
         secondary
             .configure_series_labels()
@@ -2210,11 +2206,15 @@ fn mismatchgraph<T>(
             .label_font(text_style.clone())
             .border_style(BLACK.mix(0.8))
             .draw()
-            .unwrap();
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
     //Bottom graph
     if let Some(bottom) = bottom {
-        let max = pos.iter().map(|f| f.globalmismatch).max().unwrap();
+        let max = pos
+            .iter()
+            .map(|f| f.globalmismatch)
+            .max()
+            .unwrap_or_default();
         let mut chart = ChartBuilder::on(&bottom)
             .set_label_area_size(LabelAreaPosition::Left, 60)
             .right_y_label_area_size(60)
@@ -2230,7 +2230,7 @@ fn mismatchgraph<T>(
                 loci.start.getobasedpos()..loci.end.getobasedpos(),
                 0.0..max as f64 * 1.1 / 10_000.0,
             )
-            .unwrap();
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
         let _ = chart
             .configure_mesh()
             .y_label_formatter(&|f| format!("{}%", (f * 10_000.0).round() / 100.0))
@@ -2240,10 +2240,8 @@ fn mismatchgraph<T>(
                     f.to_formatted_string(&Locale::en),
                     pos.iter()
                         .find(|p| { p.position.getobasedpos() == *f })
-                        .unwrap()
-                        .locuspos
-                        .getobasedpos()
-                        .to_formatted_string(&Locale::en)
+                        .map(|p| p.locuspos.getobasedpos().to_formatted_string(&Locale::en))
+                        .unwrap_or("Unknown".to_string())
                 )
             })
             .x_desc("Genomic position (bp)")
@@ -2265,7 +2263,7 @@ fn mismatchgraph<T>(
                 0.0,
                 full_palette::DEEPORANGE_200.mix(0.8).filled(),
             ))
-            .unwrap()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Mismatch full rate (%)")
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::DEEPORANGE_200)
@@ -2278,12 +2276,15 @@ fn mismatchgraph<T>(
                 .background_style(WHITE.mix(0.6))
                 .border_style(BLACK.mix(0.8))
                 .draw()
-                .unwrap();
+                .map_err(|e| {
+                    Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
+                })?;
         }
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
-    drawnoticetext(&root);
-    root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
+    drawnoticetext(&root)?;
+    root.present().map_err(|_| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
+    Ok(())
 }
 pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
     //Between a minimum and a maximum number of reads
@@ -2629,7 +2630,7 @@ where
             .draw()
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
-    drawnoticetext(&root);
+    drawnoticetext(&root)?;
     // To avoid the IO failure being ignored silently, we manually call the present function
     root.present().map_err(|_| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())

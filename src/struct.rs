@@ -1,8 +1,7 @@
-use bio::io::fasta::{self, FastaRead};
-use clap::builder::Str;
+use bio::io::fasta;
 use itertools::Itertools;
-use serde::ser::{SerializeTupleStruct, SerializeTupleVariant};
-use serde_with::{DefaultOnError, DefaultOnNull, DisplayFromStr, serde_as};
+use serde::ser::SerializeTupleStruct;
+use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -15,19 +14,10 @@ use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fmt::Write;
 use std::io::ErrorKind;
-use std::ops::{Neg, Not, RangeInclusive};
+use std::ops::{Not, RangeInclusive};
 use std::str::FromStr;
-use std::{
-    borrow::Cow,
-    fmt::Display,
-    fs::File,
-    hash::Hash,
-    io,
-    path::{Path, PathBuf},
-};
-use strum::IntoEnumIterator;
+use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
 use strum_macros::EnumIter;
 #[derive(Parser, Debug)]
 #[clap(
@@ -130,6 +120,9 @@ pub(crate) struct Args {
     /// Do not submit to IMGT
     #[arg(long)]
     pub(crate) nosubmit: bool,
+    /// Cache erase files
+    #[arg(long)]
+    pub(crate) cacheerase: bool,
     /// Automatic token to submit
     #[arg(long, value_parser=checktoken, conflicts_with = "nosubmit")]
     pub(crate) mytoken: Option<String>,
@@ -203,9 +196,11 @@ impl OkStatus {
     pub(crate) fn isvalid(&self) -> bool {
         *self == OkStatus::Accepted
     }
+    #[allow(dead_code)]
     pub(crate) fn isinvalid(&self) -> bool {
         *self == OkStatus::Rejected
     }
+    #[allow(dead_code)]
     pub(crate) fn isunknown(&self) -> bool {
         *self == OkStatus::Unknown
     }
@@ -396,13 +391,16 @@ impl Alerting for Posread {
 pub(crate) struct Blast {
     pub(crate) qseqid: String,
     pub(crate) sseqid: String,
+    #[allow(dead_code)]
     pub(crate) qstart: usize,
+    #[allow(dead_code)]
     pub(crate) qend: usize,
     pub(crate) sstart: usize,
     pub(crate) send: usize,
     pub(crate) qlen: usize,
     pub(crate) length: usize,
     pub(crate) pident: f32,
+    #[allow(dead_code)]
     pub(crate) gaps: usize,
     pub(crate) sseq: String,
     #[serde(skip_deserializing)]
@@ -465,6 +463,7 @@ impl Blastmatch {
     }
 }
 impl Blast {
+    #[allow(dead_code)]
     pub(crate) fn getstatus(&self) -> &Status {
         &self.status
     }
@@ -519,16 +518,18 @@ impl FromStr for Blastmatch {
         let s = s.trim_start_matches('>');
         let (split1, seq) = match s.split_once('\n') {
             Some((a, b)) => (a, b),
-            None => return Err("No status in header format: {s}".to_string()),
+            None => return Err(format!("No status in header format: {s}")),
         };
         if !seq.chars().all(|p| p.is_ascii_alphabetic()) {
-            return Err("Absence of ASCII alphabetic in sequence: {s}".to_string());
+            return Err(format!("Absence of ASCII alphabetic in sequence: {s}"));
         }
         let (qseqid, sseqid, sstart, send, complement, status) =
             match split1.splitn(3, DELIMITERFASTA) {
                 mut a if a.clone().count() == 3 => {
-                    let (name, infos, status) =
-                        (a.next().unwrap(), a.next().unwrap(), a.next().unwrap());
+                    let (name, infos, status) = match (a.next(), a.next(), a.next()) {
+                        (Some(a), Some(b), Some(c)) => (a, b, c),
+                        _ => return Err("Invalid header".to_string()),
+                    };
                     let status = if let Ok(a) = Status::try_from(status) {
                         a
                     } else {
@@ -573,7 +574,8 @@ impl PartialEq for Blast {
 }
 impl Eq for Blast {}
 pub trait Blastcalc {
-    fn getseq<'a>(&self) -> Cow<str>;
+    #[allow(dead_code)]
+    fn getseq(&self) -> Cow<'_, str>;
     fn getstatus(&self) -> &Status;
     /// Only return new alleles
     fn onlynewalleles(&self) -> bool {
@@ -586,6 +588,7 @@ pub trait Blastcalc {
         let r = self.getpos();
         r.0..=r.1
     }
+    #[allow(dead_code)]
     fn getstrand(&self) -> Strand {
         match self.getpos() {
             (a, b) if a > b => Strand::Minus,
@@ -596,14 +599,13 @@ pub trait Blastcalc {
     fn getallelename(&self) -> Option<String> {
         getallelefromblast(self.getqueryseq())
     }
+    #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
-        self.getallelename()
-            .map(|f| Locus::try_from(f).ok())
-            .flatten()
+        self.getallelename().and_then(|f| Locus::try_from(f).ok())
     }
 }
 impl Blastcalc for Blast {
-    fn getseq(&self) -> Cow<str> {
+    fn getseq(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.sseq)
     }
     fn getsubject(&self) -> &str {
@@ -621,7 +623,7 @@ impl Blastcalc for Blast {
 }
 impl Blastcalc for Blastmatch {
     /// Get sequence
-    fn getseq(&self) -> Cow<str> {
+    fn getseq(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.sseq)
     }
     fn getsubject(&self) -> &str {
@@ -736,7 +738,6 @@ impl Newfasta {
             status: b,
         })
     }
-    #[allow(unused)]
     pub(crate) fn newfromblast(blast: &Blast) -> Self {
         Self {
             qseqid: blast.qseqid.clone(),
@@ -1166,6 +1167,7 @@ impl Strand {
     pub(crate) fn isrev(&self) -> bool {
         self == &Strand::Minus
     }
+    #[allow(unused)]
     pub(crate) fn isfwd(&self) -> bool {
         self == &Strand::Plus
     }
