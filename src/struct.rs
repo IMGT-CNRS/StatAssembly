@@ -1,5 +1,6 @@
 use bio::io::fasta::{self, FastaRead};
 use clap::builder::Str;
+use itertools::Itertools;
 use serde::ser::{SerializeTupleStruct, SerializeTupleVariant};
 use serde_with::{DefaultOnError, DefaultOnNull, DisplayFromStr, serde_as};
 /*
@@ -9,9 +10,11 @@ Available under EUPL license
 Made by: Guilhem Zeitoun
 */
 use crate::submissions::{DELIMITERFASTA, getallelefromblast};
+use crate::{MATCHREADS, locusisokay};
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::io::ErrorKind;
 use std::ops::{Neg, Not, RangeInclusive};
@@ -184,6 +187,15 @@ impl Not for OkStatus {
             OkStatus::Unknown => Self::Unknown,
             OkStatus::Accepted => Self::Rejected,
             OkStatus::Rejected => Self::Accepted,
+        }
+    }
+}
+impl Display for OkStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OkStatus::Unknown => write!(f, "Unknown"),
+            OkStatus::Accepted => write!(f, "Accepted"),
+            OkStatus::Rejected => write!(f, "Rejected"),
         }
     }
 }
@@ -992,6 +1004,13 @@ impl GeneInfos {
             status: OkStatus::default(),
         }
     }
+    pub(crate) fn setstatus(&mut self, reads100m: usize, hash: &BTreeMap<Position, Posread>) {
+        if hash.iter().all(|(_, f)| f.isvalid()) && reads100m >= MATCHREADS {
+            self.status = OkStatus::Accepted
+        } else {
+            self.status = OkStatus::Rejected
+        }
+    }
     pub(crate) fn addtosequence<T>(&self, seq: T, fasta: &mut fasta::Writer<File>) -> io::Result<()>
     where
         T: AsRef<[u8]>,
@@ -1036,6 +1055,13 @@ impl GeneInfos {
     }
 }
 impl LocusInfos {
+    pub(crate) fn setstatus(&mut self, mean: u64, pos: &BTreeMap<Position, HashMapinfo>) {
+        if locusisokay(mean, &pos.values().collect_vec()) {
+            self.status = OkStatus::Accepted
+        } else {
+            self.status = OkStatus::Rejected
+        }
+    }
     pub(crate) fn positioninlocus(
         &self,
         start: &Position,
@@ -1194,7 +1220,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100: usize,
     pub(crate) reads100m: usize,
     pub(crate) coveragex: usize,
-    accepted: bool,
+    pub(crate) status: OkStatus,
 }
 impl Ord for GeneInfosFinish {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -1238,10 +1264,6 @@ impl Into<GeneInfos> for GeneInfosFinish {
     }
 }
 impl GeneInfosFinish {
-    #[allow(dead_code)]
-    pub(crate) fn isok(&self) -> bool {
-        self.accepted
-    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         gene: GeneInfos,
@@ -1252,7 +1274,6 @@ impl GeneInfosFinish {
         reads100m: usize,
         readscoverage: f32,
         coveragex: usize,
-        accepted: bool,
     ) -> Self {
         GeneInfosFinish {
             gene: gene.gene,
@@ -1268,11 +1289,11 @@ impl GeneInfosFinish {
             reads100m,
             readscoverage,
             coveragex,
-            accepted,
+            status: gene.status,
         }
     }
     pub(crate) fn make_default(gene: GeneInfos) -> Self {
-        Self::new(gene, 0, 0, None, 0, 0, 0.0, 0, false)
+        Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
     }
 }
 #[serde_as]
@@ -1430,8 +1451,6 @@ pub(crate) struct HashMapinfo {
     pub(crate) qual: usize,
     #[serde(rename = "percent-softclips")]
     pub(crate) softclips: f32,
-    #[serde(skip_deserializing)]
-    pub(crate) locusisok: bool,
 }
 impl PartialEq for HashMapinfo {
     fn eq(&self, other: &Self) -> bool {
@@ -1501,7 +1520,6 @@ impl HashMapinfo {
             misalign,
             qual,
             softclips,
-            locusisok: false,
         }
     }
 }

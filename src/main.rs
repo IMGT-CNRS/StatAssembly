@@ -8,13 +8,11 @@ It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
 Made by: Guilhem Zeitoun
 */
-//TODO: Soft clips dans nouveau tableai et vérifier les valeurs.
+//TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 ///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
-use extended_htslib::bcf::record;
 use itertools::Itertools;
 use plotters::coord::Shift;
-use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
@@ -27,10 +25,8 @@ use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, SUBMISSIONLINK, askforsubmission, checkifblastpresent, downloadmotifs,
-    generatelightbam, genesblast, getallelefromblast, getnamefromblast, getspeciesfromncbi,
-    locusallposition, locusfiltering, locuspos, matchmotif, positionfiltering, preparesubmission,
-    retainbestmatch, submit,
+    REQUESTCLIENT, askforsubmission, checkifblastpresent, generatelightbam, genesblast,
+    getallelefromblast, getspeciesfromncbi, locusallposition, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -68,7 +64,7 @@ lazy_static! {
     };
     static ref NAME: String = env!("CARGO_PKG_NAME").replacen('_', "/", 1);
     #[allow(clippy::unwrap_used)]
-    static ref regexpword: regex::Regex = regex::Regex::new(r"[^-\w()]").unwrap();
+    static ref regexpword: regex::Regex = regex::Regex::new(r"[^-\w()]").unwrap_or_else(|_| unreachable!("Regex issue"));
 }
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
@@ -93,7 +89,7 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
         (None, None) => None,
     }
 }
-fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
+/* fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
     let mut vec = Vec::new();
     for elem in list.iter().filter(|p| !new || p.onlynewalleles()) {
         let (posa, posb) = elem.getpos();
@@ -112,7 +108,7 @@ fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
         vec.push(info);
     }
     vec
-}
+} */
 #[allow(clippy::type_complexity)]
 fn iteralert(
     args: &Args,
@@ -481,7 +477,7 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     }
     //Check assembly is okay if existing
     if args.assembly.is_some() {
-        getassemblyreader(&args)?;
+        getassemblyreader(args)?;
     }
     let outputdir = match args.outdir.is_dir() {
         true => {
@@ -530,7 +526,7 @@ fn processcounting(
     {
         d.softclips += 1.0;
     }
-    let (message, matched, aligned) = match iteralert(&args, message, &record) {
+    let (message, matched, aligned) = match iteralert(args, message, record) {
         (_, None, _) => {
             return Ok(false);
         } //Kill software, errors sent by iteralert
@@ -699,6 +695,40 @@ fn calculatemean(meanpath: &Path, args: &Args) -> io::Result<u64> {
             Ok(mean)
         }
     }
+}
+fn paintgraph<T>(
+    outputfile: &std::path::Path,
+    loci: &LocusInfos,
+    pos: &BTreeMap<Position, HashMapinfo>,
+    args: &Args,
+    readgraphelem: T,
+    mismatchgraphelem: T,
+    mean: u64,
+) -> io::Result<()>
+where
+    T: DrawingBackend,
+{
+    if let Err(e) = readgraph(
+        outputfile,
+        loci,
+        pos.values().collect_vec().as_slice(),
+        args,
+        readgraphelem.into(),
+        mean,
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{}", e),
+        ));
+    };
+    mismatchgraph(
+        outputfile,
+        loci,
+        pos.values().collect_vec().as_slice(),
+        args,
+        mismatchgraphelem.into(),
+    );
+    Ok(())
 }
 fn main() -> ExitCode {
     let firstinstant = Instant::now();
@@ -966,8 +996,8 @@ fn main() -> ExitCode {
                 .filter(|p| !(args.forward && p.is_reverse()))
             {
                 count += 1;
-                //Print every 100 reads done
-                if count % 100 == 0 {
+                //Print every 300 reads done
+                if count % 300 == 0 {
                     let _ = writeln!(
                         lock,
                         "Processed {} reads in {:.3} s",
@@ -988,14 +1018,7 @@ fn main() -> ExitCode {
                     }
                 }
             }
-            if locusisokay(mean, &pos.values().collect_vec()) {
-                loci.status = OkStatus::Accepted;
-            }
-            if loci.status.isvalid() {
-                pos.iter_mut().for_each(|(_a, f)| {
-                    f.locusisok = true;
-                });
-            }
+            loci.setstatus(mean, &pos);
             if nocount {
                 eprintln!(
                     "The region {}:{}-{} has no data, skipped.",
@@ -1024,14 +1047,25 @@ fn main() -> ExitCode {
                 );
             });
             println!("Making graphs");
-            match (loci.haplotype.isprimary(), args.svg) {
-                (true, true) => {
+            match (
+                loci.haplotype.isprimary(),
+                args.svg,
+                readgraphtop.clone(),
+                mismatchgraphtop.clone(),
+                readgraphbottom.clone(),
+                mismatchgraphbottom.clone(),
+                readgraphtop2.clone(),
+                mismatchgraphtop2.clone(),
+                readgraphbottom2.clone(),
+                mismatchgraphbottom2.clone(),
+            ) {
+                (true, true, Some(readgraphtop), Some(mismatchgraphtop), ..) => {
                     let f = readgraph(
                         &outputfile1,
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        readgraphtop.clone().unwrap(),
+                        readgraphtop.clone(),
                         mean,
                     );
                     if let Err(e) = f {
@@ -1043,16 +1077,16 @@ fn main() -> ExitCode {
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        mismatchgraphtop.clone().unwrap(),
+                        mismatchgraphtop.clone(),
                     );
                 }
-                (false, true) => {
+                (false, true, _, _, Some(readgraphbottom), Some(mismatchgraphbottom), ..) => {
                     let f = readgraph(
                         &outputfile1,
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        readgraphbottom.clone().unwrap(),
+                        readgraphbottom.clone(),
                         mean,
                     );
                     if let Err(e) = f {
@@ -1064,16 +1098,16 @@ fn main() -> ExitCode {
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        mismatchgraphbottom.clone().unwrap(),
+                        mismatchgraphbottom.clone(),
                     );
                 }
-                (true, false) => {
+                (true, false, _, _, _, _, Some(readgraphtop2), Some(mismatchgraphtop2), ..) => {
                     let f = readgraph(
                         &outputfile2,
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        readgraphtop2.clone().unwrap(),
+                        readgraphtop2.clone(),
                         mean,
                     );
                     if let Err(e) = f {
@@ -1085,16 +1119,16 @@ fn main() -> ExitCode {
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        mismatchgraphtop2.clone().unwrap(),
+                        mismatchgraphtop2.clone(),
                     );
                 }
-                (false, false) => {
+                (false, false, .., Some(readgraphbottom2), Some(mismatchgraphbottom2)) => {
                     let f = readgraph(
                         &outputfile2,
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        readgraphbottom2.clone().unwrap(),
+                        readgraphbottom2.clone(),
                         mean,
                     );
                     if let Err(e) = f {
@@ -1106,8 +1140,15 @@ fn main() -> ExitCode {
                         loci,
                         pos.values().collect_vec().as_slice(),
                         &args,
-                        mismatchgraphbottom2.clone().unwrap(),
+                        mismatchgraphbottom2.clone(),
                     );
+                }
+                _ => {
+                    eprintln!(
+                        "Graphs for {} ({}) could not be created, skipped.",
+                        loci.locus, loci.haplotype
+                    );
+                    continue;
                 }
             }
             println!("Graphs finished.");
@@ -1123,13 +1164,7 @@ fn main() -> ExitCode {
             }
             println!(
                 "Locus {} ({}) is {}",
-                loci.locus,
-                loci.haplotype,
-                if loci.status.isvalid() {
-                    "validated"
-                } else {
-                    "rejected"
-                }
+                loci.locus, loci.haplotype, loci.status
             );
             //Create gene CSV
             if let Some(blast) = &blastcheck {
@@ -1165,7 +1200,8 @@ fn main() -> ExitCode {
                                 b.iter().map(|f| f.clone().into()).collect();
                             match genesblast(&geneinfo, &args, &speciesblast, &loci.locus) {
                                 Ok(blast) => {
-                                    if loci.status.isvalid() && b.iter().any(|f| f.isok()) {
+                                    if loci.status.isvalid() && b.iter().any(|f| f.status.isvalid())
+                                    {
                                         locushashresult.insert(loci.locus.clone(), blast);
                                     }
                                 }
@@ -1246,7 +1282,7 @@ fn main() -> ExitCode {
                             }
                             Ok(b) => b,
                         };
-                        if loci.status.isvalid() && result.iter().any(|f| f.isok()) {
+                        if loci.status.isvalid() && result.iter().any(|f| f.status.isvalid()) {
                             locushashresult.insert(loci.locus.clone(), data);
                         }
                     }
@@ -1413,7 +1449,7 @@ fn genelist(
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
-    for gene in genes {
+    for mut gene in genes {
         let mut reader = getreaderoffile(args)?;
         let (mut reads, mut readsfull, mut reads100, mut reads100m) = (0, 0, 0, 0);
         let (mut hash, records) = {
@@ -1560,6 +1596,7 @@ fn genelist(
             std::fs::create_dir_all(&plots)?;
         };
         let mut output = plots.join(regexpword.replace_all(&gene.gene, "_").to_uppercase());
+        gene.setstatus(reads100m, &hash);
         if !args.svg {
             output.set_extension("png");
             let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
@@ -1602,7 +1639,6 @@ fn genelist(
             reads100m,
             coverageperc,
             coverage,
-            geneisok(reads100m, &hash),
         );
         finale.push(elem);
     }
@@ -1748,14 +1784,15 @@ fn genegraph<T>(
     root: DrawingArea<T, Shift>,
     alerting: &mut BTreeMap<GeneInfos, Vec<(bool, usize)>>,
     reads100m: usize,
-) where
+) -> Result<(), Box<dyn std::error::Error>>
+where
     T: DrawingBackend,
 {
     let genename = gene.gene.to_string();
     let text_style = fontstyle.into_text_style(&root);
     let _ = root.fill(&plotters::prelude::WHITE);
     let max = hash.values().map(|p| p.gettotal()).max().unwrap_or(0) + 5;
-    let colorgene = if geneisok(reads100m, hash) {
+    let colorgene = if gene.status.isvalid() {
         full_palette::GREEN
     } else {
         full_palette::RED
@@ -1773,7 +1810,7 @@ fn genegraph<T>(
             ("sans-serif", 22, &colorgene),
         )
         .build_cartesian_2d(1..hash.len(), 0..max)
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //Reverse complement genes
     let hash: Vec<(&Position, &Posread)> = match gene.strand {
         Strand::Plus => hash.iter().collect(),
@@ -1786,7 +1823,7 @@ fn genegraph<T>(
                 .map(|(pos, (_, val))| (pos + 1, val.gettotal())),
             full_palette::BLUE_300.mix(0.8).stroke_width(4),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Total reads")
         .legend(|(x, y)| {
             PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_300.mix(0.8))
@@ -1799,7 +1836,7 @@ fn genegraph<T>(
                 .map(|(pos, (_, val))| (pos + 1, val.getindel())),
             full_palette::ORANGE_300.mix(0.7).stroke_width(3),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Sequence match")
         .legend(|(x, y)| {
             PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300.mix(0.8))
@@ -1813,7 +1850,7 @@ fn genegraph<T>(
                     .map(|(pos, (_, val))| (pos + 1, val.getmatch())),
                 full_palette::GREEN_400.mix(0.5).stroke_width(2),
             ))
-            .unwrap()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Sequence equal")
             .legend(|(x, y)| {
                 PathElement::new(vec![(x, y), (x + 15, y)], full_palette::GREEN_400.mix(0.5))
@@ -1826,7 +1863,7 @@ fn genegraph<T>(
                     .map(|(pos, ..)| (pos + 1, reads100m)),
                 BLACK.mix(0.7).stroke_width(3),
             ))
-            .unwrap()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Reads 100% match")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7)));
         chart
@@ -1849,7 +1886,7 @@ fn genegraph<T>(
                     }))
                     .margin(0),
             )
-            .unwrap()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Warning positions")
             .legend(|(x, y)| {
                 plotters::element::Rectangle::new(
@@ -1877,7 +1914,7 @@ fn genegraph<T>(
                     }))
                     .margin(0),
             )
-            .unwrap()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Suspicious positions")
             .legend(|(x, y)| {
                 plotters::element::Rectangle::new(
@@ -1928,7 +1965,7 @@ fn genegraph<T>(
         .y_max_light_lines(2)
         //.disable_y_mesh()
         .draw()
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
     secondary
         .draw_secondary_series(
@@ -1947,7 +1984,7 @@ fn genegraph<T>(
                 }))
                 .style(full_palette::BLACK.mix(0.4).filled()),
         )
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Average softclips")
         .legend(|(x, y)| {
             plotters::element::Rectangle::new(
@@ -1962,7 +1999,7 @@ fn genegraph<T>(
         .label_style(text_style.clone())
         //.disable_y_mesh()
         .draw()
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     if !args.nolegend {
         secondary
             .configure_series_labels()
@@ -1971,11 +2008,12 @@ fn genegraph<T>(
             .label_font(text_style.clone())
             .border_style(BLACK.mix(0.8))
             .draw()
-            .unwrap();
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
     // To avoid the IO failure being ignored silently, we manually call the present function
     drawnoticetext(&root);
-    root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
+    root.present().map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
+    Ok(())
 }
 fn givename(
     species: &str,
@@ -2247,7 +2285,7 @@ fn mismatchgraph<T>(
     drawnoticetext(&root);
     root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
 }
-fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
+pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
     //Between a minimum and a maximum number of reads
     graph.iter().all(|f| {
         f.overlaps >= MINIMUMCOVERAGE.try_into().unwrap_or(i64::MAX)
@@ -2257,9 +2295,6 @@ fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
                     .try_into()
                     .unwrap_or(i64::MAX)
     })
-}
-fn geneisok(reads100m: usize, hash: &BTreeMap<Position, Posread>) -> bool {
-    hash.iter().all(|(_, f)| f.isvalid()) && reads100m >= MATCHREADS
 }
 fn readgraph<T>(
     outputfile: &std::path::Path,
@@ -2297,7 +2332,7 @@ where
             ("sans-serif", 28, &colorgene),
         )
         .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max)
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     let _ = chart
         .configure_mesh()
         .x_label_formatter(&|f| {
@@ -2337,7 +2372,7 @@ where
             )
             .point_size(3),
         )
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Mean coverage")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BROWN));
     chart
@@ -2365,7 +2400,7 @@ where
             )
             .border_style(full_palette::BLACK.mix(0.8)),
         )
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Coverage boundaries")
         .legend(|(x, y)| {
             plotters::element::Rectangle::new(
@@ -2379,7 +2414,7 @@ where
             0,
             full_palette::RED_300.mix(0.6),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("MAPQ: 0")
         .legend(|(x, y)| {
             plotters::element::Rectangle::new(
@@ -2393,7 +2428,7 @@ where
             0,
             full_palette::YELLOW_900.mix(0.5),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("MAPQ: 1-59")
         .legend(|(x, y)| {
             plotters::element::Rectangle::new(
@@ -2407,7 +2442,7 @@ where
             0,
             full_palette::GREEN_400.mix(0.4),
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("MAPQ: 60")
         .legend(|(x, y)| {
             plotters::element::Rectangle::new(
@@ -2420,7 +2455,7 @@ where
             pos.iter().map(|p| (p.position.getobasedpos(), p.secondary)),
             full_palette::BLACK,
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Secondary alignments")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLACK));
     chart
@@ -2429,7 +2464,7 @@ where
                 .map(|p| (p.position.getobasedpos(), p.supplementary)),
             full_palette::BLUE_700,
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Supplementary alignments")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BLUE_700));
     chart
@@ -2437,7 +2472,7 @@ where
             pos.iter().map(|p| (p.position.getobasedpos(), p.overlaps)),
             full_palette::ORANGE_300,
         ))
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Overlapping reads")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300));
     //Secondary
@@ -2511,7 +2546,7 @@ where
             .label_font(text_style.clone())
             .border_style(BLACK.mix(0.8))
             .draw()
-            .unwrap();
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
     }
     //Bottom graph
     let mut chart = ChartBuilder::on(&bottom)
@@ -2529,7 +2564,7 @@ where
             (loci.start.getobasedpos()..loci.end.getobasedpos()).into_segmented(),
             0..100i64,
         )
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     let text_style = fontstyle.into_text_style(&root);
     let _ = chart
         .configure_mesh()
@@ -2564,7 +2599,7 @@ where
                 .baseline(0)
                 .margin(0),
         )
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Coverage break")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
     chart
@@ -2581,7 +2616,7 @@ where
                 }))
                 .style(full_palette::BLACK.mix(0.8).filled()),
         )
-        .unwrap()
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Softclips percent")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
     if !args.nolegend {
@@ -2592,10 +2627,10 @@ where
             .border_style(BLACK.mix(0.8))
             .label_font(text_style)
             .draw()
-            .unwrap();
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
     drawnoticetext(&root);
     // To avoid the IO failure being ignored silently, we manually call the present function
-    root.present().expect("Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir");
+    root.present().map_err(|_| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())
 }

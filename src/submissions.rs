@@ -53,7 +53,7 @@ lazy_static! {
         "/statassembly/downloadmotif.txt"
     ); */
     pub static ref MOTIFLINK: String = obfstr::obfstring!(
-        "http://localhost/StatAssembly/newmotif_fusionne.txt"
+        "https://www.imgt.org/submissions/newmotif_fusionne.txt"
     );
     pub static ref VQUESTLINK: String =
         format!("{}{}",
