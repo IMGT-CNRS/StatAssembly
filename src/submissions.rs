@@ -11,6 +11,7 @@ use std::cmp::{Ordering, max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::io::IsTerminal;
+use std::str::FromStr;
 use std::{
     env::{self, temp_dir},
     error::Error,
@@ -26,9 +27,9 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::r#struct::{
     Args, Blast, Blastcalc, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Newfasta,
-    Ourfasta, Position, Seqresult, Strand,
+    Position, Seqresult, Strand,
 };
-use crate::{BORNES, getassemblyreader, getreaderoffile};
+use crate::{BORNES, genelist, getassemblyreader, getreaderoffile};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(15, 0))
@@ -102,6 +103,37 @@ pub(crate) fn getallelefromblast(text: &str) -> Option<String> {
         .split('|')
         .nth(1)
         .map(|f| f.to_string())
+}
+pub(crate) fn getchromosomefromblast(text: &str) -> Option<String> {
+    text.to_ascii_uppercase()
+        .split('|')
+        .nth(3)
+        .map(|f| f.to_string())
+}
+pub(crate) fn getpositionfromblast(text: &str) -> Option<(Position, Position, Strand)> {
+    text.to_ascii_uppercase().split("|").nth(4).and_then(|p| {
+        let p = p.replace("/", "..");
+        let mut split = p.splitn(3, "..");
+        match (
+            split.next().map(|p| p.parse::<i64>()),
+            split.next().map(|p| p.parse::<i64>()),
+            split.next().map(|a| a.trim()),
+        ) {
+            (Some(Ok(a)), Some(Ok(b)), c) => {
+                let complement = c.is_some_and(|f| !f.is_empty());
+                Some((
+                    Position::new(false, a),
+                    Position::new(false, b),
+                    if complement {
+                        Strand::Minus
+                    } else {
+                        Strand::Plus
+                    },
+                ))
+            }
+            _ => None,
+        }
+    })
 }
 #[must_use]
 pub(crate) fn fastafilter(text: &str, find: &str, present: bool, species: bool) -> String {
@@ -196,7 +228,7 @@ pub(crate) fn downloadmotifs() -> Option<PathBuf> {
     };
     Some(tempfile)
 }
-pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
+pub(crate) fn downloadref(allowdownload: bool) -> Option<(PathBuf, String)> {
     println!("Checking reference sequence from IMGT/GENE-DB");
     let releaseversion = match sendresult(&REQUESTCLIENT, RELEASELINK.as_str()) {
         Ok(e) => e,
@@ -204,6 +236,9 @@ pub(crate) fn downloadref() -> Option<(PathBuf, String)> {
             println!("Release fetched failed because: {e}");
             return None;
         }
+    };
+    if !allowdownload {
+        return Some((PathBuf::new(), releaseversion));
     };
     let tempfile = Path::join(&env::temp_dir(), format!("refseq{}.fasta", releaseversion));
     if !tempfile.is_file() {
@@ -255,11 +290,11 @@ where
     //TRD is inside TRA locus
     if locus == &Locus::TRA {
         blast.retain(|p| {
-            p.getqueryseq().contains(&format!("{}", locus))
-                || p.getqueryseq().contains(&"TRD".to_string())
+            p.getquery().contains(&format!("{}", locus))
+                || p.getquery().contains(&"TRD".to_string())
         });
     } else {
-        blast.retain(|p| p.getqueryseq().contains(&format!("{}", locus)));
+        blast.retain(|p| p.getquery().contains(&format!("{}", locus)));
     }
 }
 pub(crate) fn checklocus(p: &fasta::Record, locus: &Locus) -> bool {
@@ -285,15 +320,29 @@ pub(crate) fn speciesandorphonfiltering(
     orphonfilter: bool,
     force: bool,
 ) -> io::Result<PathBuf> {
-    let outfile = Path::join(
-        &env::temp_dir(),
-        format!(
-            "refseq{}-{}{}.fasta",
-            releaseversion.replace(" ", "_"),
-            species.replace(" ", "-"),
-            locus.map_or("".to_string(), |l| format!("-{}", l))
-        ),
-    );
+    let outfile = if force {
+        NamedTempFile::with_prefix_in(
+            format!(
+                "refseq{}-{}{}.fasta",
+                releaseversion.replace(" ", "_"),
+                species.replace(" ", "-"),
+                locus.map_or("".to_string(), |l| format!("-{}", l))
+            ),
+            env::temp_dir(),
+        )?
+        .into_temp_path()
+        .to_path_buf()
+    } else {
+        Path::join(
+            &env::temp_dir(),
+            format!(
+                "refseq{}-{}{}.fasta",
+                releaseversion.replace(" ", "_"),
+                species.replace(" ", "-"),
+                locus.map_or("".to_string(), |l| format!("-{}", l))
+            ),
+        )
+    };
     if outfile.exists() && !force {
         println!("Filtering already done, retrieving...");
         return Ok(outfile);
@@ -354,17 +403,17 @@ pub(crate) fn speciesandorphonfiltering(
         let records = read
             .records()
             .filter_map(Result::ok)
-            .filter(|p| checklocus(&p, l));
+            .filter(|p| checklocus(p, l));
         let seq = records.fold(String::new(), |mut acc, f| {
             acc.push_str(&format!(
-                ">{} {}\n{}",
+                ">{} {}\n{}\n",
                 f.id(),
                 f.desc().unwrap_or_default(),
                 String::from_utf8_lossy(f.seq())
             ));
             acc
         });
-        seq
+        seq.trim().to_string()
     } else {
         finale
     };
@@ -399,7 +448,7 @@ pub(crate) fn speciesandorphonfiltering(
     }
     Ok(outfile)
 }
-pub(crate) fn readfastareader<T>(fasta: fasta::Reader<T>) -> io::Result<Vec<Ourfasta>>
+pub(crate) fn readfastareader<T>(fasta: fasta::Reader<T>) -> io::Result<Vec<Newfasta>>
 where
     T: std::io::BufRead,
 {
@@ -409,10 +458,19 @@ where
             eprintln!("Seq {} is invalid, skipped. Error is {v}", record.id());
             continue;
         }
-        seqs.push(Ourfasta {
-            name: format!("{} {}", record.id(), record.desc().unwrap_or_default()),
-            seq: String::from_utf8_lossy(record.seq()).to_string(),
-        })
+        let text = format!(
+            "{} {}\n{}",
+            record.id(),
+            record.desc().unwrap_or_default(),
+            String::from_utf8_lossy(record.seq()).to_string()
+        );
+        match Newfasta::from_str(&text) {
+            Ok(a) => seqs.push(a),
+            Err(e) => {
+                eprintln!("Seq {} is invalid, skipped. Error is {}", record.id(), e);
+                continue;
+            }
+        };
     }
     if seqs.is_empty() {
         return Err(io::Error::new(
@@ -423,23 +481,10 @@ where
     Ok(seqs)
 }
 #[allow(unused)]
-pub(crate) fn readfastafile(seq: &Path) -> io::Result<Vec<Ourfasta>> {
+pub(crate) fn readfastafile(seq: &Path) -> io::Result<Vec<Newfasta>> {
     let file = File::open(seq)?;
     let fasta = fasta::Reader::new(file);
     readfastareader(fasta)
-}
-#[must_use]
-#[allow(unused)]
-pub(crate) fn selectnewalleles(result: &[Blast]) -> Vec<Ourfasta> {
-    let mut fastas = Vec::new();
-    for seq in result {
-        let name = Ourfasta {
-            name: seq.qseqid.clone(),
-            seq: seq.sseq.clone(),
-        };
-        fastas.push(name);
-    }
-    fastas
 }
 pub(crate) fn statusblastmotifs(data: &mut Vec<Blast>) {
     data.sort_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
@@ -486,7 +531,7 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
             .iter()
             .any(|g| {
                 g != f
-                    && checkoverlap(&g.pos(), &f.pos())
+                    && checkoverlap(&g.getposrange(), &f.getposrange())
                     && (g.length as f32 / g.qlen as f32 * g.pident.powf(1.1))
                         >= (f.length as f32 / f.qlen as f32 * f.pident.powf(1.1))
             })
@@ -690,7 +735,7 @@ where
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let reference = match downloadref().map(|(a, b)| {
+    let reference = match downloadref(true).map(|(a, b)| {
         speciesandorphonfiltering(&a, Some(locus), b, species.as_ref(), false, args.cacheerase)
     }) {
         Some(a) => a?,
@@ -752,8 +797,7 @@ pub(crate) fn locusallposition<T>(
 where
     T: AsRef<str>,
 {
-    let reference = downloadref();
-    let reference = match reference.map(|(a, b)| {
+    let reference = match downloadref(true).map(|(a, b)| {
         speciesandorphonfiltering(&a, None, b, species.as_ref(), true, args.cacheerase)
     }) {
         Some(a) => a?,
@@ -990,7 +1034,7 @@ pub(crate) fn launchblast(
         Ok(b) => b,
     };
     println!("The species is {}.", realspecies);
-    let (path, releaseversion) = match downloadref() {
+    let (path, releaseversion) = match downloadref(true) {
         None => return Err(()),
         Some((a, b)) => (a, b),
     };
@@ -1015,7 +1059,13 @@ pub(crate) fn launchblast(
         }
         Ok(mut c) => {
             statusblast(&mut c);
-            let status: Vec<Newfasta> = c.iter().map(Newfasta::newfromblast).collect();
+            let status: Vec<Newfasta> = c
+                .iter()
+                .map(|c| {
+                    let b: &dyn Blastcalc = c;
+                    Newfasta::from(b)
+                })
+                .collect();
             let sequence = status.iter().fold(String::new(), |mut acc, f| {
                 let f: &dyn Seqresult = f;
                 acc.push_str(&format!("\n{}", f));
@@ -1127,31 +1177,76 @@ pub(crate) fn submit(
             p.complement = newcomplement;
         }
     });
-    let file = dir.join("newalleles.fasta");
-    let sequence = filter_new_alleles(c, &motifs).fold(String::new(), |mut acc, f| {
-        let f: &dyn Seqresult = f;
+    let mut c = c.to_vec();
+    c.iter_mut().for_each(|p| {
+        if let Some(loc) = p.getlocusname()
+            && let Some(find) = locus.iter().find(|fi| {
+                p.getchromosomefromblast().is_some_and(|a| a == fi.contig) && fi.locus == loc
+            })
+            && p.sseqid.starts_with("GENE")
+            && let Some((start, end, complement)) = p.getposition()
+            && let Some((newstart, newend, newcomplement)) = find.locusinposition(
+                &start,
+                &end,
+                &complement,
+                &Position::new(false, p.sstart.try_into().unwrap_or_default()),
+                &Position::new(false, p.send.try_into().unwrap_or_default()),
+                &p.complement,
+            )
+        {
+            p.sstart = newstart.getobasedpos().try_into().unwrap_or_default();
+            p.send = newend.getobasedpos().try_into().unwrap_or_default();
+            p.qseqid = p.getchromosomefromblast().unwrap_or_default();
+            p.complement = newcomplement;
+        }
+    });
+    let mut matche = csv::WriterBuilder::new()
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .from_path(dir.join("motifs.txt"))
+        .map_err(|e| format!("Error setting motifs match: {e}"))?;
+    for matches in motifs.iter() {
+        let _ = matche.serialize(matches);
+    }
+    let _ = matche.flush();
+    let mut matche = csv::WriterBuilder::new()
+        .comment(Some(b'#'))
+        .delimiter(b'\t')
+        .from_path(dir.join("motifs2.txt"))
+        .map_err(|e| format!("Error setting motifs match: {e}"))?;
+    for matches in c.iter() {
+        let _ = matche.serialize(matches);
+    }
+    let _ = matche.flush();
+    let file = dir.join("newpotentialalleles.fasta");
+    let sequence = filter_new_alleles(&c, &motifs).fold(String::new(), |mut acc, f| {
+        let f: &dyn Blastcalc = f;
+        let f: &dyn Seqresult = &Newfasta::from(f);
         acc.push_str(&format!("\n{}", f));
         acc
     });
-    if !args.nosubmit && sequence.trim().is_empty() {
-        eprintln!(
-            "No new alleles found. IMGT can still process your data, do you want to continue (Y/n):"
-        );
-        if !readfromterminal(&'y', &'n', false) {
-            println!("Exiting");
-            return Ok(());
-        }
-    }
-    if let Err(e) = fs::write(file, sequence) {
+    println!("BLAST results were added.");
+    if let Err(e) = fs::write(file, &sequence) {
         eprintln!("An error has occured while priting sequence: {e}.");
         return Ok(());
     }
-    println!("BLAST results were added.");
-    browseropening().map_err(|f| f.to_string())?;
-    preparesubmission(dir, realspecies, args);
+    if !args.nosubmit {
+        if sequence.trim().is_empty() && !asknonewalleles() {
+            println!("Exiting");
+            return Ok(());
+        }
+        browseropening().map_err(|f| f.to_string())?;
+        preparesubmission(dir, realspecies, args);
+    }
     //let _ = fs::remove_dir_all(dir);
     Ok(())
     //form(&client);
+}
+pub fn asknonewalleles() -> bool {
+    println!(
+        "No new alleles has been found. IMGT can still process your data, do you want to continue (Y/n):"
+    );
+    readfromterminal(&'y', &'n', false)
 }
 pub(crate) fn askforsubmission(
     realspecies: &str,
@@ -1169,7 +1264,8 @@ pub(crate) fn askforsubmission(
                 io::ErrorKind::NetworkUnreachable,
                 "IMGT does not currently support automatic submissions.".to_string(),
             )); */
-            return Ok(());
+
+            //return Ok(());
         }
         Ok(p) => {
             return Err(io::Error::new(
@@ -1188,22 +1284,26 @@ pub(crate) fn askforsubmission(
         }
     };
     if !args.nosubmit {
-        println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
-        if !readfromterminal(&'y', &'n', false) {
-            println!("Your sequences won't be submitted.");
-            return Ok(());
-        } else {
-            let mut blastmatch: Vec<Blastmatch> = Vec::new();
-            for (_, data) in infos.iter() {
-                blastmatch.append(&mut data.clone());
+        if !infos
+            .iter()
+            .any(|(_, p)| p.iter().any(|p| p.onlynewalleles()))
+        {
+            if !asknonewalleles() {
+                return Ok(());
             }
-            if let Err(e) = submit(args, locus, &blastmatch, realspecies.to_string())
-                .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))
-            {
-                println!("{}", e);
+        } else {
+            println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
+            if !readfromterminal(&'y', &'n', false) {
+                println!("Your sequences won't be submitted.");
                 return Ok(());
             }
         }
+        let mut blastmatch: Vec<Blastmatch> = Vec::new();
+        for (_, data) in infos.iter() {
+            blastmatch.append(&mut data.clone());
+        }
+        submit(args, locus, &blastmatch, realspecies.to_string())
+            .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
     }
     Ok(())
 }

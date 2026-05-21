@@ -5,7 +5,7 @@ version = "3.0.0"
 edition = "2024"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>"]
 rust-version = "1.93"
-license-file = "LICENSE.txt"
+license = "EUPL-1.2"
 keywords = ["immunogenetics", "reads", "assembly quality"]
 publish = false
 categories = ["science::bioinformatics::sequence-analysis"]
@@ -18,7 +18,7 @@ itertools = "0.14.0"
 #noodles-core = "0.15.0"
 #noodles-fasta = "0.46.0"
 num-format = "0.4.4"
-openssl-sys = { version = "0.9.115", features = ["vendored"] }
+openssl-sys = { version = "0.9.116", features = ["vendored"] }
 ordered-float = "5.3.0"
 plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
 ranges = "0.4.0"
@@ -32,11 +32,11 @@ flate2 = "1.1.9"
 reqwest = { version = "0.13.3", features = ["blocking", "multipart", "query"] }
 serde_json = "1.0.149"
 tempfile = "3.27.0"
-tar = "0.4.45"
+tar = "0.4.46"
 webbrowser = "1.2.1"
-strum = { version = "0.27.2", features = ["strum_macros"] }
-strum_macros = "0.27.2"
-serde_with = "3.19.0"
+strum = { version = "0.28.0", features = ["strum_macros"] }
+strum_macros = "0.28.0"
+serde_with = "3.20.0"
 obfstr = "0.4.4"
 [lints.rust]
 unsafe_code = "deny"

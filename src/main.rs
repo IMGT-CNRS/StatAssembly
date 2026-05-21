@@ -25,8 +25,8 @@ use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, askforsubmission, checkifblastpresent, generatelightbam, genesblast,
-    getallelefromblast, getspeciesfromncbi, locusallposition, positionfiltering,
+    REQUESTCLIENT, askforsubmission, checkifblastpresent, downloadref, generatelightbam,
+    genesblast, getallelefromblast, getspeciesfromncbi, locusallposition, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -49,7 +49,7 @@ use std::{
 mod r#struct;
 mod submissions;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const AUTHOR: &str = "IMGT";
+const AUTHOR: &str = "IMGT®";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
 const MIN_READLENGTH: u64 = 1_000;
@@ -58,6 +58,7 @@ const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: usize = 2;
 const MATCHREADS: usize = 10;
 const BORNES: usize = 10_000;
+const SOFTCLIPRATIO: f32 = 0.4;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
@@ -736,8 +737,8 @@ where
     Ok(())
 }
 fn main() -> ExitCode {
-    let firstinstant = Instant::now();
     let mut args = Args::parse();
+    let firstinstant = Instant::now();
     let speciesblast = match getspeciesfromncbi(&REQUESTCLIENT, &args.species) {
         Ok(b) => b,
         Err(e) => {
@@ -1293,14 +1294,20 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
-    match printnewloc(&args, &mergedloci) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error setting new locus result: {e}"),
+    if let Err(e) = printnewloc(&args, &mergedloci) {
+        eprintln!("Error setting new locus result: {e}");
+    }
+    if let Err(e) = printpotentialalleles(
+        &args,
+        downloadref(false).map(|(_, release)| release),
+        &locushashresult,
+    ) {
+        eprintln!("Error setting alleles result: {e}");
     }
     if !args.nosubmit
-        && locushashresult
-            .iter()
-            .any(|(_, f)| f.iter().any(|g| g.onlynewalleles()))
+    /* && locushashresult
+    .iter()
+    .any(|(_, f)| f.iter().any(|g| g.onlynewalleles())) */
     {
         match askforsubmission(&speciesblast, &mergedloci, &args, &locushashresult) {
             Ok(_) => (),
@@ -1314,6 +1321,52 @@ fn main() -> ExitCode {
         args.outdir.display()
     );
     ExitCode::SUCCESS
+}
+fn printpotentialalleles<T>(
+    args: &Args,
+    release: Option<T>,
+    locushash: &HashMap<Locus, Vec<Blastmatch>>,
+) -> io::Result<()>
+where
+    T: AsRef<str>,
+{
+    let path = args.outdir.join("potentialalleles.fasta");
+    let writer = File::create(path)?;
+    let mut csv = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .comment(Some(b'#'))
+        .flexible(true)
+        .quote_style(csv::QuoteStyle::Never)
+        .from_writer(writer);
+    csv.write_record([
+        "name",
+        "position",
+        "locus",
+        "strand",
+        "bestmatch",
+        "identity",
+    ])?;
+    csv.write_record([b"#Name of the gene given or detected, Locus, Strand, Best match based on IMGT-GENE-DB/Identity (in %)"])?;
+    csv.write_record(&[format!(
+        "#IMGT/GENE-DB release {}",
+        release.map_or("Unknown".to_string(), |p| String::from(p.as_ref()))
+    )])?;
+    for (locus, elem) in locushash {
+        for matches in elem {
+            let name = matches.getallelename().unwrap_or("N/A".to_string());
+            let close = getallelefromblast(&matches.qseqid).unwrap_or("N/A".to_string());
+            let (start, end) = matches.getpos();
+            csv.write_record(&[
+                name,
+                format!("{}-{}", start, end),
+                locus.to_string(),
+                matches.complement.to_string(),
+                close,
+                matches.getidentity().to_string(),
+            ])?;
+        }
+    }
+    Ok(())
 }
 fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
     let geneloc = match &args.geneloc {

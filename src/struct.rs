@@ -8,8 +8,10 @@ It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
 Made by: Guilhem Zeitoun
 */
-use crate::submissions::{DELIMITERFASTA, getallelefromblast};
-use crate::{MATCHREADS, locusisokay};
+use crate::submissions::{
+    DELIMITERFASTA, getallelefromblast, getchromosomefromblast, getpositionfromblast,
+};
+use crate::{MATCHREADS, SOFTCLIPRATIO, locusisokay};
 use clap::{Parser, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
@@ -23,7 +25,9 @@ use strum_macros::EnumIter;
 #[clap(
     author = crate_authors!("\n"),
     before_help = "This script analyzes BAM files coming from reads assembled on an assembly to assess IG/TR loci quality.\nYou can also submit new sequences to IMGT.",
-    after_help = "This code was made by and for IMGT (the international ImMunoGeneTics information system).",
+    after_help = format!("This code was made by and for IMGT (the international ImMunoGeneTics information system) under {} license.",env!("CARGO_PKG_LICENSE")),
+    arg_required_else_help=true,
+    display_name="IMGT/StatAssembly",
     help_template = "\
     {name} {version}
     Authors: {author-section}
@@ -102,7 +106,7 @@ pub(crate) struct Args {
     /// Save as SVG images (create big images)
     #[arg(long)]
     pub(crate) svg: bool,
-    ///Species name (for folder creation)
+    ///Species name (must match NCBI taxonomy & for folder creation)
     #[arg(short, long)]
     pub(crate) species: String,
     ///Gene location (csv file). See example file for blueprint.
@@ -115,12 +119,12 @@ pub(crate) struct Args {
     #[arg(short = 'z', long)]
     pub(crate) outlightbam: Option<PathBuf>,
     ///Haploid status (only if locuspos is not set)
-    #[arg(short, long, conflicts_with = "locuspos")]
+    #[arg(long, conflicts_with = "locuspos")]
     pub(crate) haploid: bool,
     /// Do not submit to IMGT
     #[arg(long)]
     pub(crate) nosubmit: bool,
-    /// Cache erase files
+    /// Erase cache files
     #[arg(long)]
     pub(crate) cacheerase: bool,
     /// Automatic token to submit
@@ -418,6 +422,7 @@ pub(crate) struct Blastmatch {
     pub(crate) send: usize,
     pub(crate) complement: Strand,
     pub(crate) status: Status,
+    pub(crate) identity: f32,
 }
 impl PartialOrd for Blastmatch {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -442,6 +447,7 @@ impl PartialEq for Blastmatch {
 }
 impl Eq for Blastmatch {}
 impl Blastmatch {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         qseqid: String,
         sseqid: String,
@@ -450,6 +456,7 @@ impl Blastmatch {
         send: usize,
         complement: Strand,
         status: Status,
+        identity: f32,
     ) -> Self {
         Self {
             qseqid,
@@ -459,6 +466,7 @@ impl Blastmatch {
             send,
             complement,
             status,
+            identity,
         }
     }
 }
@@ -478,7 +486,8 @@ impl Blast {
 #[allow(clippy::from_over_into)]
 //Blastmatch is for matches, should not be converted
 impl Into<Blastmatch> for Blast {
-    fn into(self) -> Blastmatch {
+    fn into(mut self) -> Blastmatch {
+        self.setstatus();
         Blastmatch::new(
             self.qseqid,
             self.sseqid,
@@ -491,6 +500,7 @@ impl Into<Blastmatch> for Blast {
                 Strand::Plus
             },
             self.status,
+            self.pident,
         )
     }
 }
@@ -506,65 +516,6 @@ impl Display for Blastmatch {
             self.status,
             self.sseq
         ))
-    }
-}
-impl FromStr for Blastmatch {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.trim();
-        if !s.starts_with(">") {
-            return Err("No header format".to_string());
-        }
-        let s = s.trim_start_matches('>');
-        let (split1, seq) = match s.split_once('\n') {
-            Some((a, b)) => (a, b),
-            None => return Err(format!("No status in header format: {s}")),
-        };
-        if !seq.chars().all(|p| p.is_ascii_alphabetic()) {
-            return Err(format!("Absence of ASCII alphabetic in sequence: {s}"));
-        }
-        let (qseqid, sseqid, sstart, send, complement, status) =
-            match split1.splitn(3, DELIMITERFASTA) {
-                mut a if a.clone().count() == 3 => {
-                    let (name, infos, status) = match (a.next(), a.next(), a.next()) {
-                        (Some(a), Some(b), Some(c)) => (a, b, c),
-                        _ => return Err("Invalid header".to_string()),
-                    };
-                    let status = if let Ok(a) = Status::try_from(status) {
-                        a
-                    } else {
-                        return Err("Invalid status in header: {s}".to_string());
-                    };
-                    let (sseqid, sstart, send, complement) = if let Some((a, b, c)) =
-                        infos.split_once(':').and_then(|p| {
-                            if let Some((a, b)) = p.1.split_once('-') {
-                                let (start, end) = match (a.parse::<usize>(), b.parse::<usize>()) {
-                                    (Ok(b), Ok(c)) => (b, c),
-                                    _ => return None,
-                                };
-                                Some((p.0, start, end))
-                            } else {
-                                None
-                            }
-                        }) {
-                        let d = if b > c { Strand::Minus } else { Strand::Plus };
-                        (a, b, c, d)
-                    } else {
-                        return Err("Invalid header in sequence header: {s}".to_string());
-                    };
-                    (name.to_string(), sseqid, sstart, send, complement, status)
-                }
-                _ => return Err("Lacking info in sequence header: {s}".to_string()),
-            };
-        Ok(Self {
-            qseqid: qseqid.to_string(),
-            sseqid: sseqid.to_string(),
-            sseq: seq.to_string(),
-            sstart,
-            send,
-            complement,
-            status,
-        })
     }
 }
 impl PartialEq for Blast {
@@ -595,14 +546,22 @@ pub trait Blastcalc {
             _ => Strand::Plus,
         }
     }
-    fn getqueryseq(&self) -> &str;
+    fn getquery(&self) -> &str;
     fn getallelename(&self) -> Option<String> {
-        getallelefromblast(self.getqueryseq())
+        getallelefromblast(self.getquery())
+    }
+    fn getposition(&self) -> Option<(Position, Position, Strand)> {
+        getpositionfromblast(self.getsubject())
+    }
+    fn getchromosomefromblast(&self) -> Option<String> {
+        getchromosomefromblast(self.getsubject())
     }
     #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
-        self.getallelename().and_then(|f| Locus::try_from(f).ok())
+        self.getallelename()
+            .and_then(|f| Locus::try_from(f.split_at(3).0.to_string()).ok())
     }
+    fn getidentity(&self) -> f32;
 }
 impl Blastcalc for Blast {
     fn getseq(&self) -> Cow<'_, str> {
@@ -617,8 +576,11 @@ impl Blastcalc for Blast {
     fn getpos(&self) -> (usize, usize) {
         (self.sstart, self.send)
     }
-    fn getqueryseq(&self) -> &str {
+    fn getquery(&self) -> &str {
         &self.qseqid
+    }
+    fn getidentity(&self) -> f32 {
+        self.pident
     }
 }
 impl Blastcalc for Blastmatch {
@@ -636,8 +598,12 @@ impl Blastcalc for Blastmatch {
         (self.sstart, self.send)
     }
     /// Query id
-    fn getqueryseq(&self) -> &str {
+    fn getquery(&self) -> &str {
         &self.qseqid
+    }
+    /// Get identity
+    fn getidentity(&self) -> f32 {
+        self.identity
     }
 }
 #[derive(Clone, Debug)]
@@ -647,123 +613,45 @@ pub(crate) struct Newfasta {
     sseq: String,
     pos: RangeInclusive<usize>,
     status: Status,
+    identity: f32,
 }
-impl Seqresult for Newfasta {
-    fn qseqid(&self) -> &str {
-        &self.qseqid
+impl Blastcalc for Newfasta {
+    /// Get sequence
+    fn getseq(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.sseq)
     }
-
-    fn sseq(&self) -> &str {
-        &self.sseq
-    }
-    fn sseqid(&self) -> &str {
+    fn getsubject(&self) -> &str {
         &self.sseqid
     }
-    fn status(&self) -> &Status {
+    fn getstatus(&self) -> &Status {
         &self.status
     }
-    fn pos(&self) -> RangeInclusive<usize> {
-        self.pos.clone()
+    fn getpos(&self) -> (usize, usize) {
+        (*self.pos.start(), *self.pos.end())
     }
-}
-impl Seqresult for Blastmatch {
-    fn qseqid(&self) -> &str {
+    /// Query id
+    fn getquery(&self) -> &str {
         &self.qseqid
     }
-    fn sseqid(&self) -> &str {
-        &self.sseqid
-    }
-    fn sseq(&self) -> &str {
-        &self.sseq
-    }
-
-    fn status(&self) -> &Status {
-        &self.status
-    }
-    fn pos(&self) -> RangeInclusive<usize> {
-        self.sstart..=self.send
+    /// Get identity
+    fn getidentity(&self) -> f32 {
+        self.identity
     }
 }
-impl Seqresult for Blast {
-    fn qseqid(&self) -> &str {
-        &self.qseqid
-    }
-    fn sseqid(&self) -> &str {
-        &self.sseqid
-    }
-    fn sseq(&self) -> &str {
-        &self.sseq
-    }
-
-    fn status(&self) -> &Status {
-        &self.status
-    }
-    fn pos(&self) -> RangeInclusive<usize> {
-        self.sstart..=self.send
-    }
-}
-impl Newfasta {
-    pub(crate) fn new(reader: &Ourfasta) -> io::Result<Self> {
-        let split: Vec<&str> = reader.name.splitn(5, DELIMITERFASTA).collect();
-        if split.len() != 5 {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "{DELIMITERFASTA} in fasta lacking for {reader.name}",
-            ));
-        }
-        let (a, sseqid, b, c, d) = (split[0], split[1], split[2], split[3], split[4]);
-        let b = match Status::try_from(b) {
-            Ok(b) => b,
-            Err(_) => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid status for {reader.name}",
-                ));
-            }
-        };
-        let (c, d) = match (c.parse::<usize>(), d.parse::<usize>()) {
-            (Ok(c), Ok(d)) => (c, d),
-            _ => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "Position are invalid for {reader.name}.",
-                ));
-            }
-        };
-        Ok(Self {
-            qseqid: a.to_string(),
-            sseq: reader.seq.to_string(),
-            sseqid: sseqid.to_string(),
-            pos: (c..=d),
-            status: b,
-        })
-    }
-    pub(crate) fn newfromblast(blast: &Blast) -> Self {
+impl Seqresult for Newfasta {}
+impl From<&dyn Blastcalc> for Newfasta {
+    fn from(value: &dyn Blastcalc) -> Self {
         Self {
-            qseqid: blast.qseqid.clone(),
-            sseqid: blast.sseqid.clone(),
-            sseq: blast.sseq.clone(),
-            pos: blast.pos().clone(),
-            status: blast.status.clone(),
-        }
-    }
-    pub(crate) fn newfromblastowner(blast: Blast) -> Self {
-        Self {
-            pos: blast.pos().clone(),
-            qseqid: blast.qseqid,
-            sseqid: blast.sseqid.clone(),
-            sseq: blast.sseq,
-            status: blast.status,
+            qseqid: value.getquery().to_string(),
+            sseqid: value.getsubject().to_string(),
+            sseq: value.getseq().to_string(),
+            pos: value.getposrange(),
+            status: value.getstatus().clone(),
+            identity: value.getidentity(),
         }
     }
 }
-pub(crate) trait Seqresult {
-    fn qseqid(&self) -> &str;
-    fn sseqid(&self) -> &str;
-    fn sseq(&self) -> &str;
-    fn status(&self) -> &Status;
-    fn pos(&self) -> RangeInclusive<usize>;
-}
+pub(crate) trait Seqresult: Blastcalc {}
 impl TryFrom<&str> for Status {
     type Error = io::Error;
 
@@ -808,50 +696,79 @@ impl Display for Status {
         f.write_str(&format!("{}", self.to_serialize()))
     }
 }
-impl Newfasta {
+/* impl Newfasta {
     pub(crate) fn multipledeserialize(data: String) -> io::Result<Vec<Self>> {
         let mut elements = Vec::new();
         for elem in data.trim().trim_matches('>').split(">") {
-            let (name, seq) = elem
-                .split_once('\n')
-                .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()))
-                .ok_or(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    "Invalid fasta name sequence",
-                ))?;
-            let elem = Newfasta::new(&Ourfasta { name, seq })?;
+            let elem =
+                Newfasta::from_str(elem).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
             elements.push(elem);
         }
         Ok(elements)
     }
-}
+} */
 impl std::fmt::Display for &dyn Seqresult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let pos = self.pos();
+        let (start, end) = self.getpos();
         write!(
             f,
-            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
-            self.qseqid(),
-            self.sseqid(),
-            pos.start(),
-            pos.end(),
-            self.status().to_serialize(),
-            self.sseq()
+            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
+            self.getquery(),
+            self.getsubject(),
+            start,
+            end,
+            self.getstatus().to_serialize(),
+            self.getidentity(),
+            self.getseq(),
         )
     }
 }
-#[derive(Clone, Debug)]
-pub(crate) struct Ourfasta {
-    pub(crate) name: String,
-    pub(crate) seq: String,
-}
-impl Serialize for Ourfasta {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let text = format!(">{}\n{}", self.name, self.seq);
-        serializer.serialize_str(&text)
+impl FromStr for Newfasta {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = if let Some(a) = s.trim().strip_prefix('>') {
+            a
+        } else {
+            return Err("Does not start with fasta format".to_string());
+        };
+        let (data, seq) = match s.split_once('\n') {
+            Some((a, b)) => (a, b),
+            None => return Err("No sequence found".to_string()),
+        };
+        let seq = regex::Regex::new(r"\s+")
+            .unwrap_or_else(|_| unreachable!("Regex is ok"))
+            .replace_all(seq, "")
+            .to_ascii_lowercase();
+        if seq
+            .chars()
+            .any(|p| !p.is_ascii_alphabetic() || !['n', 'c', 'a', 't'].contains(&p))
+        {
+            return Err("Sequence has invalid nucleotides. Only atcgn are accepted.".to_string());
+        }
+        let split: Vec<&str> = data.splitn(6, DELIMITERFASTA).collect();
+        if split.len() < 6 {
+            return Err("Invalid header".to_string());
+        }
+        let [query, subject, start, end, status, identity] = split[..6] else {
+            return Err("Invalid header".to_string());
+        };
+        let status = match Status::try_from(status) {
+            Ok(b) => b,
+            Err(_) => return Err("Status is invalid".to_string()),
+        };
+        let (start, end) = match (start.parse::<usize>(), end.parse::<usize>()) {
+            (Ok(a), Ok(b)) if b >= a => (a, b),
+            _ => return Err("Position are invalid".to_string()),
+        };
+        Ok(Newfasta {
+            qseqid: query.to_string(),
+            sseqid: subject.to_string(),
+            sseq: seq,
+            pos: (start..=end),
+            status,
+            identity: identity.parse::<f32>().unwrap_or(0f32),
+        })
     }
 }
 #[derive(Debug)]
@@ -1005,30 +922,21 @@ impl GeneInfos {
             status: OkStatus::default(),
         }
     }
-    pub(crate) fn setstatus(&mut self, reads100m: usize, hash: &BTreeMap<Position, Posread>) {
-        if hash.iter().all(|(_, f)| f.isvalid()) && reads100m >= MATCHREADS {
-            self.status = OkStatus::Accepted
-        } else {
-            self.status = OkStatus::Rejected
-        }
-    }
     pub(crate) fn addtosequence<T>(&self, seq: T, fasta: &mut fasta::Writer<File>) -> io::Result<()>
     where
         T: AsRef<[u8]>,
     {
         fasta.write(
-            &self.gene,
-            Some(&format!(
-                "{}:{}-{}{}",
-                self.chromosome,
-                self.start.getobasedpos(),
-                self.end.getobasedpos(),
-                if self.strand == Strand::Minus {
-                    "/rc"
-                } else {
-                    ""
-                }
-            )),
+            &format!(
+                "GENE|{}|{}|{}|{}..{}{}",
+                self.getgene(),
+                "species",
+                self.getchromosome(),
+                self.getstart().getobasedpos(),
+                self.getend().getobasedpos(),
+                if self.getstrand().isrev() { "/rc" } else { "" }
+            ),
+            None,
             seq.as_ref(),
         )
     }
@@ -1037,8 +945,8 @@ impl GeneInfos {
         fasta: &mut fasta::IndexedReader<File>,
     ) -> io::Result<String> {
         let (startpos, endpos) = match (
-            self.start.getobasedpos().try_into(),
-            self.end.getobasedpos().try_into(),
+            self.getstart().getzbasedpos().try_into(),
+            self.getend().getobasedpos().try_into(),
         ) {
             (Ok(a), Ok(b)) => (a, b),
             _ => {
@@ -1048,11 +956,43 @@ impl GeneInfos {
                 ));
             }
         };
-        fasta.fetch(&self.chromosome, startpos, endpos)?;
+        fasta.fetch(self.getchromosome(), startpos, endpos)?;
         let length = endpos.saturating_sub(startpos).saturating_add(1);
         let mut cap = Vec::with_capacity(length.try_into().unwrap_or(0));
         fasta.read(&mut cap)?;
+        if self.strand.isrev() {
+            cap = bio::alphabets::dna::revcomp(&cap);
+        }
         String::from_utf8(cap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
+impl GenesList for GeneInfos {
+    fn getgene(&self) -> &str {
+        &self.gene
+    }
+
+    fn getchromosome(&self) -> &str {
+        &self.chromosome
+    }
+
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
+
+    fn getstart(&self) -> &Position {
+        &self.start
+    }
+
+    fn getend(&self) -> &Position {
+        &self.end
+    }
+
+    fn getstatus(&self) -> &OkStatus {
+        &self.status
+    }
+
+    fn alterstatus(&mut self, status: OkStatus) {
+        self.status = status;
     }
 }
 impl LocusInfos {
@@ -1063,6 +1003,39 @@ impl LocusInfos {
             self.status = OkStatus::Rejected
         }
     }
+    pub(crate) fn locusinposition(
+        &self,
+        newstart: &Position,
+        newend: &Position,
+        complement: &Strand,
+        matchstart: &Position,
+        matchend: &Position,
+        matchcomplement: &Strand,
+    ) -> Option<(Position, Position, Strand)> {
+        if newend.length(newstart) < matchend.length(matchstart) {
+            return None;
+        }
+        let (start, end) = if self.complement.isrev() {
+            let end = newend.getobasedpos() - std::cmp::min(matchstart, matchend).getobasedpos();
+            let start = newend.getobasedpos() - std::cmp::max(matchstart, matchend).getobasedpos();
+            (start, end)
+        } else {
+            let start =
+                newstart.getobasedpos() + std::cmp::min(matchstart, matchend).getobasedpos();
+            let end = newstart.getobasedpos() + std::cmp::max(matchstart, matchend).getobasedpos();
+            (start, end)
+        };
+        let complement = matchcomplement.isrev() ^ complement.isrev();
+        Some((
+            Position::new(false, start),
+            Position::new(false, end),
+            if complement {
+                Strand::Minus
+            } else {
+                Strand::Plus
+            },
+        ))
+    }
     pub(crate) fn positioninlocus(
         &self,
         start: &Position,
@@ -1072,44 +1045,33 @@ impl LocusInfos {
         if start > end || end.length(start) > self.getlength() {
             return None;
         }
-        if self.complement == Strand::Minus {
+        if self.complement.isrev() {
             let newend = self
                 .end
                 .getobasedpos()
-                .try_into()
-                .unwrap_or(u32::MIN)
-                .saturating_sub(self.getlength().try_into().unwrap_or_default())
-                .saturating_add(end.getobasedpos().try_into().unwrap_or_default());
+                .saturating_sub(self.getlength())
+                .saturating_add(end.getobasedpos());
             let newstart = self
                 .end
                 .getobasedpos()
-                .try_into()
-                .unwrap_or(u32::MIN)
-                .saturating_sub(self.getlength().try_into().unwrap_or_default())
-                .saturating_add(start.getobasedpos().try_into().unwrap_or_default());
+                .saturating_sub(self.getlength())
+                .saturating_add(start.getobasedpos());
             let complement = !complement.clone();
             Some((
-                Position::new(false, newstart.into()),
-                Position::new(false, newend.into()),
+                Position::new(false, newstart),
+                Position::new(false, newend),
                 complement,
             ))
         } else {
             let newstart = self
                 .start
                 .getobasedpos()
-                .try_into()
-                .unwrap_or(u32::MIN)
-                .saturating_add(start.getobasedpos().try_into().unwrap_or_default());
-            let newend = self
-                .start
-                .getobasedpos()
-                .try_into()
-                .unwrap_or(u32::MIN)
-                .saturating_add(end.getobasedpos().try_into().unwrap_or_default());
+                .saturating_add(start.getobasedpos());
+            let newend = self.start.getobasedpos().saturating_add(end.getobasedpos());
             let complement = complement.clone();
             Some((
-                Position::new(false, newstart.into()),
-                Position::new(false, newend.into()),
+                Position::new(false, newstart),
+                Position::new(false, newend),
                 complement,
             ))
         }
@@ -1207,6 +1169,27 @@ impl Display for Strand {
         }
     }
 }
+pub trait GenesList {
+    fn getgene(&self) -> &str;
+    fn getchromosome(&self) -> &str;
+    fn getstrand(&self) -> &Strand;
+    fn getstart(&self) -> &Position;
+    fn getend(&self) -> &Position;
+    #[allow(dead_code)]
+    fn getstatus(&self) -> &OkStatus;
+    fn alterstatus(&mut self, status: OkStatus);
+    fn setstatus(&mut self, reads100m: usize, hash: &BTreeMap<Position, Posread>) {
+        if hash
+            .iter()
+            .all(|(_, f)| f.isvalid() && f.softclips < SOFTCLIPRATIO)
+            && reads100m >= MATCHREADS
+        {
+            self.alterstatus(OkStatus::Accepted);
+        } else {
+            self.alterstatus(OkStatus::Rejected);
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct GeneInfosFinish {
     pub(crate) gene: String,
@@ -1214,7 +1197,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) strand: Strand,
     pub(crate) start: Position,
     pub(crate) end: Position,
-    length: i64,
+    pub(crate) length: i64,
     pub(crate) readscoverage: f32,
     pub(crate) reads: usize,
     pub(crate) matchpos: String,
@@ -1224,44 +1207,72 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) coveragex: usize,
     pub(crate) status: OkStatus,
 }
-impl Ord for GeneInfosFinish {
+impl GenesList for GeneInfosFinish {
+    fn getgene(&self) -> &str {
+        &self.gene
+    }
+
+    fn getchromosome(&self) -> &str {
+        &self.chromosome
+    }
+
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
+
+    fn getstart(&self) -> &Position {
+        &self.start
+    }
+
+    fn getend(&self) -> &Position {
+        &self.end
+    }
+
+    fn getstatus(&self) -> &OkStatus {
+        &self.status
+    }
+
+    fn alterstatus(&mut self, status: OkStatus) {
+        self.status = status;
+    }
+}
+impl Ord for dyn GenesList {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.chromosome.cmp(&other.chromosome) {
+        match self.getchromosome().cmp(other.getchromosome()) {
             core::cmp::Ordering::Equal => {}
             ord => return ord,
         }
-        match self.start.cmp(&other.start) {
+        match self.getstart().cmp(other.getstart()) {
             core::cmp::Ordering::Equal => {}
             ord => return ord,
         }
-        match self.end.cmp(&other.end) {
+        match self.getend().cmp(other.getend()) {
             core::cmp::Ordering::Equal => {}
             ord => return ord,
         }
         std::cmp::Ordering::Equal
     }
 }
-impl PartialOrd for GeneInfosFinish {
+impl PartialOrd for dyn GenesList {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
-impl PartialEq for GeneInfosFinish {
+impl PartialEq for dyn GenesList {
     fn eq(&self, other: &Self) -> bool {
-        self.gene == other.gene
+        self.getgene() == other.getgene()
     }
 }
-impl Eq for GeneInfosFinish {}
-#[allow(clippy::from_over_into)]
-impl Into<GeneInfos> for GeneInfosFinish {
-    fn into(self) -> GeneInfos {
+impl Eq for dyn GenesList {}
+impl From<GeneInfosFinish> for GeneInfos {
+    fn from(value: GeneInfosFinish) -> Self {
         GeneInfos {
-            gene: self.gene,
-            chromosome: self.chromosome,
-            strand: self.strand,
-            start: self.start,
-            end: self.end,
-            status: OkStatus::default(),
+            gene: value.gene,
+            chromosome: value.chromosome,
+            strand: value.strand,
+            start: value.start,
+            end: value.end,
+            status: value.status,
         }
     }
 }
@@ -1298,6 +1309,26 @@ impl GeneInfosFinish {
         Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
     }
 }
+impl Ord for GeneInfosFinish {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let a: &dyn GenesList = self;
+        let b: &dyn GenesList = other;
+        a.cmp(b)
+    }
+}
+impl PartialOrd for GeneInfosFinish {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for GeneInfosFinish {
+    fn eq(&self, other: &Self) -> bool {
+        let a: &dyn GenesList = self;
+        let b: &dyn GenesList = other;
+        a.eq(b)
+    }
+}
+impl Eq for GeneInfosFinish {}
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct FakeLocusinfo {
