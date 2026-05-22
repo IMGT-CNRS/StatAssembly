@@ -85,6 +85,9 @@ pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
         if io.read_line(&mut data).is_err() {
             return false;
         }
+        if data.trim().is_empty() && !force {
+            return false;
+        }
         if data.to_lowercase().trim().chars().all(|p| &p == yes) {
             return true;
         } else if data.to_lowercase().trim().chars().all(|p| &p == no) || !force {
@@ -488,11 +491,26 @@ pub(crate) fn readfastafile(seq: &Path) -> io::Result<Vec<Newfasta>> {
 }
 pub(crate) fn statusblastmotifs(data: &mut Vec<Blast>) {
     data.sort_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
-        std::cmp::Ordering::Equal => a.qseqid.cmp(&b.qseqid),
+        std::cmp::Ordering::Equal => match a.sstart.cmp(&b.sstart) {
+            Ordering::Equal => a.send.cmp(&b.send).reverse(),
+            ord => ord,
+        },
         ord => ord,
     });
     let mut other = Vec::new();
     data.clone_into(&mut other);
+    data.retain(|f| {
+        other
+            .iter()
+            .any(|g| {
+                g != f
+                    && g.getallelename() == f.getallelename()
+                    && checkoverlap(&(g.sstart..=g.send), &(f.sstart..=f.send))
+                    && (g.length as f32 / g.qlen as f32 * g.pident.powf(1.1))
+                        >= (f.length as f32 / f.qlen as f32 * f.pident.powf(1.1))
+            })
+            .not()
+    });
     for blastresult in data {
         blastresult.setstatus();
     }
@@ -866,9 +884,7 @@ where
 {
     data.iter().filter(|p| p.onlynewalleles()).filter(move |f| {
         motifs.iter().any(|p| {
-            p.getsubject().contains(f.getsubject())
-                && checkoverlap(&p.getposrange(), &f.getposrange())
-                && p.getposrange() != f.getposrange()
+            checkoverlap(&p.getposrange(), &f.getposrange()) && p.getposrange() != f.getposrange()
         })
     })
 }
@@ -1177,6 +1193,7 @@ pub(crate) fn submit(
             p.complement = newcomplement;
         }
     });
+
     let mut c = c.to_vec();
     c.iter_mut().for_each(|p| {
         if let Some(loc) = p.getlocusname()

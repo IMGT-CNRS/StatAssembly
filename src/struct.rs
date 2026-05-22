@@ -1049,13 +1049,11 @@ impl LocusInfos {
             let newend = self
                 .end
                 .getobasedpos()
-                .saturating_sub(self.getlength())
-                .saturating_add(end.getobasedpos());
+                .saturating_sub(std::cmp::min(end.getobasedpos(), start.getobasedpos()));
             let newstart = self
                 .end
                 .getobasedpos()
-                .saturating_sub(self.getlength())
-                .saturating_add(start.getobasedpos());
+                .saturating_sub(std::cmp::max(end.getobasedpos(), start.getobasedpos()));
             let complement = !complement.clone();
             Some((
                 Position::new(false, newstart),
