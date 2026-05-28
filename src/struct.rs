@@ -130,6 +130,9 @@ pub(crate) struct Args {
     /// Automatic token to submit
     #[arg(long, value_parser=checktoken, conflicts_with = "nosubmit")]
     pub(crate) mytoken: Option<String>,
+    /// Do not use bornes to delimitate locus all position
+    #[arg(long, conflicts_with = "locuspos")]
+    pub(crate) nobornes: bool,
 }
 fn checktoken(s: &str) -> Result<String, String> {
     let s = s.trim();
@@ -168,6 +171,80 @@ pub(crate) enum Locus {
     TRA,
     TRB,
     TRG,
+}
+#[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Default, Eq, Hash)]
+pub(crate) enum Blastlevel {
+    #[allow(unused)]
+    Megablast,
+    #[default]
+    Normal,
+    #[allow(unused)]
+    Minimum,
+}
+impl Blastlevel {
+    /// Word size
+    pub(crate) fn into_word_size(&self) -> usize {
+        match self {
+            Blastlevel::Megablast => 28,
+            Blastlevel::Normal => 15,
+            Blastlevel::Minimum => 11,
+        }
+    }
+    /// Number of matches
+    pub(crate) fn into_max_matches(&self) -> usize {
+        match self {
+            Blastlevel::Megablast => 2,
+            Blastlevel::Normal => 15,
+            Blastlevel::Minimum => 40,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Name {
+    pub(crate) numacc: Option<String>,
+    pub(crate) gene: String,
+    pub(crate) species: String,
+    pub(crate) chromosome: String,
+    pub(crate) posstart: Position,
+    pub(crate) posend: Position,
+    pub(crate) strand: Strand,
+}
+impl Name {
+    pub(crate) fn new(
+        numacc: Option<String>,
+        gene: String,
+        species: String,
+        chromosome: String,
+        posstart: Position,
+        posend: Position,
+        strand: Strand,
+    ) -> Self {
+        let (posstart, posend) = if posstart > posend {
+            (posend, posstart)
+        } else {
+            (posstart, posend)
+        };
+        Self {
+            numacc,
+            gene,
+            species,
+            chromosome,
+            posstart,
+            posend,
+            strand,
+        }
+    }
+}
+impl ToString for Name {
+    fn to_string(&self) -> String {
+        todo!("To be done");
+    }
+}
+impl FromStr for Name {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        todo!("To be done");
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Hash)]
 pub(crate) enum OkStatus {
@@ -550,6 +627,7 @@ pub trait Blastcalc {
     fn getallelename(&self) -> Option<String> {
         getallelefromblast(self.getquery())
     }
+    /// Get position of the label, not position of the element
     fn getposition(&self) -> Option<(Position, Position, Strand)> {
         getpositionfromblast(self.getsubject())
     }

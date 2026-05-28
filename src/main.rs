@@ -55,7 +55,7 @@ const ALERTLOCUSSIZE: i64 = 10_000_000;
 const MIN_READLENGTH: u64 = 1_000;
 const READGAPMESSAGE: u64 = 200;
 const MINIMUMCOVERAGE: usize = 10;
-const MAXCOVERAGERATIO: usize = 2;
+const MAXCOVERAGERATIO: f32 = 2.0;
 const MATCHREADS: usize = 10;
 const BORNES: usize = 10_000;
 const SOFTCLIPRATIO: f32 = 0.4;
@@ -344,6 +344,9 @@ fn locusposparser(
                 None,
                 None,
             ));
+        }
+        if args.haploid {
+            records.retain(|p| p.haplotype.as_ref().map_or(false, |f| f.isprimary()));
         }
     }
     let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
@@ -746,6 +749,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    println!("Species is {}.", speciesblast);
     if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater or equal than percent alerting.");
         return ExitCode::FAILURE;
@@ -1212,13 +1216,22 @@ fn main() -> ExitCode {
                 if !args.nosubmit
                     && let Some(b) = args.assembly.as_ref()
                 {
-                    eprintln!("You have not provided a gene list, BLASTING to get one.");
-                    let (_locusinfo, mut data) = match locusallposition(b, &speciesblast, &args) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            eprintln!("Cannot blast for gene list. Error is {e}");
-                            return ExitCode::FAILURE;
+                    let mut data = if locushashresult.is_empty() {
+                        eprintln!("You have not provided a gene list, BLASTING to get one.");
+                        match locusallposition(b, &speciesblast, &args) {
+                            Ok((_, a)) => a,
+                            Err(e) => {
+                                eprintln!("Cannot blast for gene list. Error is {e}");
+                                return ExitCode::FAILURE;
+                            }
                         }
+                    } else {
+                        eprintln!("Generating a gene list.");
+                        locushashresult
+                            .clone()
+                            .into_values()
+                            .flatten()
+                            .collect_vec()
                     };
                     blastcheck = Some(data.clone());
                     //locusfiltering(&loci.locus, &mut data);
@@ -1321,6 +1334,30 @@ fn main() -> ExitCode {
         args.outdir.display()
     );
     ExitCode::SUCCESS
+}
+fn printpotentialbornes<T>(bornes: &[T], args: &Args) -> io::Result<()>
+where
+    T: Blastcalc,
+{
+    let path = args.outdir.join("potentialbornes.csv");
+    let writer = File::create(path)?;
+    let mut csv = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .comment(Some(b'#'))
+        .flexible(true)
+        .quote_style(csv::QuoteStyle::Never)
+        .from_writer(writer);
+    for borne in bornes {
+        csv.write_record(&[
+            borne.getallelename().unwrap_or_default().as_str(),
+            borne.getsubject(),
+            &format!("{}", borne.getpos().0),
+            &format!("{}", borne.getpos().1),
+            borne.getstrand().to_string().as_str(),
+        ])?;
+    }
+    csv.flush()?;
+    Ok(())
 }
 fn printpotentialalleles<T>(
     args: &Args,
@@ -2343,11 +2380,7 @@ pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
     //Between a minimum and a maximum number of reads
     graph.iter().all(|f| {
         f.overlaps >= MINIMUMCOVERAGE.try_into().unwrap_or(i64::MAX)
-            && f.overlaps
-                < mean
-                    .saturating_mul(MAXCOVERAGERATIO.try_into().unwrap_or(u64::MAX))
-                    .try_into()
-                    .unwrap_or(i64::MAX)
+            && f.overlaps < ((mean as f32 * MAXCOVERAGERATIO).round() as i64)
     })
 }
 fn readgraph<T>(
@@ -2439,11 +2472,7 @@ where
                     {
                         Some((
                             p.position.getobasedpos(),
-                            mean.saturating_mul(
-                                u64::try_from(MAXCOVERAGERATIO).unwrap_or(u64::MAX),
-                            )
-                            .try_into()
-                            .unwrap_or(i64::MAX),
+                            (mean as f32 * MAXCOVERAGERATIO).round() as i64,
                         ))
                     } else {
                         None

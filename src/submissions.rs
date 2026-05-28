@@ -1,10 +1,16 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
+use crate::r#struct::{
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, FakeLocusinfo, GeneInfos, Haplotype, Locus,
+    LocusInfos, Newfasta, Position, Seqresult, Status, Strand,
+};
+use crate::{BORNES, getassemblyreader, getreaderoffile, printpotentialbornes};
 use bio::io::fasta;
 use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use lazy_static::lazy_static;
+use minimap2::{Aligner, Mapping};
 use reqwest::{StatusCode, tls};
 use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
@@ -12,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::io::IsTerminal;
 use std::str::FromStr;
+use std::thread::{self};
 use std::{
     env::{self, temp_dir},
     error::Error,
@@ -24,39 +31,51 @@ use std::{
 };
 use strum::IntoEnumIterator;
 use tempfile::{NamedTempFile, TempDir};
-
-use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Newfasta,
-    Position, Seqresult, Strand,
-};
-use crate::{BORNES, genelist, getassemblyreader, getreaderoffile};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(15, 0))
         .timeout(Duration::new(300, 0))
+        .tcp_user_timeout(Duration::new(400, 0))
         .user_agent(format!("IMGT/StatAssembly version {}", VERSION))
         .referer(false)
         .tls_version_min(tls::Version::TLS_1_2)
         .https_only(true)
+        .http3_max_idle_timeout(Duration::new(10,0))
+        .http3_prior_knowledge()
         .build()
         .unwrap_or_default();
     pub static ref WEBSERVER: String = obfstr::obfstring!("https://imgt.org");
-    pub static ref RELEASELINK: String =
-        format!("{}{}", WEBSERVER.as_str(), obfstr::obfstr!("/download/GENE-DB/RELEASE"));
-    /* pub static ref MOTIFLINK: String = format!(
+    pub static ref RELEASELINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
-        "/statassembly/downloadmotif.txt"
-    ); */
-    pub static ref MOTIFLINK: String = obfstr::obfstring!(
-        "https://www.imgt.org/submissions/newmotif_fusionne.txt"
+        obfstr::obfstr!("/download/GENE-DB/RELEASE")
     );
-    pub static ref VQUESTLINK: String =
-        format!("{}{}",
+    pub static ref MOTIFLINK: String = format!(
+        "{}{}",
         WEBSERVER.as_str(),
-        obfstr::obfstring!("/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP")
+        obfstr::obfstring!("/statassembly/downloadmotif.txt")
     );
-    pub static ref SUBMISSIONLINK: String = format!("{}{}", WEBSERVER.as_str(), obfstr::obfstring!("/submissions/"));
+    /* pub static ref MOTIFLINK: String =
+        obfstr::obfstring!("http://localhost:8910/submissions/newmotif_fusionne.fasta.gz");
+    pub static ref BORNESLINK: String =
+        obfstr::obfstring!("http://localhost:8910/submissions/bornes_mammals.fasta.gz");  */
+        pub static ref BORNESLINK: String = format!(
+            "{}{}",
+            WEBSERVER.as_str(),
+            obfstr::obfstring!("/submissions/bornes_mammals.fasta.gz")
+        );
+    pub static ref VQUESTLINK: String = format!(
+        "{}{}",
+        WEBSERVER.as_str(),
+        obfstr::obfstring!(
+            "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
+        )
+    );
+    pub static ref SUBMISSIONLINK: String = format!(
+        "{}{}",
+        WEBSERVER.as_str(),
+        obfstr::obfstring!("/submissions/")
+    );
 }
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DELIMITERFASTA: char = '/';
@@ -67,6 +86,32 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
         Ok(e) => {
             if e.status() == StatusCode::OK {
                 Ok(e.text().unwrap_or("Error getting data".to_string()))
+            } else {
+                Err(format!("Error getting URL. Code is {}", e.status()))
+            }
+        }
+        Err(e) => Err(format!("Error getting URL: {e}").to_string()),
+    }
+}
+pub(crate) fn sendresultcompressed(
+    request: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<String, String> {
+    match request.get(url).send() {
+        Ok(e) => {
+            if e.status() == StatusCode::OK {
+                let mut string = String::new();
+                if let Ok(bytes) = e.bytes()
+                    && let mut decode = flate2::read::GzDecoder::new(&bytes[..])
+                    && let Err(e) = decode.read_to_string(&mut string)
+                {
+                    return Err(format!("Cannot decrypt motifs: {e}"));
+                }
+                if string.trim().is_empty() {
+                    return Err(format!("Cannot decrypt motifs, invalid body."));
+                }
+                string.shrink_to_fit();
+                Ok(string)
             } else {
                 Err(format!("Error getting URL. Code is {}", e.status()))
             }
@@ -95,20 +140,32 @@ pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
         }
     }
 }
-pub(crate) fn getnamefromblast(text: &str) -> Option<String> {
-    text.to_ascii_lowercase()
+pub(crate) fn getnamefromblast<T>(text: T) -> Option<String>
+where
+    T: AsRef<str>,
+{
+    text.as_ref()
+        .to_ascii_lowercase()
         .split('|')
         .nth(2)
         .map(|f| f.to_string())
 }
-pub(crate) fn getallelefromblast(text: &str) -> Option<String> {
-    text.to_ascii_uppercase()
+pub(crate) fn getallelefromblast<T>(text: T) -> Option<String>
+where
+    T: AsRef<str>,
+{
+    text.as_ref()
+        .to_ascii_uppercase()
         .split('|')
         .nth(1)
         .map(|f| f.to_string())
 }
-pub(crate) fn getchromosomefromblast(text: &str) -> Option<String> {
-    text.to_ascii_uppercase()
+pub(crate) fn getchromosomefromblast<T>(text: T) -> Option<String>
+where
+    T: AsRef<str>,
+{
+    text.as_ref()
+        .to_ascii_uppercase()
         .split('|')
         .nth(3)
         .map(|f| f.to_string())
@@ -173,6 +230,22 @@ pub(crate) fn fastafilter(text: &str, find: &str, present: bool, species: bool) 
 pub(crate) fn checkoverlap(a: &RangeInclusive<usize>, b: &RangeInclusive<usize>) -> bool {
     max(a.start(), b.start()) <= min(a.end(), b.end())
 }
+pub(crate) fn fileincache<T>(tempfile: T) -> bool
+where
+    T: AsRef<Path>,
+{
+    if !tempfile.as_ref().is_file() {
+        return false;
+    }
+    tempfile
+        .as_ref()
+        .metadata()
+        .and_then(|p| {
+            p.accessed()
+                .map(|p| p.elapsed().map(|p| p < Duration::new(3600 * 24 * 7, 0)))
+        })
+        .is_ok_and(|f| f.unwrap_or_default())
+}
 pub(crate) fn checkifblastpresent() -> bool {
     println!("Detect if BLAST is operating.");
     let command = Command::new("blastn")
@@ -189,28 +262,38 @@ pub(crate) fn checkifblastpresent() -> bool {
         true
     }
 }
+pub(crate) fn downloadbornes() -> Option<PathBuf> {
+    println!("Downloading bornes sequence from IMGT");
+    let tempfile = Path::join(&env::temp_dir(), "bornes.fasta");
+    if !fileincache(&tempfile) {
+        println!("Downloading IMGT bornes, please wait...");
+        match sendresultcompressed(&REQUESTCLIENT, BORNESLINK.as_str()) {
+            Ok(e) => {
+                match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
+                    Ok(Ok(_)) => (),
+                    _ => {
+                        eprintln!("Cannot write bornes in sequence.");
+                        return None;
+                    }
+                }
+                println!("Success.")
+            }
+            Err(e) => {
+                println!("IMGT bornes data retrieval failed because: {e}.");
+                return None;
+            }
+        }
+    } else {
+        println!("IMGT bornes were already downloaded, retrieving...");
+    };
+    Some(tempfile)
+}
 pub(crate) fn downloadmotifs() -> Option<PathBuf> {
     println!("Downloading motifs sequence from IMGT");
     let tempfile = Path::join(&env::temp_dir(), "motifs.fasta");
-    let calc = tempfile
-        .metadata()
-        .and_then(|p| {
-            p.accessed()
-                .map(|p| p.elapsed().map(|p| p < Duration::new(3600 * 24 * 7, 0)))
-        })
-        .is_ok_and(|f| f.unwrap_or_default());
-    if !tempfile.is_file() || calc {
+    if !fileincache(&tempfile) {
         println!("Downloading IMGT motifs, please wait...");
-        let new = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::new(15, 0))
-            .timeout(Duration::new(300, 0))
-            .user_agent(format!("IMGT/StatAssembly version {}", VERSION))
-            .referer(false)
-            //.tls_version_min(tls::Version::TLS_1_2)
-            //.https_only(true)
-            .build()
-            .unwrap_or_default();
-        match sendresult(&new, MOTIFLINK.as_str()) {
+        match sendresultcompressed(&REQUESTCLIENT, MOTIFLINK.as_str()) {
             Ok(e) => {
                 match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
                     Ok(Ok(_)) => (),
@@ -559,28 +642,20 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
         blastresult.setstatus();
     }
 }
-pub(crate) fn find_global_best_range(blastcheck: &[Blastmatch]) -> Option<Vec<LocusInfos>> {
+pub(crate) fn find_global_best_range(
+    blastcheck: &[Blastmatch],
+    bornes: &Option<Vec<Blastmatch>>,
+) -> Option<Vec<LocusInfos>> {
     let mut groups: HashMap<(Locus, Haplotype), (String, bool, usize, usize)> = HashMap::new();
     let blastcheck = blastcheck.to_vec();
     let mut hash = blastcheck
         .iter()
-        .filter_map(|p| {
-            match Locus::try_from(
-                p.getallelename()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(3)
-                    .collect::<String>(),
-            ) {
-                Ok(d) => Some((d, p)),
-                Err(_) => None,
-            }
-        })
-        .into_group_map_by(|(l, f)| (l.clone(), f.sseqid.clone()));
+        .filter_map(|p| p.getlocusname().map(|d| (d, p)))
+        .into_group_map_by(|(l, f)| (l.clone(), f.getsubject()));
     hash.iter_mut().for_each(|(_, v)| {
-        v.sort_unstable_by(|(_, a), (_, b)| match a.sseqid.cmp(&b.sseqid) {
-            Ordering::Equal => match a.sstart.cmp(&b.sstart) {
-                Ordering::Equal => b.send.cmp(&b.send).reverse(),
+        v.sort_unstable_by(|(_, a), (_, b)| match a.getsubject().cmp(&b.getsubject()) {
+            Ordering::Equal => match a.getpos().0.cmp(&b.getpos().0) {
+                Ordering::Equal => b.getpos().1.cmp(&b.getpos().1).reverse(),
                 ord => ord,
             },
             ord => ord,
@@ -608,7 +683,21 @@ pub(crate) fn find_global_best_range(blastcheck: &[Blastmatch]) -> Option<Vec<Lo
                 index += 1;
                 let mut e = BTreeSet::new();
                 e.insert((*elem).clone());
-                locus.insert((loci.clone(), sseqname.clone(), index), e);
+                locus.insert((loci.clone(), sseqname.to_string(), index), e);
+            }
+        }
+    }
+    if let Some(borneblast) = &bornes {
+        'borne: for borneblast in borneblast {
+            for (_, values) in locus.iter_mut() {
+                for val in values.iter() {
+                    let a = borneblast;
+                    let b = val;
+                    if max(b.sstart, b.send).abs_diff(min(a.send, a.sstart)) <= BORNES {
+                        values.insert(borneblast.clone().into());
+                        break 'borne;
+                    }
+                }
             }
         }
     }
@@ -698,14 +787,15 @@ where
             ));
         }
     };
-    let mut blast: Vec<Blast> = match blastcommand(reference.as_path(), subject) {
-        Ok(b) => b,
-        Err(e) => {
-            return Err(io::Error::new(ErrorKind::InvalidData, e));
+    let mut blast: Vec<Blast> =
+        match blastcommand(reference.as_path(), subject, Blastlevel::default()) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(io::Error::new(ErrorKind::InvalidData, e));
+            }
         }
-    }
-    .into_iter()
-    .collect();
+        .into_iter()
+        .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
     if let Some(a) = locus {
@@ -764,14 +854,15 @@ where
             ));
         }
     };
-    let mut blast: Vec<Blast> = match blastcommand(reference.as_path(), name.as_path()) {
-        Ok(b) => b,
-        Err(e) => {
-            return Err(io::Error::new(ErrorKind::InvalidData, e));
+    let mut blast: Vec<Blast> =
+        match blastcommand(reference.as_path(), name.as_path(), Blastlevel::default()) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(io::Error::new(ErrorKind::InvalidData, e));
+            }
         }
-    }
-    .into_iter()
-    .collect();
+        .into_iter()
+        .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
     locusfiltering(locus, &mut blast);
@@ -815,27 +906,177 @@ pub(crate) fn locusallposition<T>(
 where
     T: AsRef<str>,
 {
-    let reference = match downloadref(true).map(|(a, b)| {
-        speciesandorphonfiltering(&a, None, b, species.as_ref(), true, args.cacheerase)
-    }) {
-        Some(a) => a?,
-        None => {
+    let (bornespath, referencepath) = match (
+        downloadbornes(),
+        downloadref(true).map(|(a, b)| {
+            speciesandorphonfiltering(&a, None, b, species.as_ref(), true, args.cacheerase)
+        }),
+    ) {
+        (Some(a), Some(b)) => (a, b?),
+        (None, ..) => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Bornes from IMGT cannot be downloaded",
+            ));
+        }
+        (.., None) => {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "Reference from IMGT cannot be downloaded",
             ));
         }
     };
-    let mut blast: Vec<Blast> = match blastcommand(reference.as_path(), subject) {
-        Ok(b) => b,
-        Err(e) => {
-            return Err(io::Error::new(ErrorKind::InvalidData, e));
+    println!("Merging bornes and IMGT/GENE-DB data.");
+    /* let file = NamedTempFile::new_in(&env::temp_dir())?;
+    let mut merge = File::create(&file)?;
+    let read = fs::read_to_string(&reference.0)?;
+    let read2 = fs::read_to_string(&reference.1)?;
+    merge.write_all(read.as_bytes())?;
+    merge.write_all(read2.as_bytes())?;
+    println!("Blasting to get position of loci."); */
+    let (blast, bornes) = thread::scope(|s| {
+        let blast = s.spawn(|| {
+            let b = match blastcommand(
+                referencepath.clone(),
+                subject.to_path_buf(),
+                Blastlevel::Normal,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(io::Error::new(ErrorKind::InvalidData, e));
+                }
+            };
+            Ok(b.into_iter().collect())
+        });
+        let bornes = if args.nobornes {
+            None
+        } else {
+            Some(s.spawn(|| {
+                let aligner = Aligner::builder()
+                    .asm20()
+                    .with_cigar()
+                    .with_index_threads(args.threads)
+                    .with_index(subject, None)
+                    .ok()?;
+                let read = fasta::Reader::from_file(bornespath.clone()).ok()?;
+                let mut aligns: Vec<Blastmatch> = Vec::new();
+                for seq in read.records().filter_map(Result::ok) {
+                    if let Ok(a) = aligner
+                        .map(
+                            seq.seq(),
+                            false,
+                            false,
+                            None,
+                            None,
+                            Some(format!("NCBI|{}", seq.desc().unwrap_or_default()).as_bytes()),
+                        )
+                        .map(|mut f| {
+                            f.retain(|p| p.is_primary);
+                            f
+                        })
+                        && let Some(first) = a.first()
+                        && let (
+                            Some(qseqid),
+                            Some(sseqid),
+                            sseq,
+                            Ok(sstart),
+                            Ok(send),
+                            complement,
+                            status,
+                            Some(Some(identity)),
+                        ) = (
+                            &first.query_name,
+                            &first.target_name,
+                            String::new(),
+                            TryInto::<usize>::try_into(first.target_start),
+                            TryInto::<usize>::try_into(first.target_end),
+                            if first.strand == minimap2::Strand::Reverse {
+                                Strand::Minus
+                            } else {
+                                Strand::Plus
+                            },
+                            Status::New,
+                            (&first)
+                                .alignment
+                                .as_ref()
+                                .map(|p| p.alignment_score.map(|d| d as f32)),
+                        )
+                    {
+                        let matche = Blastmatch::new(
+                            qseqid.to_string(),
+                            sseqid.to_string(),
+                            sseq,
+                            sstart,
+                            send,
+                            complement,
+                            status,
+                            identity,
+                        );
+                        aligns.push(matche);
+                    }
+                }
+                if aligns.is_empty() {
+                    None
+                } else {
+                    Some(aligns)
+                }
+            }))
+        };
+        println!("Waiting for blast and bornes to finish.");
+        (blast.join(), bornes.map(|d| d.join()))
+    });
+    let (mut blast, mut bornes) = match (blast, bornes) {
+        (Ok(Ok(a)), Some(Ok(Some(b)))) => (a, Some(b)),
+        (Ok(Ok(a)), Some(Ok(None))) | (Ok(Ok(a)), None) => {
+            eprintln!("No bornes found.");
+            (a, None)
         }
+        (Ok(Err(a)), _) => {
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                format!("Blast error. Error is: {}", a),
+            ));
+        }
+        (Err(a), Some(Err(b))) => {
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                format!(
+                    "Blast and bornes could not be performed. Error are: {:?} and {:?}",
+                    a, b
+                ),
+            ));
+        }
+        (Err(a), _) => {
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                format!("Blast could not be performed. Error is: {:?}", a),
+            ));
+        }
+        (_, Some(Err(b))) => {
+            return Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                format!("Bornes could not be performed. Error is: {:?}", b),
+            ));
+        }
+    };
+    bornes.as_mut().map(|p| {
+        p.sort_unstable_by(|f, g| match f.getallelename().cmp(&g.getallelename()) {
+            Ordering::Equal => f.getidentity().total_cmp(&g.getidentity()).reverse(),
+            e => e,
+        });
+        p.dedup_by(|f, g| match (f.getallelename(), g.getallelename()) {
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b) => true,
+            _ => false,
+        });
+        p.sort_unstable();
+        p.shrink_to_fit();
+    });
+    if let Some(bornes2) = &bornes {
+        printpotentialbornes(bornes2, &args)?;
     }
-    .into_iter()
-    .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
+    blast.shrink_to_fit();
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
@@ -872,7 +1113,7 @@ where
             let _ = r.serialize(elem);
         }
     }
-    let range = find_global_best_range(&data).ok_or(io::Error::new(
+    let range = find_global_best_range(&data, &bornes).ok_or(io::Error::new(
         ErrorKind::InvalidInput,
         "No locus found after BLAST analysis",
     ));
@@ -888,7 +1129,11 @@ where
         })
     })
 }
-pub(crate) fn blastcommand<T>(reference: T, subject: T) -> io::Result<Vec<Blast>>
+pub(crate) fn blastcommand<T>(
+    reference: T,
+    subject: T,
+    blastlevel: Blastlevel,
+) -> io::Result<Vec<Blast>>
 where
     T: AsRef<Path>,
 {
@@ -922,10 +1167,12 @@ where
             "75",
             "-out",
             output,
+            "-word_size",
+            blastlevel.into_word_size().to_string().as_str(),
             "-max_target_seqs",
-            "20",
+            blastlevel.into_max_matches().to_string().as_str(),
             "-max_hsps",
-            "5",
+            blastlevel.into_max_matches().to_string().as_str(),
             "-outfmt",
             "6 qseqid sseqid qstart qend sstart send qlen length pident gaps sseq",
         ])
@@ -987,8 +1234,14 @@ where
         jsone["esearchresult"]["idlist"]
             .as_array()
             .map(|f| f.iter().next())
-            .ok_or(io::Error::new(ErrorKind::InvalidInput, "Species not found"))?
-            .ok_or(io::Error::new(ErrorKind::InvalidInput, "Species not found"))?
+            .ok_or(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Species not found on NCBI Taxonomy.",
+            ))?
+            .ok_or(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Species not found on NCBI Taxonomy.",
+            ))?
             .as_str()
             .ok_or(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -1022,7 +1275,7 @@ where
             }
             (Some(Value::String(rank)), _) => Err(Box::new(io::Error::new(
                 ErrorKind::InvalidInput,
-                format!("The term used is not a species but a {}", rank),
+                format!("The term used is not a (sub)species but a {}", rank),
             ))),
             _ => Err(Box::new(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -1068,32 +1321,33 @@ pub(crate) fn launchblast(
         }
         Ok(b) => b,
     };
-    let result: Vec<Newfasta> = match blastcommand(filtering.as_path(), subject) {
-        Err(e) => {
-            eprintln!("{e}");
-            return Err(());
-        }
-        Ok(mut c) => {
-            statusblast(&mut c);
-            let status: Vec<Newfasta> = c
-                .iter()
-                .map(|c| {
-                    let b: &dyn Blastcalc = c;
-                    Newfasta::from(b)
-                })
-                .collect();
-            let sequence = status.iter().fold(String::new(), |mut acc, f| {
-                let f: &dyn Seqresult = f;
-                acc.push_str(&format!("\n{}", f));
-                acc
-            });
-            if let Err(e) = fs::write("sequence_finished.fasta", sequence) {
-                eprintln!("An error has occured while priting sequence: {e}.");
+    let result: Vec<Newfasta> =
+        match blastcommand(filtering.as_path(), subject, Blastlevel::default()) {
+            Err(e) => {
+                eprintln!("{e}");
                 return Err(());
             }
-            status
-        }
-    };
+            Ok(mut c) => {
+                statusblast(&mut c);
+                let status: Vec<Newfasta> = c
+                    .iter()
+                    .map(|c| {
+                        let b: &dyn Blastcalc = c;
+                        Newfasta::from(b)
+                    })
+                    .collect();
+                let sequence = status.iter().fold(String::new(), |mut acc, f| {
+                    let f: &dyn Seqresult = f;
+                    acc.push_str(&format!("\n{}", f));
+                    acc
+                });
+                if let Err(e) = fs::write("sequence_finished.fasta", sequence) {
+                    eprintln!("An error has occured while priting sequence: {e}.");
+                    return Err(());
+                }
+                status
+            }
+        };
     if result.is_empty() {
         eprintln!(
             "BLAST result is empty. No new alleles matching IMGT criteria has been identified."
@@ -1248,11 +1502,13 @@ pub(crate) fn submit(
         return Ok(());
     }
     if !args.nosubmit {
-        if sequence.trim().is_empty() && !asknonewalleles() {
+        if sequence.trim().is_empty() && args.mytoken.is_none() && !asknonewalleles() {
             println!("Exiting");
             return Ok(());
         }
-        browseropening().map_err(|f| f.to_string())?;
+        if args.mytoken.is_none() {
+            browseropening().map_err(|f| f.to_string())?;
+        }
         preparesubmission(dir, realspecies, args);
     }
     //let _ = fs::remove_dir_all(dir);
@@ -1308,7 +1564,7 @@ pub(crate) fn askforsubmission(
             if !asknonewalleles() {
                 return Ok(());
             }
-        } else {
+        } else if args.mytoken.is_none() {
             println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
             if !readfromterminal(&'y', &'n', false) {
                 println!("Your sequences won't be submitted.");
@@ -1394,27 +1650,31 @@ pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<NamedTempFile
     Ok(temp)
 }
 pub(crate) fn preparesubmission(path: &Path, species: String, args: &Args) -> bool {
-    println!(
-        "Please give the token provided by the submission. Type (e) to exit. Analysis files and new sequences would be sent to IMGT for submission."
-    );
-    let token = loop {
-        let mut block = io::stdin().lock().take(100);
-        let mut string = String::new();
-        let val = block.read_line(&mut string);
-        match (val, string.trim().to_lowercase()) {
-            (Err(_), _) | (Ok(0), _) => {
-                eprintln!("Exiting");
-                return false;
-            }
-            (Ok(_), v) if v == "e" => {
-                eprintln!("Exiting");
-                return false;
-            }
-            (Ok(_), v) if v.chars().all(|f| f.is_ascii_hexdigit()) && v.len() == 10 => break v,
-            (Ok(_), _) => {
-                eprintln!("Token is 10 hexadecimal characters, please retry.");
-            }
-        };
+    let token = if let Some(a) = &args.mytoken {
+        a.to_string()
+    } else {
+        println!(
+            "Please give the token provided by the submission. Type (e) to exit. Analysis files and new sequences would be sent to IMGT for submission."
+        );
+        loop {
+            let mut block = io::stdin().lock().take(100);
+            let mut string = String::new();
+            let val = block.read_line(&mut string);
+            match (val, string.trim().to_lowercase()) {
+                (Err(_), _) | (Ok(0), _) => {
+                    eprintln!("Exiting");
+                    return false;
+                }
+                (Ok(_), v) if v == "e" => {
+                    eprintln!("Exiting");
+                    return false;
+                }
+                (Ok(_), v) if v.chars().all(|f| f.is_ascii_hexdigit()) && v.len() == 10 => break v,
+                (Ok(_), _) => {
+                    eprintln!("Token is 10 hexadecimal characters, please retry.");
+                }
+            };
+        }
     };
     let archive = match createarchive(args, path) {
         Ok(a) => a,
