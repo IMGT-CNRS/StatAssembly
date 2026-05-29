@@ -1,29 +1,28 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
+use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastlevel, Blastmatch, FakeLocusinfo, GeneInfos, Haplotype, Locus,
-    LocusInfos, Newfasta, Position, Seqresult, Status, Strand,
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Name,
+    Newfasta, Position, Seqresult, Strand,
 };
-use crate::{BORNES, getassemblyreader, getreaderoffile, printpotentialbornes};
+use crate::{getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use lazy_static::lazy_static;
-use minimap2::{Aligner, Mapping};
 use reqwest::{StatusCode, tls};
 use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::IsTerminal;
 use std::str::FromStr;
-use std::thread::{self};
 use std::{
     env::{self, temp_dir},
     error::Error,
     fs::{self, File},
-    io::{self, BufRead, BufReader, ErrorKind, Read as _, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Read as _},
     ops::{Not, RangeInclusive},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -77,48 +76,10 @@ lazy_static! {
         obfstr::obfstring!("/submissions/")
     );
 }
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DELIMITERFASTA: char = '/';
 pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 
-pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
-    match request.get(url).send() {
-        Ok(e) => {
-            if e.status() == StatusCode::OK {
-                Ok(e.text().unwrap_or("Error getting data".to_string()))
-            } else {
-                Err(format!("Error getting URL. Code is {}", e.status()))
-            }
-        }
-        Err(e) => Err(format!("Error getting URL: {e}").to_string()),
-    }
-}
-pub(crate) fn sendresultcompressed(
-    request: &reqwest::blocking::Client,
-    url: &str,
-) -> Result<String, String> {
-    match request.get(url).send() {
-        Ok(e) => {
-            if e.status() == StatusCode::OK {
-                let mut string = String::new();
-                if let Ok(bytes) = e.bytes()
-                    && let mut decode = flate2::read::GzDecoder::new(&bytes[..])
-                    && let Err(e) = decode.read_to_string(&mut string)
-                {
-                    return Err(format!("Cannot decrypt motifs: {e}"));
-                }
-                if string.trim().is_empty() {
-                    return Err(format!("Cannot decrypt motifs, invalid body."));
-                }
-                string.shrink_to_fit();
-                Ok(string)
-            } else {
-                Err(format!("Error getting URL. Code is {}", e.status()))
-            }
-        }
-        Err(e) => Err(format!("Error getting URL: {e}").to_string()),
-    }
-}
 pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
     let io = io::stdin();
     if !io.is_terminal() {
@@ -140,6 +101,7 @@ pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
         }
     }
 }
+#[deprecated]
 pub(crate) fn getnamefromblast<T>(text: T) -> Option<String>
 where
     T: AsRef<str>,
@@ -150,15 +112,8 @@ where
         .nth(2)
         .map(|f| f.to_string())
 }
-pub(crate) fn getallelefromblast<T>(text: T) -> Option<String>
-where
-    T: AsRef<str>,
-{
-    text.as_ref()
-        .to_ascii_uppercase()
-        .split('|')
-        .nth(1)
-        .map(|f| f.to_string())
+pub(crate) fn getallelefromblast(text: &Name) -> &str {
+    &text.gene
 }
 pub(crate) fn getchromosomefromblast<T>(text: T) -> Option<String>
 where
@@ -197,31 +152,39 @@ pub(crate) fn getpositionfromblast(text: &str) -> Option<(Position, Position, St
 }
 #[must_use]
 pub(crate) fn fastafilter(text: &str, find: &str, present: bool, species: bool) -> String {
-    let mut lines: Vec<&str> = Vec::with_capacity(text.lines().count());
-    let mut keep = true;
-    for line in text.lines() {
-        let result = line.trim();
-        if result.starts_with(">") {
-            keep = match (present, species) {
-                (true, true) => {
-                    getnamefromblast(result).is_some_and(|f| f.contains(&find.to_ascii_lowercase()))
-                }
-                (false, true) => !getnamefromblast(result)
-                    .is_some_and(|f| f.to_lowercase().contains(&find.to_ascii_lowercase())),
-                (false, false) => !getallelefromblast(result)
-                    .is_some_and(|f| f.to_lowercase().contains(&find.to_ascii_lowercase())),
-                (true, false) => getallelefromblast(result)
-                    .is_some_and(|f| f.to_lowercase().contains(&find.to_ascii_lowercase())),
-            };
-        }
+    let buffer = BufReader::new(text.as_bytes());
+    let parser = fasta::Reader::new(buffer);
+    let mut lines: Vec<String> = Vec::with_capacity(text.lines().count());
+    for record in parser
+        .records()
+        .filter_map(Result::ok)
+        .filter(|p| p.check().is_ok())
+    {
+        let val = format!(
+            "{}{}",
+            record.id(),
+            record.desc().map_or(String::new(), |a| format!(" {a}"))
+        );
+        let keep = match Name::from_str(&val) {
+            Ok(result) => match (present, species) {
+                (true, true) => result.species.eq_ignore_ascii_case(find),
+                (false, true) => !result.species.eq_ignore_ascii_case(find),
+                (false, false) => !result.gene.eq_ignore_ascii_case(find),
+                (true, false) => result.gene.eq_ignore_ascii_case(find),
+            },
+            Err(_e) => {
+                //eprintln!("Error parsing line: {}. Error is {e}", val);
+                false
+            }
+        };
         if keep {
-            lines.push(result);
+            lines.push(record.to_string());
         }
     }
     lines
         .iter()
         .fold(String::new(), |mut acc, f| {
-            acc.push_str(format!("\n{}", f).as_str());
+            acc.push_str(format!("\n{}", f.trim()).as_str());
             acc
         })
         .trim()
@@ -262,100 +225,6 @@ pub(crate) fn checkifblastpresent() -> bool {
         true
     }
 }
-pub(crate) fn downloadbornes() -> Option<PathBuf> {
-    println!("Downloading bornes sequence from IMGT");
-    let tempfile = Path::join(&env::temp_dir(), "bornes.fasta");
-    if !fileincache(&tempfile) {
-        println!("Downloading IMGT bornes, please wait...");
-        match sendresultcompressed(&REQUESTCLIENT, BORNESLINK.as_str()) {
-            Ok(e) => {
-                match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
-                    Ok(Ok(_)) => (),
-                    _ => {
-                        eprintln!("Cannot write bornes in sequence.");
-                        return None;
-                    }
-                }
-                println!("Success.")
-            }
-            Err(e) => {
-                println!("IMGT bornes data retrieval failed because: {e}.");
-                return None;
-            }
-        }
-    } else {
-        println!("IMGT bornes were already downloaded, retrieving...");
-    };
-    Some(tempfile)
-}
-pub(crate) fn downloadmotifs() -> Option<PathBuf> {
-    println!("Downloading motifs sequence from IMGT");
-    let tempfile = Path::join(&env::temp_dir(), "motifs.fasta");
-    if !fileincache(&tempfile) {
-        println!("Downloading IMGT motifs, please wait...");
-        match sendresultcompressed(&REQUESTCLIENT, MOTIFLINK.as_str()) {
-            Ok(e) => {
-                match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
-                    Ok(Ok(_)) => (),
-                    _ => {
-                        eprintln!("Cannot write refseq in sequence.");
-                        return None;
-                    }
-                }
-                println!("Success.")
-            }
-            Err(e) => {
-                println!("IMGT motifs data retrieval failed because: {e}.");
-                return None;
-            }
-        }
-    } else {
-        println!("IMGT motifs were already downloaded, retrieving...");
-    };
-    Some(tempfile)
-}
-pub(crate) fn downloadref(allowdownload: bool) -> Option<(PathBuf, String)> {
-    println!("Checking reference sequence from IMGT/GENE-DB");
-    let releaseversion = match sendresult(&REQUESTCLIENT, RELEASELINK.as_str()) {
-        Ok(e) => e,
-        Err(e) => {
-            println!("Release fetched failed because: {e}");
-            return None;
-        }
-    };
-    if !allowdownload {
-        return Some((PathBuf::new(), releaseversion));
-    };
-    let tempfile = Path::join(&env::temp_dir(), format!("refseq{}.fasta", releaseversion));
-    if !tempfile.is_file() {
-        println!(
-            "Downloading IMGT/GENE-DB release {}, please wait...",
-            releaseversion
-        );
-        match sendresult(&REQUESTCLIENT, VQUESTLINK.as_str()) {
-            Ok(e) => {
-                match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
-                    Ok(Ok(_)) => (),
-                    _ => {
-                        eprintln!("Cannot write refseq in sequence.");
-                        return None;
-                    }
-                }
-                println!("Success.")
-            }
-            Err(e) => {
-                println!("IMGT/GENE-DB data retrieval failed because: {e}.");
-                return None;
-            }
-        }
-    } else {
-        println!(
-            "Release {} was already downloaded, retrieving...",
-            releaseversion
-        );
-    };
-    Some((tempfile, releaseversion))
-}
 pub(crate) fn positionfiltering<T>(locus: &[LocusInfos], blast: &mut Vec<T>)
 where
     T: Blastcalc,
@@ -376,11 +245,10 @@ where
     //TRD is inside TRA locus
     if locus == &Locus::TRA {
         blast.retain(|p| {
-            p.getquery().contains(&format!("{}", locus))
-                || p.getquery().contains(&"TRD".to_string())
+            p.getlocusname().as_ref() == Some(locus) || p.getallelename().starts_with("TRD")
         });
     } else {
-        blast.retain(|p| p.getquery().contains(&format!("{}", locus)));
+        blast.retain(|p| p.getlocusname().as_ref() == Some(locus));
     }
 }
 pub(crate) fn checklocus(p: &fasta::Record, locus: &Locus) -> bool {
@@ -599,8 +467,8 @@ pub(crate) fn statusblastmotifs(data: &mut Vec<Blast>) {
     }
 }
 pub(crate) fn statusblastvs(data: &mut Vec<Blast>) {
-    data.sort_unstable_by(|a, b| match a.sseqid.cmp(&b.sseqid) {
-        std::cmp::Ordering::Equal => a.qseqid.cmp(&b.qseqid),
+    data.sort_unstable_by(|a, b| match a.getsubject().cmp(&b.getsubject()) {
+        std::cmp::Ordering::Equal => a.getquery().gene.cmp(&b.getquery().gene),
         ord => ord,
     });
     let mut other = Vec::new();
@@ -641,125 +509,6 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
     for blastresult in data {
         blastresult.setstatus();
     }
-}
-pub(crate) fn find_global_best_range(
-    blastcheck: &[Blastmatch],
-    bornes: &Option<Vec<Blastmatch>>,
-) -> Option<Vec<LocusInfos>> {
-    let mut groups: HashMap<(Locus, Haplotype), (String, bool, usize, usize)> = HashMap::new();
-    let blastcheck = blastcheck.to_vec();
-    let mut hash = blastcheck
-        .iter()
-        .filter_map(|p| p.getlocusname().map(|d| (d, p)))
-        .into_group_map_by(|(l, f)| (l.clone(), f.getsubject()));
-    hash.iter_mut().for_each(|(_, v)| {
-        v.sort_unstable_by(|(_, a), (_, b)| match a.getsubject().cmp(&b.getsubject()) {
-            Ordering::Equal => match a.getpos().0.cmp(&b.getpos().0) {
-                Ordering::Equal => b.getpos().1.cmp(&b.getpos().1).reverse(),
-                ord => ord,
-            },
-            ord => ord,
-        })
-    });
-    let mut locus: HashMap<(Locus, String, u32), std::collections::BTreeSet<Blastmatch>> =
-        HashMap::new();
-    for ((loci, sseqname), data) in hash.iter() {
-        let mut index = 0;
-        for (_, elem) in data {
-            let d = match locus.get_mut(&(loci.clone(), sseqname.to_string(), index)) {
-                Some(a) => a,
-                None => {
-                    let mut e = BTreeSet::new();
-                    e.insert((*elem).clone());
-                    locus.insert((loci.clone(), sseqname.to_string(), index), e);
-                    continue;
-                }
-            };
-            if let Some(b) = d.last()
-                && max(b.sstart, b.send).abs_diff(min(elem.send, elem.sstart)) <= LOCUSSEPARATOR
-            {
-                d.insert((*elem).clone());
-            } else {
-                index += 1;
-                let mut e = BTreeSet::new();
-                e.insert((*elem).clone());
-                locus.insert((loci.clone(), sseqname.to_string(), index), e);
-            }
-        }
-    }
-    if let Some(borneblast) = &bornes {
-        'borne: for borneblast in borneblast {
-            for (_, values) in locus.iter_mut() {
-                for val in values.iter() {
-                    let a = borneblast;
-                    let b = val;
-                    if max(b.sstart, b.send).abs_diff(min(a.send, a.sstart)) <= BORNES {
-                        values.insert(borneblast.clone().into());
-                        break 'borne;
-                    }
-                }
-            }
-        }
-    }
-    let real =
-        locus
-            .into_iter()
-            .sorted_unstable_by(|((al, ass, _), av), ((bl, bs, _), bv)| match al.cmp(bl) {
-                Ordering::Equal => match av.iter().count().cmp(&bv.iter().count()) {
-                    Ordering::Equal => ass.cmp(bs),
-                    ord2 => ord2.reverse(),
-                },
-                ord => ord,
-            });
-    for ((loci, sseq, _), blast) in real {
-        if !groups.contains_key(&(loci.clone(), Haplotype::Primary)) {
-            let (min, max) = match (blast.first(), blast.last()) {
-                (Some(a), Some(b)) => (min(a.sstart, a.send), max(b.sstart, b.send)),
-                _ => unreachable!("vec is not empty"),
-            };
-            let split = blast.iter().into_group_map_by(|f| &f.complement);
-            let complement = split.get(&Strand::Minus).map_or(0, |s| s.len())
-                > split.get(&Strand::Plus).map_or(0, |s| s.len());
-            groups.insert((loci, Haplotype::Primary), (sseq, complement, min, max));
-        } else if !groups.contains_key(&(loci.clone(), Haplotype::Alternate)) {
-            let (min, max) = match (blast.first(), blast.last()) {
-                (Some(a), Some(b)) => (min(a.sstart, a.send), max(b.sstart, b.send)),
-                _ => unreachable!("vec is not empty"),
-            };
-            let split = blast.iter().into_group_map_by(|f| &f.complement);
-            let complement = split.get(&Strand::Minus).map_or(0, |s| s.len())
-                > split.get(&Strand::Plus).map_or(0, |s| s.len());
-            groups.insert((loci, Haplotype::Alternate), (sseq, complement, min, max));
-        }
-    }
-    Some(
-        groups
-            .into_iter()
-            .map(|((locus, hap), (sseq, complement, start, end))| {
-                LocusInfos::new(
-                    locus,
-                    hap,
-                    sseq,
-                    Position::new(
-                        false,
-                        start.saturating_sub(BORNES).try_into().unwrap_or_default(),
-                    ),
-                    Position::new(
-                        false,
-                        end.saturating_add(BORNES).try_into().unwrap_or_default(),
-                    ),
-                    if complement {
-                        Strand::Minus
-                    } else {
-                        Strand::Plus
-                    },
-                )
-            })
-            .collect(),
-    )
-}
-pub(crate) fn retainbestmatch(blast: &mut Vec<Blast>) {
-    blast.retain(|f| f.length * 100 / f.qlen > 80 && f.pident >= 75.0);
 }
 pub(crate) fn matchmotif<T>(
     subject: &Path,
@@ -803,7 +552,7 @@ where
     }
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
-            (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
+            (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
         }
     });
     statusblastmotifs(&mut blast);
@@ -868,7 +617,7 @@ where
     locusfiltering(locus, &mut blast);
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
-            (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
+            (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
         }
     });
     statusblastvs(&mut blast);
@@ -897,227 +646,6 @@ pub(crate) fn locuspos(
     let mut bl = blast.to_vec();
     bl.retain(fil);
     Some((opt.clone(), bl))
-}
-pub(crate) fn locusallposition<T>(
-    subject: &Path,
-    species: T,
-    args: &Args,
-) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)>
-where
-    T: AsRef<str>,
-{
-    let (bornespath, referencepath) = match (
-        downloadbornes(),
-        downloadref(true).map(|(a, b)| {
-            speciesandorphonfiltering(&a, None, b, species.as_ref(), true, args.cacheerase)
-        }),
-    ) {
-        (Some(a), Some(b)) => (a, b?),
-        (None, ..) => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "Bornes from IMGT cannot be downloaded",
-            ));
-        }
-        (.., None) => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "Reference from IMGT cannot be downloaded",
-            ));
-        }
-    };
-    println!("Merging bornes and IMGT/GENE-DB data.");
-    /* let file = NamedTempFile::new_in(&env::temp_dir())?;
-    let mut merge = File::create(&file)?;
-    let read = fs::read_to_string(&reference.0)?;
-    let read2 = fs::read_to_string(&reference.1)?;
-    merge.write_all(read.as_bytes())?;
-    merge.write_all(read2.as_bytes())?;
-    println!("Blasting to get position of loci."); */
-    let (blast, bornes) = thread::scope(|s| {
-        let blast = s.spawn(|| {
-            let b = match blastcommand(
-                referencepath.clone(),
-                subject.to_path_buf(),
-                Blastlevel::Normal,
-            ) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(io::Error::new(ErrorKind::InvalidData, e));
-                }
-            };
-            Ok(b.into_iter().collect())
-        });
-        let bornes = if args.nobornes {
-            None
-        } else {
-            Some(s.spawn(|| {
-                let aligner = Aligner::builder()
-                    .asm20()
-                    .with_cigar()
-                    .with_index_threads(args.threads)
-                    .with_index(subject, None)
-                    .ok()?;
-                let read = fasta::Reader::from_file(bornespath.clone()).ok()?;
-                let mut aligns: Vec<Blastmatch> = Vec::new();
-                for seq in read.records().filter_map(Result::ok) {
-                    if let Ok(a) = aligner
-                        .map(
-                            seq.seq(),
-                            false,
-                            false,
-                            None,
-                            None,
-                            Some(format!("NCBI|{}", seq.desc().unwrap_or_default()).as_bytes()),
-                        )
-                        .map(|mut f| {
-                            f.retain(|p| p.is_primary);
-                            f
-                        })
-                        && let Some(first) = a.first()
-                        && let (
-                            Some(qseqid),
-                            Some(sseqid),
-                            sseq,
-                            Ok(sstart),
-                            Ok(send),
-                            complement,
-                            status,
-                            Some(Some(identity)),
-                        ) = (
-                            &first.query_name,
-                            &first.target_name,
-                            String::new(),
-                            TryInto::<usize>::try_into(first.target_start),
-                            TryInto::<usize>::try_into(first.target_end),
-                            if first.strand == minimap2::Strand::Reverse {
-                                Strand::Minus
-                            } else {
-                                Strand::Plus
-                            },
-                            Status::New,
-                            (&first)
-                                .alignment
-                                .as_ref()
-                                .map(|p| p.alignment_score.map(|d| d as f32)),
-                        )
-                    {
-                        let matche = Blastmatch::new(
-                            qseqid.to_string(),
-                            sseqid.to_string(),
-                            sseq,
-                            sstart,
-                            send,
-                            complement,
-                            status,
-                            identity,
-                        );
-                        aligns.push(matche);
-                    }
-                }
-                if aligns.is_empty() {
-                    None
-                } else {
-                    Some(aligns)
-                }
-            }))
-        };
-        println!("Waiting for blast and bornes to finish.");
-        (blast.join(), bornes.map(|d| d.join()))
-    });
-    let (mut blast, mut bornes) = match (blast, bornes) {
-        (Ok(Ok(a)), Some(Ok(Some(b)))) => (a, Some(b)),
-        (Ok(Ok(a)), Some(Ok(None))) | (Ok(Ok(a)), None) => {
-            eprintln!("No bornes found.");
-            (a, None)
-        }
-        (Ok(Err(a)), _) => {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!("Blast error. Error is: {}", a),
-            ));
-        }
-        (Err(a), Some(Err(b))) => {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!(
-                    "Blast and bornes could not be performed. Error are: {:?} and {:?}",
-                    a, b
-                ),
-            ));
-        }
-        (Err(a), _) => {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!("Blast could not be performed. Error is: {:?}", a),
-            ));
-        }
-        (_, Some(Err(b))) => {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!("Bornes could not be performed. Error is: {:?}", b),
-            ));
-        }
-    };
-    bornes.as_mut().map(|p| {
-        p.sort_unstable_by(|f, g| match f.getallelename().cmp(&g.getallelename()) {
-            Ordering::Equal => f.getidentity().total_cmp(&g.getidentity()).reverse(),
-            e => e,
-        });
-        p.dedup_by(|f, g| match (f.getallelename(), g.getallelename()) {
-            (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b) => true,
-            _ => false,
-        });
-        p.sort_unstable();
-        p.shrink_to_fit();
-    });
-    if let Some(bornes2) = &bornes {
-        printpotentialbornes(bornes2, &args)?;
-    }
-    //Filter by locus
-    retainbestmatch(&mut blast);
-    blast.shrink_to_fit();
-    blast.iter_mut().for_each(|p| {
-        if p.sstart > p.send {
-            (p.sstart, p.send, p.complement) = (p.send, p.sstart, true);
-        }
-        p.setstatus();
-    });
-    let mut statusvec: BTreeMap<(String, usize, usize), Blast> = BTreeMap::new();
-    for elem in blast.into_iter() {
-        if let Some((k, b)) = statusvec.iter().find(|((s, r1, r2), b)| {
-            b != &&elem
-                && s.as_str() == elem.sseqid.as_str()
-                && checkoverlap(&(*r1..=*r2), &(elem.sstart..=elem.send))
-        }) {
-            let scoreactual = b.length / b.qlen * b.pident.powi(2) as usize;
-            let newscore = elem.length / elem.qlen * elem.pident.powi(2) as usize;
-            if newscore > scoreactual {
-                statusvec.insert(k.clone(), elem);
-            }
-        } else {
-            statusvec.insert((elem.sseqid.clone(), elem.sstart, elem.send), elem);
-        }
-    }
-    let mut data: Vec<Blastmatch> = statusvec.into_values().map(|v| v.into()).collect();
-    //Sort by name then starting then ending position
-    data.sort_unstable();
-    data.dedup();
-    let writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .comment(Some(b'#'))
-        .has_headers(true)
-        .from_path(Path::join(&temp_dir(), "test2.txt"));
-    if let Ok(mut r) = writer {
-        for elem in data.iter() {
-            let _ = r.serialize(elem);
-        }
-    }
-    let range = find_global_best_range(&data, &bornes).ok_or(io::Error::new(
-        ErrorKind::InvalidInput,
-        "No locus found after BLAST analysis",
-    ));
-    range.map(|f| (f, data))
 }
 pub(crate) fn filter_new_alleles<'a, T>(data: &'a [T], motifs: &[T]) -> impl Iterator<Item = &'a T>
 where
@@ -1203,8 +731,11 @@ where
                 .comment(Some(b'#'))
                 .has_headers(false)
                 .from_reader(reader);
-            for record in csv.deserialize() {
-                if let Ok(r) = record {
+            for record in csv.deserialize::<Blast>() {
+                if let Ok(mut r) = record {
+                    if r.sstart > r.send {
+                        (r.sstart, r.send, r.complement) = (r.send, r.sstart, Strand::Minus)
+                    }
                     result.push(r);
                 } else if let Err(r) = record {
                     eprintln!("Error in {r}");
@@ -1303,9 +834,22 @@ pub(crate) fn launchblast(
         Ok(b) => b,
     };
     println!("The species is {}.", realspecies);
-    let (path, releaseversion) = match downloadref(true) {
+    let (path, releaseversion) = match downloadref(true).map(|(a, b)| {
+        (
+            speciesandorphonfiltering(
+                &a,
+                Some(locus),
+                b.clone(),
+                species.as_ref(),
+                false,
+                args.cacheerase,
+            ),
+            b,
+        )
+    }) {
         None => return Err(()),
-        Some((a, b)) => (a, b),
+        Some((Err(a), ..)) => return Err(()),
+        Some((Ok(a), b)) => (a, b),
     };
     let filtering = match speciesandorphonfiltering(
         &path,
@@ -1452,10 +996,10 @@ pub(crate) fn submit(
     c.iter_mut().for_each(|p| {
         if let Some(loc) = p.getlocusname()
             && let Some(find) = locus.iter().find(|fi| {
-                p.getchromosomefromblast().is_some_and(|a| a == fi.contig) && fi.locus == loc
+                p.getchromosomefromsubject().is_some_and(|a| a == fi.contig) && fi.locus == loc
             })
             && p.sseqid.starts_with("GENE")
-            && let Some((start, end, complement)) = p.getposition()
+            && let Some((start, end, complement)) = p.getpositionfromsubject()
             && let Some((newstart, newend, newcomplement)) = find.locusinposition(
                 &start,
                 &end,
@@ -1467,7 +1011,15 @@ pub(crate) fn submit(
         {
             p.sstart = newstart.getobasedpos().try_into().unwrap_or_default();
             p.send = newend.getobasedpos().try_into().unwrap_or_default();
-            p.qseqid = p.getchromosomefromblast().unwrap_or_default();
+            p.qseqid = Name::new(
+                Some("GENE".to_string()),
+                p.getallelename().to_string(),
+                realspecies.to_string(),
+                None,
+                start,
+                end,
+                complement,
+            );
             p.complement = newcomplement;
         }
     });

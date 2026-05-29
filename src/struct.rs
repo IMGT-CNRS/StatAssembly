@@ -12,7 +12,7 @@ use crate::submissions::{
     DELIMITERFASTA, getallelefromblast, getchromosomefromblast, getpositionfromblast,
 };
 use crate::{MATCHREADS, SOFTCLIPRATIO, locusisokay};
-use clap::{Parser, crate_authors};
+use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -41,8 +41,8 @@ use strum_macros::EnumIter;
 #[command(version, author, about, long_about = None)]
 pub(crate) struct Args {
     /// Input file (BAM-indexed file)
-    #[arg(short, long)]
-    pub(crate) file: PathBuf,
+    #[arg(short, long, required_if_eq_any=[("command","analyze"),("command","full")])]
+    pub(crate) file: Option<PathBuf>,
     /// Index file if not default
     #[arg(short, long)]
     pub(crate) index: Option<PathBuf>,
@@ -82,8 +82,8 @@ pub(crate) struct Args {
     /// Only strand-specific alignments to reference
     #[arg(long)]
     pub(crate) forward: bool,
-    /// Assembly fasta file
-    #[arg(long, short = 'a')]
+    /// Assembly fasta file. Required to find locus position
+    #[arg(long, short = 'a', required_if_eq("command", "find"))]
     pub(crate) assembly: Option<PathBuf>,
     /// Assembly Index file if not default
     #[arg(long, short = 'j')]
@@ -133,6 +133,16 @@ pub(crate) struct Args {
     /// Do not use bornes to delimitate locus all position
     #[arg(long, conflicts_with = "locuspos")]
     pub(crate) nobornes: bool,
+    /// Command
+    #[arg(value_enum)]
+    pub(crate) command: Command,
+}
+#[derive(Default, Debug, Clone, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Command {
+    Find,
+    Analyze,
+    #[default]
+    Full,
 }
 fn checktoken(s: &str) -> Result<String, String> {
     let s = s.trim();
@@ -204,7 +214,7 @@ pub(crate) struct Name {
     pub(crate) numacc: Option<String>,
     pub(crate) gene: String,
     pub(crate) species: String,
-    pub(crate) chromosome: String,
+    pub(crate) label: Option<String>,
     pub(crate) posstart: Position,
     pub(crate) posend: Position,
     pub(crate) strand: Strand,
@@ -214,7 +224,7 @@ impl Name {
         numacc: Option<String>,
         gene: String,
         species: String,
-        chromosome: String,
+        label: Option<String>,
         posstart: Position,
         posend: Position,
         strand: Strand,
@@ -228,7 +238,7 @@ impl Name {
             numacc,
             gene,
             species,
-            chromosome,
+            label,
             posstart,
             posend,
             strand,
@@ -237,13 +247,71 @@ impl Name {
 }
 impl ToString for Name {
     fn to_string(&self) -> String {
-        todo!("To be done");
+        format!(
+            "{}|{}|{}|U|{}|{}..{}|",
+            self.numacc.as_ref().map(|b| b.clone()).unwrap_or_default(),
+            self.gene,
+            self.species,
+            self.label.as_ref().map(|b| b.clone()).unwrap_or_default(),
+            self.posstart.getobasedpos(),
+            self.posend.getobasedpos()
+        )
     }
 }
 impl FromStr for Name {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        todo!("To be done");
+        let new = if let Some(a) = s.trim().strip_suffix("|") {
+            a
+        } else {
+            return Err("No final bar".to_string());
+        };
+        let mut split = new.split("|");
+        let regexp = regex::Regex::new(r"([0-9]+)\..([0-9]+)")
+            .unwrap_or_else(|_| unreachable!("Valid regexp"));
+        let (numacc, gene, species, label, posstart, posend) = match (
+            split.next(),
+            split.next(),
+            split.next(),
+            split.next(),
+            split.next(),
+            split.next().map(|a| {
+                regexp.captures(a).map(|c| {
+                    (
+                        c.get(1).map(|a| a.as_str().parse::<i64>()),
+                        c.get(2).map(|a| a.as_str().parse::<i64>()),
+                    )
+                })
+            }),
+        ) {
+            (Some(a), Some(b), Some(c), .., Some(e), Some(Some((Some(Ok(g)), Some(Ok(h)))))) => {
+                (a, b, c, e, g, h)
+            }
+            _ => return Err("Invalid formatting".to_string()),
+        };
+        let strand = if posstart > posend || new.contains("rev-comp") {
+            Strand::Minus
+        } else {
+            Strand::Plus
+        };
+        let (start, end) = (Position::new(false, posstart), Position::new(false, posend));
+        Ok(Self {
+            numacc: if numacc.trim().is_empty() {
+                None
+            } else {
+                Some(numacc.trim().to_string())
+            },
+            gene: gene.to_string(),
+            species: species.to_string(),
+            label: if label.trim().is_empty() {
+                None
+            } else {
+                Some(label.trim().to_string())
+            },
+            posstart: start,
+            posend: end,
+            strand: strand,
+        })
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Hash)]
@@ -470,7 +538,7 @@ impl Alerting for Posread {
 }
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Blast {
-    pub(crate) qseqid: String,
+    pub(crate) qseqid: Name,
     pub(crate) sseqid: String,
     #[allow(dead_code)]
     pub(crate) qstart: usize,
@@ -485,14 +553,14 @@ pub(crate) struct Blast {
     pub(crate) gaps: usize,
     pub(crate) sseq: String,
     #[serde(skip_deserializing)]
-    pub(crate) complement: bool,
+    pub(crate) complement: Strand,
     #[serde(skip_deserializing)]
     pub(crate) status: Status,
 }
 #[repr(C)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Blastmatch {
-    pub(crate) qseqid: String,
+    pub(crate) qseqid: Name,
     pub(crate) sseqid: String,
     pub(crate) sseq: String,
     pub(crate) sstart: usize,
@@ -526,7 +594,7 @@ impl Eq for Blastmatch {}
 impl Blastmatch {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        qseqid: String,
+        qseqid: Name,
         sseqid: String,
         sseq: String,
         sstart: usize,
@@ -571,11 +639,7 @@ impl Into<Blastmatch> for Blast {
             self.sseq,
             self.sstart,
             self.send,
-            if self.complement {
-                Strand::Minus
-            } else {
-                Strand::Plus
-            },
+            self.complement,
             self.status,
             self.pident,
         )
@@ -585,7 +649,7 @@ impl Display for Blastmatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             ">{}{DELIMITERFASTA}{}:{}-{}-{}{DELIMITERFASTA}{}\n{}",
-            self.qseqid,
+            self.qseqid.to_string(),
             self.sseqid,
             self.sstart,
             self.send,
@@ -617,27 +681,22 @@ pub trait Blastcalc {
         r.0..=r.1
     }
     #[allow(dead_code)]
-    fn getstrand(&self) -> Strand {
-        match self.getpos() {
-            (a, b) if a > b => Strand::Minus,
-            _ => Strand::Plus,
-        }
-    }
-    fn getquery(&self) -> &str;
-    fn getallelename(&self) -> Option<String> {
+    fn getstrand(&self) -> &Strand;
+    fn getquery(&self) -> &Name;
+    fn getallelename(&self) -> &str {
         getallelefromblast(self.getquery())
     }
-    /// Get position of the label, not position of the element
-    fn getposition(&self) -> Option<(Position, Position, Strand)> {
+    /// Get position of the lab&el, not position of the element
+    fn getpositionfromsubject(&self) -> Option<(Position, Position, Strand)> {
         getpositionfromblast(self.getsubject())
     }
-    fn getchromosomefromblast(&self) -> Option<String> {
+    /// Get chromosome from blast, not position of the element
+    fn getchromosomefromsubject(&self) -> Option<String> {
         getchromosomefromblast(self.getsubject())
     }
     #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
-        self.getallelename()
-            .and_then(|f| Locus::try_from(f.split_at(3).0.to_string()).ok())
+        Locus::try_from(self.getallelename().split_at(3).0.to_string()).ok()
     }
     fn getidentity(&self) -> f32;
 }
@@ -654,7 +713,10 @@ impl Blastcalc for Blast {
     fn getpos(&self) -> (usize, usize) {
         (self.sstart, self.send)
     }
-    fn getquery(&self) -> &str {
+    fn getstrand(&self) -> &Strand {
+        &self.complement
+    }
+    fn getquery(&self) -> &Name {
         &self.qseqid
     }
     fn getidentity(&self) -> f32 {
@@ -672,11 +734,14 @@ impl Blastcalc for Blastmatch {
     fn getstatus(&self) -> &Status {
         &self.status
     }
+    fn getstrand(&self) -> &Strand {
+        &self.complement
+    }
     fn getpos(&self) -> (usize, usize) {
         (self.sstart, self.send)
     }
     /// Query id
-    fn getquery(&self) -> &str {
+    fn getquery(&self) -> &Name {
         &self.qseqid
     }
     /// Get identity
@@ -686,11 +751,12 @@ impl Blastcalc for Blastmatch {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Newfasta {
-    qseqid: String,
+    qseqid: Name,
     sseqid: String,
     sseq: String,
     pos: RangeInclusive<usize>,
     status: Status,
+    strand: Strand,
     identity: f32,
 }
 impl Blastcalc for Newfasta {
@@ -707,8 +773,11 @@ impl Blastcalc for Newfasta {
     fn getpos(&self) -> (usize, usize) {
         (*self.pos.start(), *self.pos.end())
     }
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
     /// Query id
-    fn getquery(&self) -> &str {
+    fn getquery(&self) -> &Name {
         &self.qseqid
     }
     /// Get identity
@@ -720,10 +789,11 @@ impl Seqresult for Newfasta {}
 impl From<&dyn Blastcalc> for Newfasta {
     fn from(value: &dyn Blastcalc) -> Self {
         Self {
-            qseqid: value.getquery().to_string(),
+            qseqid: value.getquery().clone(),
             sseqid: value.getsubject().to_string(),
             sseq: value.getseq().to_string(),
             pos: value.getposrange(),
+            strand: value.getstrand().clone(),
             status: value.getstatus().clone(),
             identity: value.getidentity(),
         }
@@ -790,11 +860,12 @@ impl std::fmt::Display for &dyn Seqresult {
         let (start, end) = self.getpos();
         write!(
             f,
-            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
-            self.getquery(),
+            ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}-{}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
+            self.getquery().to_string(),
             self.getsubject(),
             start,
             end,
+            if self.getstrand().isrev() { "/rc" } else { "" },
             self.getstatus().to_serialize(),
             self.getidentity(),
             self.getseq(),
@@ -824,6 +895,8 @@ impl FromStr for Newfasta {
         {
             return Err("Sequence has invalid nucleotides. Only atcgn are accepted.".to_string());
         }
+        let txt = format!("{}", DELIMITERFASTA);
+        let data = data.replace("-", txt.as_str());
         let split: Vec<&str> = data.splitn(6, DELIMITERFASTA).collect();
         if split.len() < 6 {
             return Err("Invalid header".to_string());
@@ -831,19 +904,29 @@ impl FromStr for Newfasta {
         let [query, subject, start, end, status, identity] = split[..6] else {
             return Err("Invalid header".to_string());
         };
+        let query = if let Ok(a) = Name::from_str(query) {
+            a
+        } else {
+            return Err("Invalid header".to_string());
+        };
         let status = match Status::try_from(status) {
             Ok(b) => b,
             Err(_) => return Err("Status is invalid".to_string()),
         };
-        let (start, end) = match (start.parse::<usize>(), end.parse::<usize>()) {
-            (Ok(a), Ok(b)) if b >= a => (a, b),
+        let (start, end, complement) = match (
+            start.parse::<usize>(),
+            end.strip_suffix("/rc"),
+            end.trim_end_matches("/rc").parse::<usize>(),
+        ) {
+            (Ok(a), c, Ok(b)) if b >= a => (a, b, c.map_or(Strand::Plus, |_| Strand::Minus)),
             _ => return Err("Position are invalid".to_string()),
         };
         Ok(Newfasta {
-            qseqid: query.to_string(),
+            qseqid: query,
             sseqid: subject.to_string(),
             sseq: seq,
             pos: (start..=end),
+            strand: complement,
             status,
             identity: identity.parse::<f32>().unwrap_or(0f32),
         })

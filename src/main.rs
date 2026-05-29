@@ -9,6 +9,7 @@ Available under EUPL license
 Made by: Guilhem Zeitoun
 */
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
+use crate::identification::{downloadref, locusallposition};
 ///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
 use itertools::Itertools;
@@ -25,8 +26,8 @@ use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, askforsubmission, checkifblastpresent, downloadref, generatelightbam,
-    genesblast, getallelefromblast, getspeciesfromncbi, locusallposition, positionfiltering,
+    REQUESTCLIENT, askforsubmission, checkifblastpresent, generatelightbam, genesblast,
+    getspeciesfromncbi, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -46,6 +47,7 @@ use std::{
     io::Write,
     path::PathBuf,
 };
+mod identification;
 mod r#struct;
 mod submissions;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -205,9 +207,12 @@ fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
 }
 //Check we can read BAM file and return the reader with desired threads
 fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
-    let mut reader = match &args.index {
-        Some(d) => bam::IndexedReader::from_path_and_index(&args.file, d),
-        None => bam::IndexedReader::from_path(&args.file),
+    let mut reader = match (&args.file, &args.index) {
+        (Some(file), Some(d)) => bam::IndexedReader::from_path_and_index(file, d),
+        (Some(file), _) => bam::IndexedReader::from_path(file),
+        _ => {
+            return Err(extended_htslib::errors::Error::FileSeek);
+        }
     }?;
     //Set threads if given or thanks to parralelism. If nothing available, set to 4 by default.
     let threads = match (
@@ -470,12 +475,14 @@ fn printnewloc(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
 //Check BAM file exists and outputdir is created and return it
 fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     //Check bam file exists
-    if let Err(e) = getreaderoffile(args) {
+    if let Some(a) = &args.file
+        && let Err(e) = getreaderoffile(args)
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!(
                 "Cannot read bam file ({}). Error is: {}. Exiting.",
-                args.file.display(),
+                a.display(),
                 e
             ),
         ));
@@ -779,6 +786,14 @@ fn main() -> ExitCode {
     {
         eprintln!("Error gene list: {e}");
         return ExitCode::FAILURE;
+    }
+    if args.command == Command::Find {
+        if let Err(e) = printnewloc(&args, &locus) {
+            eprintln!("Error setting new locus result: {e}");
+            return ExitCode::FAILURE;
+        };
+        endmessage(firstinstant, &args);
+        return ExitCode::SUCCESS;
     }
     let initiallocus = &locus;
     //Group between primary and alternate
@@ -1248,8 +1263,8 @@ fn main() -> ExitCode {
                                     Strand::Plus
                                 };
                                 GeneInfos::new(
-                                    getallelefromblast(&p.qseqid).unwrap_or_default(),
-                                    p.sseqid.clone(),
+                                    p.getquery().gene.clone(),
+                                    p.getsubject().to_string(),
                                     strand,
                                     Position::new(false, p.sstart.try_into().unwrap_or_default()),
                                     Position::new(false, p.send.try_into().unwrap_or_default()),
@@ -1327,13 +1342,16 @@ fn main() -> ExitCode {
             Err(e) => eprintln!("Error submitting sequences: {e}"),
         }
     }
+    endmessage(firstinstant, &args);
+    ExitCode::SUCCESS
+}
+fn endmessage(firstinstant: Instant, args: &Args) {
     println!(
         "{} done sucessfully in {:.3} seconds. Output files are located in {}.",
         NAME.as_str(),
         firstinstant.elapsed().as_secs_f32(),
         args.outdir.display()
     );
-    ExitCode::SUCCESS
 }
 fn printpotentialbornes<T>(bornes: &[T], args: &Args) -> io::Result<()>
 where
@@ -1349,7 +1367,7 @@ where
         .from_writer(writer);
     for borne in bornes {
         csv.write_record(&[
-            borne.getallelename().unwrap_or_default().as_str(),
+            borne.getallelename(),
             borne.getsubject(),
             &format!("{}", borne.getpos().0),
             &format!("{}", borne.getpos().1),
@@ -1390,15 +1408,14 @@ where
     )])?;
     for (locus, elem) in locushash {
         for matches in elem {
-            let name = matches.getallelename().unwrap_or("N/A".to_string());
-            let close = getallelefromblast(&matches.qseqid).unwrap_or("N/A".to_string());
+            let name = matches.getallelename();
             let (start, end) = matches.getpos();
             csv.write_record(&[
-                name,
+                name.to_string(),
                 format!("{}-{}", start, end),
                 locus.to_string(),
                 matches.complement.to_string(),
-                close,
+                name.to_string(),
                 matches.getidentity().to_string(),
             ])?;
         }
