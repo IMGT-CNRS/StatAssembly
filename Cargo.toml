@@ -47,3 +47,13 @@ lto = true          # Link-Time Optimization
 codegen-units = 1   # Better optimization, slower compile
 panic = "abort"     # Reduce binary size by aborting on panic
 strip = true        # Automatically strip symbols (Rust 1.59+)
+[package.metadata.appimage]
+assets = ["images"]
+icon = "images/logo_software.png"
+desktop_entry = "other/myapp.desktop"
+auto_link = true
+auto_link_exclude_list = [
+    "libc.so*",
+    "libdl.so*",
+    "libpthread.so*",
+]

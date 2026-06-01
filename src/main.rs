@@ -15,6 +15,7 @@ use clap::Parser;
 use itertools::Itertools;
 use plotters::coord::Shift;
 use std::collections::HashMap;
+use std::io::ErrorKind::InvalidInput;
 use std::io::{stderr, stdout};
 use std::num::NonZero;
 use std::ops::RangeInclusive;
@@ -299,9 +300,10 @@ fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
 //Parse the location csv with locus infos
 fn locusposparser(
     args: &Args,
-    realspecies: &str,
+    realspecies: &Species,
     blastpresent: bool,
 ) -> std::io::Result<(Vec<LocusInfos>, Option<Vec<Blastmatch>>)> {
+    let realspecies = realspecies.to_string();
     let mut records = Vec::new();
     if let Some(arg) = &args.locuspos {
         let detectheaders = csv::ReaderBuilder::new()
@@ -457,6 +459,74 @@ fn locusposparser(
         ));
     }
     Ok(locusrecord)
+}
+fn generategenelist<T>(
+    locushashresult: Option<&HashMap<Locus, Vec<Blastmatch>>>,
+    speciesblast: &Species,
+    locus: &[LocusInfos],
+    assembly: T,
+    args: &mut Args,
+) -> io::Result<Option<Vec<Blastmatch>>>
+where
+    T: AsRef<Path>,
+{
+    let speciesblast = speciesblast.to_string();
+    let func = {
+        eprintln!("You have not provided a gene list, BLASTING to get one.");
+        locusallposition(assembly.as_ref(), &speciesblast, &args).map(|(_, b)| b)?
+    };
+    let mut data = match locushashresult {
+        None => func,
+        Some(a) if a.is_empty() => func,
+        Some(b) => {
+            eprintln!("Generating a gene list.");
+            b.clone().into_values().flatten().collect_vec()
+        }
+    };
+    //locusfiltering(&loci.locus, &mut data);
+    positionfiltering(locus, &mut data);
+    if data.is_empty() {
+        eprintln!("No data after filtering gene list. Skipped.");
+    } else {
+        let mut finish: Vec<GeneInfos> = data
+            .iter()
+            .map(|p| {
+                let strand = if p.send < p.sstart {
+                    Strand::Minus
+                } else {
+                    Strand::Plus
+                };
+                GeneInfos::new(
+                    p.getquery().gene.clone(),
+                    p.getsubject().to_string(),
+                    strand,
+                    Position::new(false, p.sstart.try_into().unwrap_or_default()),
+                    Position::new(false, p.send.try_into().unwrap_or_default()),
+                )
+            })
+            .collect();
+        checkandcorrectgenelistduplicate(&mut finish);
+        let genenamefile = args.outdir.join("genelist_new.csv");
+        let genefile = File::create(&genenamefile)?;
+        let mut csv = csv::WriterBuilder::new()
+            .delimiter(b',')
+            .has_headers(true)
+            .quote_style(csv::QuoteStyle::NonNumeric)
+            .comment(Some(b'#'))
+            .from_writer(genefile);
+        for gene in finish.iter() {
+            if let Err(e) = csv.serialize(gene) {
+                return Err(io::Error::new(
+                    InvalidInput,
+                    format!("Cannot print gene list. Error is {e}"),
+                ));
+            }
+        }
+        csv.flush()?;
+        args.geneloc = Some(genenamefile);
+        return Ok(Some(data));
+    }
+    Ok(None)
 }
 fn printnewloc(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
     let file = File::create(args.outdir.join("newloc.csv"))?;
@@ -749,14 +819,17 @@ where
 fn main() -> ExitCode {
     let mut args = Args::parse();
     let firstinstant = Instant::now();
-    let speciesblast = match getspeciesfromncbi(&REQUESTCLIENT, &args.species) {
+    let speciesblast = match Species::new(&args.species) {
         Ok(b) => b,
-        Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
+        Err(_) => return ExitCode::FAILURE,
     };
-    println!("Species is {}.", speciesblast);
+    println!(
+        "Species is {} (taxon: {}).",
+        speciesblast.to_string(),
+        speciesblast
+            .getid()
+            .map_or("Unknown".to_string(), |f| f.to_string())
+    );
     if args.percentalerting >= args.percentwarning {
         eprintln!("Percent warning must be greater or equal than percent alerting.");
         return ExitCode::FAILURE;
@@ -774,7 +847,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (locus, mut blastcheck) = match locusposparser(&args, &speciesblast, blastpresent) {
+    let (locus, blastcheck) = match locusposparser(&args, &speciesblast, blastpresent) {
         Err(f) => {
             eprintln!("Error locus parser: {f}");
             return ExitCode::FAILURE;
@@ -788,10 +861,44 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if args.command == Command::Find {
+        if !blastpresent {
+            eprintln!("To find the locus, BLAST must be present");
+            return ExitCode::FAILURE;
+        }
         if let Err(e) = printnewloc(&args, &locus) {
             eprintln!("Error setting new locus result: {e}");
             return ExitCode::FAILURE;
         };
+        let r = args.assembly.clone();
+        let infos: HashMap<Locus, Vec<Blastmatch>> = if let Some(a) = blastcheck {
+            a.into_iter()
+                .filter_map(|f| {
+                    if let Some(a) = locus.iter().find(|loci| {
+                        f.sseqid == loci.contig
+                            && (loci.start.getobasedpos()..=loci.end.getobasedpos())
+                                .contains(&f.sstart.try_into().unwrap_or_default())
+                    }) {
+                        Some((a.clone(), f))
+                    } else {
+                        None
+                    }
+                })
+                .into_group_map_by(|c| c.0)
+                .values_mut()
+                .map(|p| p.into_iter().map(|a| a.1).collect_vec())
+        } else {
+            HashMap::new()
+        };
+        if infos.is_empty() {
+            eprintln!("Error setting gene list result. Empty list.");
+            return ExitCode::FAILURE;
+        }
+        if let Some(b) = r
+            && let Err(e) = generategenelist(Some(infos), &speciesblast, &locus, b, &mut args)
+        {
+            eprintln!("Error setting gene list result: {e}");
+            return ExitCode::FAILURE;
+        }
         endmessage(firstinstant, &args);
         return ExitCode::SUCCESS;
     }
@@ -1228,85 +1335,41 @@ fn main() -> ExitCode {
                 }
                 println!("Gene list finished.");
             } else {
+                let r = args.assembly.clone();
                 if !args.nosubmit
-                    && let Some(b) = args.assembly.as_ref()
+                    && let Some(b) = r
                 {
-                    let mut data = if locushashresult.is_empty() {
-                        eprintln!("You have not provided a gene list, BLASTING to get one.");
-                        match locusallposition(b, &speciesblast, &args) {
-                            Ok((_, a)) => a,
-                            Err(e) => {
-                                eprintln!("Cannot blast for gene list. Error is {e}");
-                                return ExitCode::FAILURE;
-                            }
+                    let mut data = match generategenelist(
+                        Some(&locushashresult),
+                        &speciesblast,
+                        &initiallocus,
+                        b,
+                        &mut args,
+                    ) {
+                        Ok(Some(a)) => a,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            eprintln!(
+                                "Gene list generation for locus {} has an error: {}.",
+                                loci.locus, e
+                            );
+                            continue;
                         }
-                    } else {
-                        eprintln!("Generating a gene list.");
-                        locushashresult
-                            .clone()
-                            .into_values()
-                            .flatten()
-                            .collect_vec()
                     };
-                    blastcheck = Some(data.clone());
-                    //locusfiltering(&loci.locus, &mut data);
-                    positionfiltering(initiallocus, &mut data);
-                    if data.is_empty() {
-                        eprintln!("No data after filtering gene list. Skipped.");
-                    } else {
-                        let mut finish: Vec<GeneInfos> = data
-                            .iter()
-                            .map(|p| {
-                                let strand = if p.send < p.sstart {
-                                    Strand::Minus
-                                } else {
-                                    Strand::Plus
-                                };
-                                GeneInfos::new(
-                                    p.getquery().gene.clone(),
-                                    p.getsubject().to_string(),
-                                    strand,
-                                    Position::new(false, p.sstart.try_into().unwrap_or_default()),
-                                    Position::new(false, p.send.try_into().unwrap_or_default()),
-                                )
-                            })
-                            .collect();
-                        checkandcorrectgenelistduplicate(&mut finish);
-                        let genenamefile = args.outdir.join("genelist_new.csv");
-                        let genefile = match File::create(&genenamefile) {
-                            Err(e) => {
-                                eprintln!("Generate gene list. Error is {e}");
-                                return ExitCode::FAILURE;
-                            }
-                            Ok(b) => b,
-                        };
-                        let mut csv = csv::WriterBuilder::new()
-                            .delimiter(b',')
-                            .has_headers(true)
-                            .quote_style(csv::QuoteStyle::NonNumeric)
-                            .comment(Some(b'#'))
-                            .from_writer(genefile);
-                        for gene in finish.iter() {
-                            if let Err(e) = csv.serialize(gene) {
-                                eprintln!("Cannot print gene list. Error is {e}");
-                                return ExitCode::FAILURE;
-                            }
+                    let locivec = vec![loci.clone()];
+                    positionfiltering(&locivec, &mut data);
+                    let result = match genelist(loci, &args, false) {
+                        Err(e) => {
+                            eprintln!(
+                                "Gene list generation for locus {} has an error: {}.",
+                                loci.locus, e
+                            );
+                            continue;
                         }
-                        if let Err(e) = csv.flush() {
-                            eprintln!("Cannot print gene list. Error is {e}");
-                            return ExitCode::FAILURE;
-                        }
-                        args.geneloc = Some(genenamefile);
-                        let result = match genelist(loci, &args, false) {
-                            Err(e) => {
-                                eprintln!("Cannot blast genes. Error is {e}");
-                                return ExitCode::FAILURE;
-                            }
-                            Ok(b) => b,
-                        };
-                        if loci.status.isvalid() && result.iter().any(|f| f.status.isvalid()) {
-                            locushashresult.insert(loci.locus.clone(), data);
-                        }
+                        Ok(b) => b,
+                    };
+                    if loci.status.isvalid() && result.iter().any(|f| f.status.isvalid()) {
+                        locushashresult.insert(loci.locus.clone(), data);
                     }
                 } else if !args.nosubmit {
                     eprintln!("No assembly to check gene list.");
@@ -1347,8 +1410,9 @@ fn main() -> ExitCode {
 }
 fn endmessage(firstinstant: Instant, args: &Args) {
     println!(
-        "{} done sucessfully in {:.3} seconds. Output files are located in {}.",
+        "{} (version {}) done sucessfully in {:.3} seconds. Output files are located in {}.",
         NAME.as_str(),
+        VERSION,
         firstinstant.elapsed().as_secs_f32(),
         args.outdir.display()
     );
@@ -1489,9 +1553,11 @@ fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
         println!(
             "Some genes has the same name on the same chromosome. Underscore (_) would be added"
         );
-        for (item, name) in genes.iter_mut().enumerate() {
+        let mut count = 0;
+        for name in genes.iter_mut() {
             name.gene = if finish.iter().any(|g| g.gene.as_str() == name.gene.as_str()) {
-                format!("{}_{}", name.gene, item)
+                count += 1;
+                format!("{}_{}", name.gene, count)
                     .replace(",", "_")
                     .trim()
                     .to_string()
@@ -2126,7 +2192,7 @@ fn givename(
     format!(
         "{}_{}_{}{}_{}",
         species,
-        locus,
+        locus.safestring(),
         if image && !haplo {
             String::new()
         } else {

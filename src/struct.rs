@@ -1,6 +1,6 @@
 use bio::io::fasta;
 use itertools::Itertools;
-use serde::ser::SerializeTupleStruct;
+use serde::ser::{SerializeStruct, SerializeTupleStruct};
 use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
@@ -9,7 +9,8 @@ Available under EUPL license
 Made by: Guilhem Zeitoun
 */
 use crate::submissions::{
-    DELIMITERFASTA, getallelefromblast, getchromosomefromblast, getpositionfromblast,
+    DELIMITERFASTA, REQUESTCLIENT, getallelefromblast, getchromosomefromblast,
+    getpositionfromblast, getspeciesfromncbi,
 };
 use crate::{MATCHREADS, SOFTCLIPRATIO, locusisokay};
 use clap::{Parser, ValueEnum, crate_authors};
@@ -182,6 +183,11 @@ pub(crate) enum Locus {
     TRB,
     TRG,
 }
+impl Locus {
+    pub(crate) fn safestring(&self) -> Cow<'_, str> {
+        Cow::Owned(self.to_string().replace(" ", "/"))
+    }
+}
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Default, Eq, Hash)]
 pub(crate) enum Blastlevel {
     #[allow(unused)]
@@ -209,7 +215,45 @@ impl Blastlevel {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Species {
+    name: String,
+    id: Option<usize>,
+}
+impl Species {
+    pub(crate) fn getname(&self) -> &str {
+        &self.name
+    }
+    pub(crate) fn getid(&self) -> Option<usize> {
+        self.id
+    }
+    pub(crate) fn ischecked(&self) -> bool {
+        self.id.is_some()
+    }
+    pub(crate) fn new<T>(species: T) -> Result<Self, String>
+    where
+        T: AsRef<str>,
+    {
+        let (text, id) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
+            Ok((b, id)) => (b, Some(id)),
+            Err(e) => {
+                if let Some(_) = e.downcast_ref::<io::Error>() {
+                    eprintln!("NCBI unavailable, your species won't be checked.");
+                    (species.as_ref().to_string(), None)
+                } else {
+                    return Err("NCBI is not available, please retry later.".to_string());
+                }
+            }
+        };
+        Ok(Self { name: text, id })
+    }
+}
+impl ToString for Species {
+    fn to_string(&self) -> String {
+        format!("{}", self.name)
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Name {
     pub(crate) numacc: Option<String>,
     pub(crate) gene: String,
@@ -218,6 +262,31 @@ pub(crate) struct Name {
     pub(crate) posstart: Position,
     pub(crate) posend: Position,
     pub(crate) strand: Strand,
+}
+impl Serialize for Name {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut d = serializer.serialize_struct("Name", 7)?;
+        d.serialize_field("numacc", &self.numacc)?;
+        d.serialize_field("gene", &self.gene)?;
+        d.serialize_field("species", &self.species)?;
+        d.serialize_field("label", &self.label)?;
+        d.serialize_field("posstart", &self.posstart)?;
+        d.serialize_field("posend", &self.posend)?;
+        d.serialize_field("strand", &self.strand)?;
+        d.end()
+    }
+}
+impl<'de> Deserialize<'de> for Name {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let val: &str = serde::Deserialize::deserialize(deserializer)?;
+        Name::from_str(val).map_err(|e| serde::de::Error::custom(e))
+    }
 }
 impl Name {
     pub(crate) fn new(
@@ -998,7 +1067,7 @@ impl Display for Locus {
             Locus::IGH => write!(f, "IGH"),
             Locus::IGK => write!(f, "IGK"),
             Locus::IGL => write!(f, "IGL"),
-            Locus::TRA => write!(f, "TRA_TRD"),
+            Locus::TRA => write!(f, "TRA/TRD"),
             Locus::TRB => write!(f, "TRB"),
             Locus::TRG => write!(f, "TRG"),
         }

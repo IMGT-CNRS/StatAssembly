@@ -3,7 +3,7 @@
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
     Args, Blast, Blastcalc, Blastlevel, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Name,
-    Newfasta, Position, Seqresult, Strand,
+    Newfasta, Position, Seqresult, Species, Strand,
 };
 use crate::{getassemblyreader, getreaderoffile};
 use bio::io::fasta;
@@ -559,15 +559,12 @@ where
     //let _ = fs::remove_file(name);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
-pub(crate) fn genesblast<T>(
+pub(crate) fn genesblast(
     subject: &[GeneInfos],
     args: &Args,
-    species: T,
+    species: &Species,
     locus: &Locus,
-) -> io::Result<Vec<Blastmatch>>
-where
-    T: AsRef<str>,
-{
+) -> io::Result<Vec<Blastmatch>> {
     let mut reader = getassemblyreader(args)?;
     let name = temp_dir().join("genes_blast.txt");
     let file = File::create(&name)?;
@@ -593,7 +590,14 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
     let reference = match downloadref(true).map(|(a, b)| {
-        speciesandorphonfiltering(&a, Some(locus), b, species.as_ref(), false, args.cacheerase)
+        speciesandorphonfiltering(
+            &a,
+            Some(locus),
+            b,
+            &species.to_string(),
+            false,
+            args.cacheerase,
+        )
     }) {
         Some(a) => a?,
         None => {
@@ -739,6 +743,7 @@ where
                     result.push(r);
                 } else if let Err(r) = record {
                     eprintln!("Error in {r}");
+                    return Err(io::Error::new(ErrorKind::InvalidData, "error"));
                 }
             }
         };
@@ -749,18 +754,29 @@ where
 pub(crate) fn getspeciesfromncbi<T>(
     client: &reqwest::blocking::Client,
     species: &T,
-) -> Result<String, Box<dyn Error>>
+) -> Result<(String, usize), Box<dyn Error>>
 where
     T: AsRef<str>,
 {
     let species = species.as_ref();
-    let val = if let Ok(val) = species.parse::<usize>() {
+    let id = if let Ok(val) = species.parse::<usize>() {
         val
     } else {
         let response = client
             .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?")
             .query(&[("db", "taxonomy"), ("term", species), ("format", "json")])
             .send()?;
+        if response.status().is_server_error() {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::HostUnreachable,
+                "Unsuccessful NCBI response",
+            )));
+        } else if !response.status().is_success() {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::NotFound,
+                "Unsuccessful NCBI response",
+            )));
+        }
         let jsone: json::Value = json::from_str(&response.text().unwrap_or(String::new()))?;
         jsone["esearchresult"]["idlist"]
             .as_array()
@@ -781,7 +797,7 @@ where
             .parse::<usize>()
             .unwrap_or(0)
     };
-    let val = &format!("{}", val);
+    let val = &format!("{}", id);
     let response = client
         .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
         .query(&[("db", "taxonomy"), ("id", val), ("format", "json")])
@@ -802,7 +818,7 @@ where
             (Some(Value::String(text2)), Some(Value::String(name)))
                 if text2.as_str() == text.as_str() || text2.as_str() == subspecies.as_str() =>
             {
-                Ok(name.to_string())
+                Ok((name.to_string(), id))
             }
             (Some(Value::String(rank)), _) => Err(Box::new(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -820,20 +836,21 @@ where
         )))
     }
 }
+/*
 pub(crate) fn launchblast(
     species: &str,
     locus: &Locus,
     subject: &Path,
     args: &Args,
 ) -> Result<Vec<Newfasta>, ()> {
-    let realspecies = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
+    let (realspecies, _) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
         Err(e) => {
             eprintln!("{e}");
             return Err(());
         }
         Ok(b) => b,
     };
-    println!("The species is {}.", realspecies);
+    println!("The species is {}.", realspecies.);
     let (path, releaseversion) = match downloadref(true).map(|(a, b)| {
         (
             speciesandorphonfiltering(
@@ -899,12 +916,12 @@ pub(crate) fn launchblast(
         return Err(());
     }
     Ok(result)
-}
+} */
 pub(crate) fn submit(
     args: &Args,
     locus: &[crate::LocusInfos],
     c: &[Blastmatch],
-    realspecies: String,
+    realspecies: &Species,
 ) -> Result<(), String> {
     //let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
     let dir = Path::new(&args.outdir);
@@ -974,7 +991,7 @@ pub(crate) fn submit(
                 )
             })?;
     }
-    let mut motifs = matchmotif(&sequencefile, &realspecies, None)
+    let mut motifs = matchmotif(&sequencefile, &realspecies.to_string(), None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
@@ -1074,7 +1091,7 @@ pub fn asknonewalleles() -> bool {
     readfromterminal(&'y', &'n', false)
 }
 pub(crate) fn askforsubmission(
-    realspecies: &str,
+    realspecies: &Species,
     locus: &[LocusInfos],
     args: &Args,
     infos: &HashMap<Locus, Vec<Blastmatch>>,
@@ -1127,7 +1144,7 @@ pub(crate) fn askforsubmission(
         for (_, data) in infos.iter() {
             blastmatch.append(&mut data.clone());
         }
-        submit(args, locus, &blastmatch, realspecies.to_string())
+        submit(args, locus, &blastmatch, realspecies)
             .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
     }
     Ok(())
@@ -1201,7 +1218,7 @@ pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<NamedTempFile
     tar.finish()?;
     Ok(temp)
 }
-pub(crate) fn preparesubmission(path: &Path, species: String, args: &Args) -> bool {
+pub(crate) fn preparesubmission(path: &Path, species: &Species, args: &Args) -> bool {
     let token = if let Some(a) = &args.mytoken {
         a.to_string()
     } else {
@@ -1244,7 +1261,7 @@ pub(crate) fn preparesubmission(path: &Path, species: String, args: &Args) -> bo
     );
     true
 }
-pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -> io::Result<()> {
+pub(crate) fn submission(token: &str, species: &Species, archive: NamedTempFile) -> io::Result<()> {
     /* let multipart = reqwest::blocking::multipart::Form::new()
     .file("genelist", "submission/genelist.csv")?
     .file("sequences", "submission/sequences.txt")?
@@ -1255,7 +1272,8 @@ pub(crate) fn submission(token: &str, species: String, archive: NamedTempFile) -
         .file("archive", archive.path())?
         .text("version", VERSION)
         .text("type", "submission")
-        .text("species", species);
+        .text("species", species.to_string())
+        .text("validspecies", species.ischecked().to_string());
     match REQUESTCLIENT
         .post(SUBMISSIONLINK.as_str())
         .bearer_auth(token)
