@@ -185,7 +185,7 @@ pub(crate) enum Locus {
 }
 impl Locus {
     pub(crate) fn safestring(&self) -> Cow<'_, str> {
-        Cow::Owned(self.to_string().replace(" ", "_").replace("/","-"))
+        Cow::Owned(self.to_string().replace(" ", "_").replace("/", "-"))
     }
 }
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Default, Eq, Hash)]
@@ -310,10 +310,16 @@ impl ToString for Name {
     fn to_string(&self) -> String {
         format!(
             "{}|{}|{}|U|{}|{}..{}|",
-            self.numacc.as_ref().map(|b| b.clone()).unwrap_or_default(),
+            self.numacc
+                .as_ref()
+                .map(|b| b.clone())
+                .unwrap_or("N/A".to_string()),
             self.gene,
             self.species,
-            self.label.as_ref().map(|b| b.clone()).unwrap_or_default(),
+            self.label
+                .as_ref()
+                .map(|b| b.clone())
+                .unwrap_or("REGION".to_string()),
             self.posstart.getobasedpos(),
             self.posend.getobasedpos()
         )
@@ -322,52 +328,79 @@ impl ToString for Name {
 impl FromStr for Name {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let new = if let Some(a) = s.trim().strip_suffix("|") {
-            a
-        } else {
-            return Err("No final bar".to_string());
-        };
-        let mut split = new.split("|");
-        let regexp = regex::Regex::new(r"([0-9]+)\..([0-9]+)")
-            .unwrap_or_else(|_| unreachable!("Valid regexp"));
-        let (numacc, gene, species, label, posstart, posend) = match (
-            split.next(),
-            split.next(),
-            split.next(),
-            split.next(),
-            split.next(),
-            split.next().map(|a| {
-                regexp.captures(a).map(|c| {
-                    (
-                        c.get(1).map(|a| a.as_str().parse::<i64>()),
-                        c.get(2).map(|a| a.as_str().parse::<i64>()),
-                    )
-                })
-            }),
-        ) {
-            (Some(a), Some(b), Some(c), .., Some(e), Some(Some((Some(Ok(g)), Some(Ok(h)))))) => {
-                (a, b, c, e, g, h)
+        let split: Vec<&str> = s.trim_matches('|').split("|").collect();
+        let (numacc, gene, species, label, posstart, posend) = if split.len() >= 6 {
+            let mut split = split.into_iter();
+            let regexp = regex::Regex::new(r"([0-9]+)\..([0-9]+)")
+                .unwrap_or_else(|_| unreachable!("Valid regexp"));
+            match (
+                split.next(),
+                split.next(),
+                split.next(),
+                split.next(),
+                split.next(),
+                split.next().map(|a| {
+                    regexp.captures(a).map(|c| {
+                        (
+                            c.get(1).map(|a| a.as_str().parse::<i64>()),
+                            c.get(2).map(|a| a.as_str().parse::<i64>()),
+                        )
+                    })
+                }),
+            ) {
+                (Some(a), Some(b), Some(c), .., e, Some(Some((Some(Ok(g)), Some(Ok(h)))))) => {
+                    (a, b, c, e, g, h)
+                }
+                _ => return Err("Invalid formatting".to_string()),
             }
-            _ => return Err("Invalid formatting".to_string()),
-        };
-        let strand = if posstart > posend || new.contains("rev-comp") {
-            Strand::Minus
+        } else if s.trim().starts_with("NCBI|") {
+            let mut split = split.into_iter();
+            split.next(); //Skip NCBI|
+            let regexp = regex::Regex::new(r"([\w\.]+):([0-9]+)\-([0-9]+)")
+                .unwrap_or_else(|_| unreachable!("Valid regexp"));
+            match (
+                split.next(),
+                split.next(),
+                split.next().map(|a| {
+                    regexp.captures(a).map(|c| {
+                        (
+                            c.get(1).map(|a| a.as_str()),
+                            c.get(2).map(|a| a.as_str().parse::<i64>()),
+                            c.get(3).map(|a| a.as_str().parse::<i64>()),
+                        )
+                    })
+                }),
+            ) {
+                (Some(a), Some(b), Some(Some((Some(numacc), Some(Ok(g)), Some(Ok(h)))))) => {
+                    (numacc, a, b, None, g, h)
+                }
+                _ => {
+                    eprintln!("String is {}", s);
+                    return Err("Invalid formatting".to_string());
+                }
+            }
         } else {
-            Strand::Plus
+            return Err("Invalid formatting".to_string());
         };
+        let strand =
+            if posstart > posend || s.trim().ends_with("rev-comp") || s.trim().ends_with("/rc") {
+                Strand::Minus
+            } else {
+                Strand::Plus
+            };
         let (start, end) = (Position::new(false, posstart), Position::new(false, posend));
         Ok(Self {
-            numacc: if numacc.trim().is_empty() {
+            numacc: if numacc.trim().is_empty() || numacc.trim() == "N/A" {
                 None
             } else {
                 Some(numacc.trim().to_string())
             },
             gene: gene.to_string(),
             species: species.to_string(),
-            label: if label.trim().is_empty() {
-                None
-            } else {
-                Some(label.trim().to_string())
+            label: match label {
+                None => None,
+                Some(a) if a.trim().is_empty() || a.trim() == "REGION" => None,
+                Some(a) => Some(a.to_string()),
             },
             posstart: start,
             posend: end,
@@ -466,13 +499,17 @@ impl Params {
             (_, b, _) if b < MIN_READLENGTH => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software"),
+                    format!(
+                        "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software"
+                    ),
                 ));
             }
             (.., c) if c < MIN_PHREDSCORE => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("The PHRED score does not exceed {MIN_READLENGTH}. For accurate results, please provide high-quality long-reads to the software"),
+                    format!(
+                        "The PHRED score does not exceed {MIN_READLENGTH}. For accurate results, please provide high-quality long-reads to the software"
+                    ),
                 ));
             }
             _ => Ok(()),

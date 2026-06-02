@@ -115,7 +115,10 @@ where
                             status,
                             Some(Some(identity)),
                         ) = (
-                            &first.query_name.clone().map(|a| Name::from_str(a.as_str())),
+                            &first
+                                .query_name
+                                .as_ref()
+                                .map(|a| Name::from_str(a.as_str())),
                             &first.target_name,
                             String::new(),
                             TryInto::<usize>::try_into(first.target_start),
@@ -157,7 +160,7 @@ where
         println!("Waiting for blast and bornes to finish.");
         (blast.join(), bornes.map(|d| d.join()))
     });
-    std::fs::write("/tmp/bornestest.txt",format!("{:#?}",bornes));
+    std::fs::write("/tmp/bornestest.txt", format!("{:#?}", bornes));
     let (mut blast, mut bornes) = match (blast, bornes) {
         (Ok(Ok(a)), Some(Ok(Some(b)))) => (a, Some(b)),
         (Ok(Ok(a)), Some(Ok(None))) | (Ok(Ok(a)), None) => {
