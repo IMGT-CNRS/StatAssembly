@@ -372,7 +372,10 @@ pub(crate) fn speciesandorphonfiltering(
         finale
     };
     if info.is_empty() {
-        return Err(io::Error::new(ErrorKind::InvalidInput,"Empty data after filtering"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Empty data after filtering",
+        ));
     }
     /* let newdata = if newdata.is_empty() {
         println!("New species!!");
@@ -579,8 +582,9 @@ pub(crate) fn genesblast(
             let elem = f
                 .extractsequence(&mut reader)
                 .map_err(|p| io::Error::new(ErrorKind::InvalidInput, p));
-            let bool = elem.as_ref()
-                .map_or(false,|p| f.addtosequence(p, &mut fastawriter).is_err());
+            let bool = elem
+                .as_ref()
+                .map_or(false, |p| f.addtosequence(p, &mut fastawriter).is_err());
 
             if bool {
                 Err(io::Error::new(
@@ -610,14 +614,18 @@ pub(crate) fn genesblast(
             ));
         }
     };
-    let mut blast = match blastcommand(reference.as_path(), &name.into_temp_path(), Blastlevel::default()) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(io::Error::new(ErrorKind::InvalidData, e));
-            }
+    let mut blast = match blastcommand(
+        reference.as_path(),
+        &name.into_temp_path(),
+        Blastlevel::default(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(io::Error::new(ErrorKind::InvalidData, e));
         }
-        .into_iter()
-        .collect();
+    }
+    .into_iter()
+    .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
     locusfiltering(locus, &mut blast);
@@ -658,7 +666,9 @@ where
 {
     data.iter().filter(|p| p.onlynewalleles()).filter(move |f| {
         motifs.iter().any(|p| {
-            checkoverlap(&p.getposrange(), &f.getposrange()) && p.getposrange() != f.getposrange() && p.getposrange().count() > f.getposrange().count()
+            checkoverlap(&p.getposrange(), &f.getposrange())
+                && p.getposrange() != f.getposrange()
+                && p.getposrange().count() > f.getposrange().count()
         })
     })
 }
@@ -809,6 +819,7 @@ where
         "No result for the term used",
     ))?;
     if let Some(data) = mapping.get(val) {
+        println!("Data is {:?}", data);
         let elem = data.as_object().ok_or(io::Error::new(
             ErrorKind::InvalidInput,
             "No result for the id found",

@@ -17,7 +17,7 @@ use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::io::ErrorKind::{self, InvalidInput};
 use std::ops::{Not, RangeInclusive};
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
@@ -236,14 +236,22 @@ impl Species {
     {
         let (text, id) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
             Ok((b, id)) => (b, Some(id)),
-            Err(e) => {
-                if let Some(_) = e.downcast_ref::<io::Error>() {
+            Err(e) => match e.downcast_ref::<io::Error>() {
+                Some(b) if b.kind() == InvalidInput => {
+                    return Err(
+                        "The following error has occured with your species. Please change: {e}"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {
                     eprintln!("NCBI unavailable, your species won't be checked.");
                     (species.as_ref().to_string(), None)
-                } else {
-                    return Err("NCBI is not available, please retry later.".to_string());
                 }
-            }
+                None => {
+                    eprintln!("NCBI issue, your species won't be checked. Error is {e}");
+                    (species.as_ref().to_string(), None)
+                }
+            },
         };
         Ok(Self { name: text, id })
     }
