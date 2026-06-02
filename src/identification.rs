@@ -157,6 +157,7 @@ where
         println!("Waiting for blast and bornes to finish.");
         (blast.join(), bornes.map(|d| d.join()))
     });
+    std::fs::write("/tmp/bornestest.txt",format!("{:#?}",bornes));
     let (mut blast, mut bornes) = match (blast, bornes) {
         (Ok(Ok(a)), Some(Ok(Some(b)))) => (a, Some(b)),
         (Ok(Ok(a)), Some(Ok(None))) | (Ok(Ok(a)), None) => {

@@ -52,7 +52,7 @@ lazy_static! {
     pub static ref MOTIFLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
-        obfstr::obfstring!("/statassembly/downloadmotif.txt")
+        obfstr::obfstring!("/submissions/newmotif_fusionne.fasta.gz")
     );
     /* pub static ref MOTIFLINK: String =
         obfstr::obfstring!("http://localhost:8910/submissions/newmotif_fusionne.fasta.gz");
@@ -297,7 +297,7 @@ pub(crate) fn speciesandorphonfiltering(
             ),
         )
     };
-    if outfile.exists() && !force {
+    if outfile.try_exists().unwrap_or(false) && !force {
         println!("Filtering already done, retrieving...");
         return Ok(outfile);
     }
@@ -371,6 +371,9 @@ pub(crate) fn speciesandorphonfiltering(
     } else {
         finale
     };
+    if info.is_empty() {
+        return Err(io::Error::new(ErrorKind::InvalidInput,"Empty data after filtering"));
+    }
     /* let newdata = if newdata.is_empty() {
         println!("New species!!");
         let bufreader = io::Cursor::new(newdata);
@@ -551,9 +554,10 @@ where
         locusfiltering(a, &mut blast);
     }
     blast.iter_mut().for_each(|p| {
-        if p.sstart > p.send {
-            (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
-        }
+        //Already performed
+        //if p.sstart > p.send {
+        //    (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
+        //}
     });
     statusblastmotifs(&mut blast);
     //let _ = fs::remove_file(name);
@@ -566,7 +570,7 @@ pub(crate) fn genesblast(
     locus: &Locus,
 ) -> io::Result<Vec<Blastmatch>> {
     let mut reader = getassemblyreader(args)?;
-    let name = temp_dir().join("genes_blast.txt");
+    let name = NamedTempFile::with_suffix("genes_blast.txt")?;
     let file = File::create(&name)?;
     let mut fastawriter = fasta::Writer::new(file);
     subject
@@ -575,9 +579,8 @@ pub(crate) fn genesblast(
             let elem = f
                 .extractsequence(&mut reader)
                 .map_err(|p| io::Error::new(ErrorKind::InvalidInput, p));
-            let bool = elem
-                .iter()
-                .any(|p| f.addtosequence(p, &mut fastawriter).is_err());
+            let bool = elem.as_ref()
+                .map_or(false,|p| f.addtosequence(p, &mut fastawriter).is_err());
 
             if bool {
                 Err(io::Error::new(
@@ -607,8 +610,7 @@ pub(crate) fn genesblast(
             ));
         }
     };
-    let mut blast: Vec<Blast> =
-        match blastcommand(reference.as_path(), name.as_path(), Blastlevel::default()) {
+    let mut blast = match blastcommand(reference.as_path(), &name.into_temp_path(), Blastlevel::default()) {
             Ok(b) => b,
             Err(e) => {
                 return Err(io::Error::new(ErrorKind::InvalidData, e));
@@ -625,7 +627,6 @@ pub(crate) fn genesblast(
         }
     });
     statusblastvs(&mut blast);
-    let _ = fs::remove_file(name);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
 pub(crate) fn locuspos(
@@ -657,7 +658,7 @@ where
 {
     data.iter().filter(|p| p.onlynewalleles()).filter(move |f| {
         motifs.iter().any(|p| {
-            checkoverlap(&p.getposrange(), &f.getposrange()) && p.getposrange() != f.getposrange()
+            checkoverlap(&p.getposrange(), &f.getposrange()) && p.getposrange() != f.getposrange() && p.getposrange().count() > f.getposrange().count()
         })
     })
 }
@@ -670,13 +671,13 @@ where
     T: AsRef<Path>,
 {
     let (reference, subject) = (reference.as_ref(), subject.as_ref());
-    if !reference.exists() {
+    if !reference.try_exists().unwrap_or(false) {
         return Err(io::Error::new(
             ErrorKind::NotFound,
             "Reference file was not found",
         ));
     }
-    if !subject.exists() {
+    if !subject.try_exists().unwrap_or(false) {
         return Err(io::Error::new(
             ErrorKind::NotFound,
             "Subject file was not found",

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=IMGT_StatAssembly
+StartupWMClass=IMGT_StatAssembly
+Exec="IMGT_StatAssembly.AppImage"
+Icon=../images/logo_software.png
+Type=Application
+Terminal=true

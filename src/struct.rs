@@ -12,7 +12,7 @@ use crate::submissions::{
     DELIMITERFASTA, REQUESTCLIENT, getallelefromblast, getchromosomefromblast,
     getpositionfromblast, getspeciesfromncbi,
 };
-use crate::{MATCHREADS, SOFTCLIPRATIO, locusisokay};
+use crate::{MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO, locusisokay};
 use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
@@ -71,9 +71,9 @@ pub(crate) struct Args {
     /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 10 and 15 minutes.
     #[arg(long, conflicts_with = "meancoverage", default_value_t = 0)]
     pub(crate) extractedlength: u64,
-    /// The mean coverage is already calculated, else will be calculated at startup (10-15 minutes) if not stored already.
-    #[arg(long, value_parser=greater_than_0_64)]
-    pub(crate) meancoverage: Option<u64>,
+    /// Params file if not default and already calculated, else will be calculated at startup (10-15 minutes) if not stored already.
+    #[arg(long)]
+    pub(crate) paramsfile: Option<PathBuf>,
     /// Huge region (more than 10 Mb)
     #[arg(long)]
     pub(crate) hugeregion: bool,
@@ -185,7 +185,7 @@ pub(crate) enum Locus {
 }
 impl Locus {
     pub(crate) fn safestring(&self) -> Cow<'_, str> {
-        Cow::Owned(self.to_string().replace(" ", "/"))
+        Cow::Owned(self.to_string().replace(" ", "_").replace("/","-"))
     }
 }
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Default, Eq, Hash)]
@@ -268,15 +268,7 @@ impl Serialize for Name {
     where
         S: serde::Serializer,
     {
-        let mut d = serializer.serialize_struct("Name", 7)?;
-        d.serialize_field("numacc", &self.numacc)?;
-        d.serialize_field("gene", &self.gene)?;
-        d.serialize_field("species", &self.species)?;
-        d.serialize_field("label", &self.label)?;
-        d.serialize_field("posstart", &self.posstart)?;
-        d.serialize_field("posend", &self.posend)?;
-        d.serialize_field("strand", &self.strand)?;
-        d.end()
+        serializer.serialize_str(&self.to_string())
     }
 }
 impl<'de> Deserialize<'de> for Name {
@@ -438,6 +430,78 @@ impl TryFrom<String> for Locus {
                 format!("{} is not a valid locus.", value),
             )),
         }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Params {
+    pub(crate) readavg: u64,
+    pub(crate) mean: u64,
+    pub(crate) phredscore: u64,
+}
+impl Params {
+    pub(crate) fn new(readavg: u64, mean: u64, phredscore: u64) -> Self {
+        Self {
+            readavg,
+            mean,
+            phredscore,
+        }
+    }
+    pub(crate) fn getavg(&self) -> u64 {
+        self.readavg
+    }
+    pub(crate) fn getmean(&self) -> u64 {
+        self.mean
+    }
+    pub(crate) fn getphred(&self) -> u64 {
+        self.phredscore
+    }
+    pub(crate) fn goodparams(&self) -> io::Result<()> {
+        match (self.mean, self.readavg, self.phredscore) {
+            (0, ..) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
+                ));
+            }
+            (_, b, _) if b < MIN_READLENGTH => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software"),
+                ));
+            }
+            (.., c) if c < MIN_PHREDSCORE => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("The PHRED score does not exceed {MIN_READLENGTH}. For accurate results, please provide high-quality long-reads to the software"),
+                ));
+            }
+            _ => Ok(()),
+        }
+    }
+}
+impl FromStr for Params {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        //Must be linked to to_string() method
+        let trimandparse = |a: &str| {
+            let a = a.trim();
+            a.parse::<u64>()
+        };
+        let mut d = s.split(":");
+        let (avg, mean, phredscore) = match (
+            d.next().map(trimandparse),
+            d.next().map(trimandparse),
+            d.next().map(trimandparse),
+        ) {
+            (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c),
+            _ => return Err("Invalid format retrieved for params".to_string()),
+        };
+        Ok(Self::new(avg, mean, phredscore))
+    }
+}
+impl ToString for Params {
+    fn to_string(&self) -> String {
+        format!("{}:{}:{}", self.readavg, self.mean, self.phredscore)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

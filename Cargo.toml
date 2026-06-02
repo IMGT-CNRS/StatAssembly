@@ -1,9 +1,9 @@
 [package]
 name = "IMGT_StatAssembly"
 description = "Assess quality of assemblies and allele confidence on IG and TR loci"
-version = "3.0.0"
+version = "2.0.0"
 edition = "2024"
-authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>"]
+authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>", "IMGT contact <contact-imgt@igh.cnrs.fr>"]
 rust-version = "1.93"
 license = "EUPL-1.2"
 keywords = ["immunogenetics", "reads", "assembly quality"]

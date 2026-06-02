@@ -2,6 +2,8 @@
 #![warn(clippy::expect_used)]
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
+use num_format::Locale::ar_DZ;
+use tempfile::{NamedTempFile, TempPath};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -21,8 +23,9 @@ use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::path::Path;
 use std::process::ExitCode;
+use std::str::FromStr;
 use std::time::Instant;
-use std::{fs, io};
+use std::{env, fs, io};
 use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
@@ -56,6 +59,7 @@ const AUTHOR: &str = "IMGT®";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
 const MIN_READLENGTH: u64 = 1_000;
+const MIN_PHREDSCORE: u64 = 30;
 const READGAPMESSAGE: u64 = 200;
 const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: f32 = 2.0;
@@ -461,26 +465,26 @@ fn locusposparser(
     Ok(locusrecord)
 }
 fn generategenelist<T>(
-    locushashresult: Option<&HashMap<Locus, Vec<Blastmatch>>>,
+    locushashresult: &Option<Vec<Blastmatch>>,
     speciesblast: &Species,
     locus: &[LocusInfos],
     assembly: T,
-    args: &mut Args,
+    args: &Args,
 ) -> io::Result<Option<Vec<Blastmatch>>>
 where
     T: AsRef<Path>,
 {
     let speciesblast = speciesblast.to_string();
-    let func = {
+    let func = || {
         eprintln!("You have not provided a gene list, BLASTING to get one.");
-        locusallposition(assembly.as_ref(), &speciesblast, &args).map(|(_, b)| b)?
+        locusallposition(assembly.as_ref(), &speciesblast, &args).map(|(_, b)| b)
     };
     let mut data = match locushashresult {
-        None => func,
-        Some(a) if a.is_empty() => func,
+        None => func()?,
+        Some(a) if a.is_empty() => func()?,
         Some(b) => {
             eprintln!("Generating a gene list.");
-            b.clone().into_values().flatten().collect_vec()
+            b.to_vec()
         }
     };
     //locusfiltering(&loci.locus, &mut data);
@@ -488,45 +492,55 @@ where
     if data.is_empty() {
         eprintln!("No data after filtering gene list. Skipped.");
     } else {
-        let mut finish: Vec<GeneInfos> = data
-            .iter()
-            .map(|p| {
-                let strand = if p.send < p.sstart {
-                    Strand::Minus
-                } else {
-                    Strand::Plus
-                };
-                GeneInfos::new(
-                    p.getquery().gene.clone(),
-                    p.getsubject().to_string(),
-                    strand,
-                    Position::new(false, p.sstart.try_into().unwrap_or_default()),
-                    Position::new(false, p.send.try_into().unwrap_or_default()),
-                )
-            })
-            .collect();
-        checkandcorrectgenelistduplicate(&mut finish);
-        let genenamefile = args.outdir.join("genelist_new.csv");
-        let genefile = File::create(&genenamefile)?;
-        let mut csv = csv::WriterBuilder::new()
-            .delimiter(b',')
-            .has_headers(true)
-            .quote_style(csv::QuoteStyle::NonNumeric)
-            .comment(Some(b'#'))
-            .from_writer(genefile);
-        for gene in finish.iter() {
-            if let Err(e) = csv.serialize(gene) {
-                return Err(io::Error::new(
-                    InvalidInput,
-                    format!("Cannot print gene list. Error is {e}"),
-                ));
-            }
-        }
-        csv.flush()?;
-        args.geneloc = Some(genenamefile);
         return Ok(Some(data));
     }
     Ok(None)
+}
+fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<TempPath>> {
+    let mut finish: Vec<GeneInfos> = data
+        .iter()
+        .map(|p| {
+            let strand = if p.send < p.sstart {
+                Strand::Minus
+            } else {
+                Strand::Plus
+            };
+            GeneInfos::new(
+                p.getquery().gene.clone(),
+                p.getsubject().to_string(),
+                strand,
+                Position::new(false, p.sstart.try_into().unwrap_or_default()),
+                Position::new(false, p.send.try_into().unwrap_or_default()),
+            )
+        })
+        .collect();
+    checkandcorrectgenelistduplicate(&mut finish);
+    let (tempfile, genenamefile) = if tmp {
+        let tempfile = NamedTempFile::with_suffix_in("genelist_new.csv", env::temp_dir())?;
+        let i = tempfile.into_temp_path();
+        let p = i.to_path_buf();
+        (Some(i), p)
+    } else {
+        (None, args.outdir.join("genelist_new.csv"))
+    };
+    let genefile = File::create(&genenamefile)?;
+    let mut csv = csv::WriterBuilder::new()
+        .delimiter(b',')
+        .has_headers(true)
+        .quote_style(csv::QuoteStyle::NonNumeric)
+        .comment(Some(b'#'))
+        .from_writer(genefile);
+    for gene in finish.iter() {
+        if let Err(e) = csv.serialize(gene) {
+            return Err(io::Error::new(
+                InvalidInput,
+                format!("Cannot print gene list. Error is {e}"),
+            ));
+        }
+    }
+    csv.flush()?;
+    args.geneloc = Some(genenamefile.to_path_buf());
+    Ok(tempfile)
 }
 fn printnewloc(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
     let file = File::create(args.outdir.join("newloc.csv"))?;
@@ -685,15 +699,16 @@ fn processcounting(
     }
     Ok(message)
 }
-fn getmeancoverageandlength(args: &Args) -> std::io::Result<(u64, u64)> {
+fn getmeancoveragelengthandphred(args: &Args) -> io::Result<Params> {
     let time = Instant::now();
-    let mut reader: IndexedReader = getreaderoffile(args)
-        .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+    let mut reader: IndexedReader =
+        getreaderoffile(args).map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f))?;
     reader
         .fetch(FetchDefinition::All)
-        .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
+        .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f))?;
     let mut readlength = 0;
     let mut count = 0;
+    let mut phred = 0;
     let length = reader
         .rc_records()
         .filter_map(Result::ok)
@@ -702,6 +717,12 @@ fn getmeancoverageandlength(args: &Args) -> std::io::Result<(u64, u64)> {
             if f.mapq() != 0 && !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() {
                 readlength += f.len();
                 count += 1;
+                phred += f
+                    .qual()
+                    .iter()
+                    .map(|a| <u8 as Into<u64>>::into(*a))
+                    .sum::<u64>()
+                    / f.len().try_into().unwrap_or(1);
                 Some(usize::try_from(f.reference_end() - f.reference_start() + 1).unwrap_or(0))
             } else {
                 None
@@ -727,56 +748,45 @@ fn getmeancoverageandlength(args: &Args) -> std::io::Result<(u64, u64)> {
         .map_err(|f| std::io::Error::new(std::io::ErrorKind::InvalidInput, f))?;
     let mean = values / total_mapped;
     let readavg = readvalues / count;
+    let phred = phred / count;
     println!("Calculated in {} s", time.elapsed().as_secs());
-    Ok((mean, readavg))
+    Ok(Params::new(readavg, mean, phred))
 }
-fn calculatemean(meanpath: &Path, args: &Args) -> io::Result<u64> {
-    match (
-        args.meancoverage,
-        meanpath.try_exists(),
-        fs::read_to_string(meanpath).map(|p| p.parse::<u64>()),
+fn getorsetparams(meanpath: &Path, args: &Args) -> io::Result<Params> {
+    let params = match (
+        args.paramsfile
+            .as_ref()
+            .map(|b| fs::read_to_string(b).map(|p| Params::from_str(&p))),
+        args.extractedlength,
+        fs::read_to_string(meanpath).map(|p| Params::from_str(&p)),
     ) {
-        //Mean is given
+        /* //Mean is given
         (Some(mean), ..) => {
             println!(
                 "Mean was provided, getting given value and setting the value for further usage."
             );
             let _ = fs::write(meanpath, mean.to_string().as_bytes());
             Ok(mean)
-        }
+        } */
         //The mean was calculated with a file
-        (None, Ok(true), Ok(Ok(mean))) => {
-            println!("Mean was already calculated, retrieving...");
-            Ok(mean)
+        (Some(Ok(Ok(params))), b, _) | (.., b, Ok(Ok(params))) if b == 0 => {
+            println!("Params were already calculated, retrieving...");
+            params
         }
         _ => {
             println!("Getting mean coverage from calculations, it might take some minutes.");
-            let (mean, average) = match getmeancoverageandlength(args) {
-                Ok((0, _)) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
-                    ));
-                }
-                Ok((_, b)) if b < MIN_READLENGTH => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software.",
-                    ));
-                }
-                Ok((a, b)) => (a, b),
-                Err(e) => {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, format! {"{e}"}));
-                }
-            };
+            let params = getmeancoveragelengthandphred(&args)?;
             println!(
-                "Mean coverage is {} and average length of reads is {}",
-                mean, average
+                "Mean coverage is {} and average length of reads is {}. PHRED score is {}",
+                params.getmean(),
+                params.getavg(),
+                params.getphred()
             );
-            let _ = fs::write(meanpath, mean.to_string().as_bytes());
-            Ok(mean)
+            let _ = fs::write(meanpath, params.to_string().as_bytes());
+            params
         }
-    }
+    };
+    params.goodparams().map(|_| params)
 }
 #[allow(clippy::complexity)]
 fn paintgraph<T>(
@@ -870,34 +880,50 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
         let r = args.assembly.clone();
-        let infos: HashMap<Locus, Vec<Blastmatch>> = if let Some(a) = blastcheck {
-            a.into_iter()
+        /* todo!("To delete");
+        let infos: HashMap<Locus, Vec<Blastmatch>> = if let Some(blastmatches) = blastcheck {
+            blastmatches
+                .into_iter()
                 .filter_map(|f| {
                     if let Some(a) = locus.iter().find(|loci| {
                         f.sseqid == loci.contig
                             && (loci.start.getobasedpos()..=loci.end.getobasedpos())
                                 .contains(&f.sstart.try_into().unwrap_or_default())
                     }) {
-                        Some((a.clone(), f))
+                        Some((a.locus.clone(), f))
                     } else {
                         None
                     }
                 })
-                .into_group_map_by(|c| c.0)
-                .values_mut()
-                .map(|p| p.into_iter().map(|a| a.1).collect_vec())
+                .into_group_map_by(|(locus, _)| locus.clone())
+                .into_iter()
+                .map(|(locus, matches)| {
+                    (
+                        locus,
+                        matches
+                            .into_iter()
+                            .map(|(_, blast_match)| blast_match)
+                            .collect(),
+                    )
+                })
+                .collect()
         } else {
             HashMap::new()
-        };
-        if infos.is_empty() {
+        }; */
+        if blastcheck.as_ref().map_or(true, |a| a.is_empty()) {
             eprintln!("Error setting gene list result. Empty list.");
             return ExitCode::FAILURE;
         }
-        if let Some(b) = r
-            && let Err(e) = generategenelist(Some(infos), &speciesblast, &locus, b, &mut args)
-        {
-            eprintln!("Error setting gene list result: {e}");
-            return ExitCode::FAILURE;
+        if let Some(b) = r {
+            let v = match generategenelist(&blastcheck, &speciesblast, &locus, b, &args) {
+                Ok(Some(a)) => printgenelist(&a, &mut args, false).map(|_| ()),
+                Ok(None) => Ok(()),
+                Err(a) => Err(a),
+            };
+            if let Err(e) = v {
+                eprintln!("Error setting gene list result: {e}");
+                return ExitCode::FAILURE;
+            }
         }
         endmessage(firstinstant, &args);
         return ExitCode::SUCCESS;
@@ -917,10 +943,10 @@ fn main() -> ExitCode {
         }
     };
     let meanpath = outputdir.join(".mean");
-    let mean = match calculatemean(&meanpath, &args) {
-        Ok(a) => a,
+    let mean = match getorsetparams(&meanpath, &args) {
+        Ok(a) => a.getmean(),
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("Error making parameters: {e}.");
             return ExitCode::FAILURE;
         }
     };
@@ -1305,6 +1331,21 @@ fn main() -> ExitCode {
             }
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
+                let _filepath = if let Some(a) = blastcheck.as_ref()
+                    && !args
+                        .geneloc.as_ref()
+                        .map_or(false, |f| f.try_exists().unwrap_or(false))
+                {
+                    match printgenelist(&a, &mut args, true) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            eprintln!("Cannot create gene list. Error is {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    None
+                };
                 match genelist(loci, &args, false) {
                     Err(e) => {
                         eprintln!("Cannot create gene list. Error is {e}");
@@ -1340,7 +1381,7 @@ fn main() -> ExitCode {
                     && let Some(b) = r
                 {
                     let mut data = match generategenelist(
-                        Some(&locushashresult),
+                        &blastcheck,
                         &speciesblast,
                         &initiallocus,
                         b,
@@ -1358,15 +1399,25 @@ fn main() -> ExitCode {
                     };
                     let locivec = vec![loci.clone()];
                     positionfiltering(&locivec, &mut data);
-                    let result = match genelist(loci, &args, false) {
-                        Err(e) => {
+                    let result = match (
+                        printgenelist(&data, &mut args, true),
+                        genelist(loci, &args, false),
+                    ) {
+                        (Err(e), _) => {
                             eprintln!(
                                 "Gene list generation for locus {} has an error: {}.",
                                 loci.locus, e
                             );
                             continue;
                         }
-                        Ok(b) => b,
+                        (Ok(_a), Err(e)) => {
+                            eprintln!(
+                                "Gene list generation for locus {} has an error: {}.",
+                                loci.locus, e
+                            );
+                            continue;
+                        }
+                        (Ok(_), Ok(b)) => b,
                     };
                     if loci.status.isvalid() && result.iter().any(|f| f.status.isvalid()) {
                         locushashresult.insert(loci.locus.clone(), data);
@@ -1388,11 +1439,18 @@ fn main() -> ExitCode {
     if let Err(e) = printnewloc(&args, &mergedloci) {
         eprintln!("Error setting new locus result: {e}");
     }
-    if let Err(e) = printpotentialalleles(
-        &args,
-        downloadref(false).map(|(_, release)| release),
-        &locushashresult,
-    ) {
+    if let Some(a) = blastcheck
+        && let Err(e) = printgenelist(&a, &mut args, false)
+    {
+        eprintln!("Error setting new gene list: {e}");
+    }
+    if !locushashresult.is_empty()
+        && let Err(e) = printpotentialalleles(
+            &args,
+            downloadref(false).map(|(_, release)| release),
+            &locushashresult,
+        )
+    {
         eprintln!("Error setting alleles result: {e}");
     }
     if !args.nosubmit
