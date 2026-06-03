@@ -2,7 +2,6 @@
 #![warn(clippy::expect_used)]
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
-use num_format::Locale::ar_DZ;
 use tempfile::{NamedTempFile, TempPath};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
@@ -63,6 +62,7 @@ const MIN_PHREDSCORE: u64 = 30;
 const READGAPMESSAGE: u64 = 200;
 const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: f32 = 2.0;
+const PHYLUMLIMIT: usize = 7776; //obfstr::obf!("Gnathostomata");
 const MATCHREADS: usize = 10;
 const BORNES: usize = 10_000;
 const SOFTCLIPRATIO: f32 = 0.4;
@@ -307,7 +307,6 @@ fn locusposparser(
     realspecies: &Species,
     blastpresent: bool,
 ) -> std::io::Result<(Vec<LocusInfos>, Option<Vec<Blastmatch>>)> {
-    let realspecies = realspecies.to_string();
     let mut records = Vec::new();
     if let Some(arg) = &args.locuspos {
         let detectheaders = csv::ReaderBuilder::new()
@@ -474,7 +473,6 @@ fn generategenelist<T>(
 where
     T: AsRef<Path>,
 {
-    let speciesblast = speciesblast.to_string();
     let func = || {
         eprintln!("You have not provided a gene list, BLASTING to get one.");
         locusallposition(assembly.as_ref(), &speciesblast, &args).map(|(_, b)| b)
@@ -573,7 +571,8 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
     }
     //Check assembly is okay if existing
     if args.assembly.is_some() {
-        getassemblyreader(args)?;
+        getassemblyreader(args)
+            .map_err(|p| io::Error::new(p.kind(), format!("Cannot open assembly. Error is {p}")))?;
     }
     let outputdir = match args.outdir.is_dir() {
         true => {
@@ -795,6 +794,7 @@ fn paintgraph<T>(
     loci: &LocusInfos,
     pos: &BTreeMap<Position, HashMapinfo>,
     args: &Args,
+    species: &Species,
     readgraphelem: DrawingArea<T, Shift>,
     mismatchgraphelem: DrawingArea<T, Shift>,
     mean: u64,
@@ -807,6 +807,7 @@ where
         loci,
         pos.values().collect_vec().as_slice(),
         args,
+        species,
         readgraphelem,
         mean,
     )
@@ -831,10 +832,14 @@ fn main() -> ExitCode {
     let firstinstant = Instant::now();
     let speciesblast = match Species::new(&args.species) {
         Ok(b) => b,
-        Err(_) => return ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
     };
     println!(
-        "Species is {} (taxon: {}).",
+        "{} is {} (taxon: {}).",
+        speciesblast.getrank(),
         speciesblast.to_string(),
         speciesblast
             .getid()
@@ -853,7 +858,7 @@ fn main() -> ExitCode {
     let outputdir = match checklocusandoutput(&args) {
         Ok(a) => a.clone(),
         Err(e) => {
-            eprintln!("Error with locus file or output: {e}");
+            eprintln!("Error with locus file, assembly or output: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -998,7 +1003,7 @@ fn main() -> ExitCode {
             let fgraph = "readresult";
             let (top, bottom, topb, bottomb) = if args.svg {
                 let outputfile = outputdir.join(givename(
-                    &args.species,
+                    &speciesblast,
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
@@ -1016,7 +1021,7 @@ fn main() -> ExitCode {
                 }
             } else {
                 let outputfile = outputdir.join(givename(
-                    &args.species,
+                    &speciesblast,
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
@@ -1037,7 +1042,7 @@ fn main() -> ExitCode {
             let sgraph = "mismatchresult";
             let (mistop, misbottom, mistopb, misbottomb) = if args.svg {
                 let outputfile = outputdir.join(givename(
-                    &args.species,
+                    &speciesblast,
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
@@ -1056,7 +1061,7 @@ fn main() -> ExitCode {
                 //mismatchgraph(outputfile, floci, &pos, &args, root);
             } else {
                 let outputfile = outputdir.join(givename(
-                    &args.species,
+                    &speciesblast,
                     &floci.locus,
                     &floci.contig,
                     haplotypebool,
@@ -1227,6 +1232,7 @@ fn main() -> ExitCode {
                         loci,
                         &pos,
                         &args,
+                        &speciesblast,
                         readgraphtop,
                         mismatchgraphtop,
                         mean,
@@ -1245,6 +1251,7 @@ fn main() -> ExitCode {
                         loci,
                         &pos,
                         &args,
+                        &speciesblast,
                         readgraphbottom,
                         mismatchgraphbottom,
                         mean,
@@ -1263,6 +1270,7 @@ fn main() -> ExitCode {
                         loci,
                         &pos,
                         &args,
+                        &speciesblast,
                         readgraphtop2,
                         mismatchgraphtop2,
                         mean,
@@ -1281,6 +1289,7 @@ fn main() -> ExitCode {
                         loci,
                         &pos,
                         &args,
+                        &speciesblast,
                         readgraphbottom2,
                         mismatchgraphbottom2,
                         mean,
@@ -1301,6 +1310,7 @@ fn main() -> ExitCode {
             //Create CSV from HashMap
             if let Err(e) = createcsv(
                 outputdir.as_path(),
+                &speciesblast,
                 loci,
                 pos.values().collect_vec().as_slice(),
                 &args,
@@ -1333,7 +1343,8 @@ fn main() -> ExitCode {
                 println!("Gene list starting!");
                 let _filepath = if let Some(a) = blastcheck.as_ref()
                     && !args
-                        .geneloc.as_ref()
+                        .geneloc
+                        .as_ref()
                         .map_or(false, |f| f.try_exists().unwrap_or(false))
                 {
                     match printgenelist(&a, &mut args, true) {
@@ -1346,7 +1357,7 @@ fn main() -> ExitCode {
                 } else {
                     None
                 };
-                match genelist(loci, &args, false) {
+                match genelist(loci, &speciesblast, &args, false) {
                     Err(e) => {
                         eprintln!("Cannot create gene list. Error is {e}");
                         return ExitCode::FAILURE;
@@ -1401,7 +1412,7 @@ fn main() -> ExitCode {
                     positionfiltering(&locivec, &mut data);
                     let result = match (
                         printgenelist(&data, &mut args, true),
-                        genelist(loci, &args, false),
+                        genelist(loci, &speciesblast, &args, false),
                     ) {
                         (Err(e), _) => {
                             eprintln!(
@@ -1419,6 +1430,12 @@ fn main() -> ExitCode {
                         }
                         (Ok(_), Ok(b)) => b,
                     };
+                    data.retain(|a| {
+                        result
+                            .iter()
+                            .find(|c| c.gene == a.qseqid.gene)
+                            .is_some_and(|b| b.status.isvalid())
+                    });
                     if loci.status.isvalid() && result.iter().any(|f| f.status.isvalid()) {
                         locushashresult.insert(loci.locus.clone(), data);
                     }
@@ -1445,7 +1462,7 @@ fn main() -> ExitCode {
         eprintln!("Error setting new gene list: {e}");
     }
     if !locushashresult.is_empty()
-        && let Err(e) = printpotentialalleles(
+        && let Err(e) = printvalidatedalleles(
             &args,
             downloadref(false).map(|(_, release)| release),
             &locushashresult,
@@ -1458,9 +1475,15 @@ fn main() -> ExitCode {
     .iter()
     .any(|(_, f)| f.iter().any(|g| g.onlynewalleles())) */
     {
-        match askforsubmission(&speciesblast, &mergedloci, &args, &locushashresult) {
-            Ok(_) => (),
-            Err(e) => eprintln!("Error submitting sequences: {e}"),
+        locushashresult
+            .values_mut()
+            .for_each(|a| a.retain(|p| p.onlynewalleles()));
+        locushashresult.retain(|_, v| !v.is_empty());
+        if !locushashresult.is_empty() {
+            match askforsubmission(&speciesblast, &mergedloci, &args, &locushashresult) {
+                Ok(_) => (),
+                Err(e) => eprintln!("Error submitting sequences: {e}"),
+            }
         }
     }
     endmessage(firstinstant, &args);
@@ -1499,7 +1522,7 @@ where
     csv.flush()?;
     Ok(())
 }
-fn printpotentialalleles<T>(
+fn printvalidatedalleles<T>(
     args: &Args,
     release: Option<T>,
     locushash: &HashMap<Locus, Vec<Blastmatch>>,
@@ -1507,7 +1530,7 @@ fn printpotentialalleles<T>(
 where
     T: AsRef<str>,
 {
-    let path = args.outdir.join("potentialalleles.fasta");
+    let path = args.outdir.join("validatedalleles.fasta");
     let writer = File::create(path)?;
     let mut csv = csv::WriterBuilder::new()
         .delimiter(b',')
@@ -1653,6 +1676,7 @@ fn extractgenelist(
 }
 fn genelist(
     loci: &LocusInfos,
+    species: &Species,
     args: &Args,
     full: bool,
 ) -> Result<Vec<GeneInfosFinish>, Box<dyn std::error::Error>> {
@@ -1662,7 +1686,7 @@ fn genelist(
     }
     let outputdir = &args.outdir;
     let outputfile = outputdir.join(givename(
-        &args.species,
+        species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -1885,13 +1909,13 @@ fn genelist(
     });
     //Print position if nothing was forced
     if !args.force {
-        printpossus(args, loci, outputdir, &alertingpositions)?;
+        printpossus(args, species, loci, outputdir, &alertingpositions)?;
     }
     println!("Gene analysis has been saved to {}", outputfile.display());
     Ok(finale)
 }
 fn printbreaks(
-    args: &Args,
+    species: &Species,
     finalpos: i64,
     breaks: &[(i64, i64)],
     loci: &LocusInfos,
@@ -1907,7 +1931,7 @@ fn printbreaks(
         }
     };
     let mut breakfile = File::create(outputdir.join(givename(
-        &args.species,
+        &species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -1961,12 +1985,13 @@ fn printbreaks(
 }
 fn printpossus(
     args: &Args,
+    species: &Species,
     loci: &LocusInfos,
     outputdir: &std::path::Path,
     data: &BTreeMap<GeneInfos, Vec<(bool, usize)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
-        &args.species,
+        &species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -2240,7 +2265,7 @@ where
     Ok(())
 }
 fn givename(
-    species: &str,
+    species: &Species,
     locus: &Locus,
     contig: &str,
     haplo: bool,
@@ -2249,7 +2274,7 @@ fn givename(
 ) -> String {
     format!(
         "{}_{}_{}{}_{}",
-        species,
+        species.safestring(),
         locus.safestring(),
         if image && !haplo {
             String::new()
@@ -2268,12 +2293,13 @@ fn givename(
 }
 fn createcsv(
     outputdir: &std::path::Path,
+    species: &Species,
     loci: &LocusInfos,
     pos: &[&HashMapinfo],
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
-        &args.species,
+        &species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -2529,6 +2555,7 @@ fn readgraph<T>(
     loci: &LocusInfos,
     pos: &[&HashMapinfo],
     args: &Args,
+    species: &Species,
     root: DrawingArea<T, Shift>,
     mean: u64,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -2814,7 +2841,7 @@ where
         .unwrap_or_else(|| unreachable!("Invalid pos variable"))
         .position
         .getobasedpos();
-    printbreaks(args, finalpos, &breaks, loci, outputfile)?;
+    printbreaks(species, finalpos, &breaks, loci, outputfile)?;
     chart
         .draw_series(
             Histogram::vertical(&chart)

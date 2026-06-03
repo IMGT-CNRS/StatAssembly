@@ -5,14 +5,14 @@ use crate::r#struct::{
     Args, Blast, Blastcalc, Blastlevel, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Name,
     Newfasta, Position, Seqresult, Species, Strand,
 };
-use crate::{getassemblyreader, getreaderoffile};
+use crate::{PHYLUMLIMIT, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use quick_xml::events::Event;
 use reqwest::{StatusCode, tls};
-use serde_json::{self as json, Value};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -270,7 +270,7 @@ pub(crate) fn speciesandorphonfiltering(
     tempfile: &Path,
     locus: Option<&Locus>,
     releaseversion: String,
-    species: &str,
+    species: &Species,
     orphonfilter: bool,
     force: bool,
 ) -> io::Result<PathBuf> {
@@ -279,7 +279,7 @@ pub(crate) fn speciesandorphonfiltering(
             format!(
                 "refseq{}-{}{}.fasta",
                 releaseversion.replace(" ", "_"),
-                species.replace(" ", "-"),
+                species.getname().replace(" ", "-"),
                 locus.map_or("".to_string(), |l| format!("-{}", l))
             ),
             env::temp_dir(),
@@ -292,7 +292,7 @@ pub(crate) fn speciesandorphonfiltering(
             format!(
                 "refseq{}-{}{}.fasta",
                 releaseversion.replace(" ", "_"),
-                species.replace(" ", "-"),
+                species.getname().replace(" ", "-"),
                 locus.map_or("".to_string(), |l| format!("-{}", l))
             ),
         )
@@ -301,9 +301,13 @@ pub(crate) fn speciesandorphonfiltering(
         println!("Filtering already done, retrieving...");
         return Ok(outfile);
     }
-    println!("Filtering based on species {}.", species);
+    println!(
+        "Filtering based on {} {}.",
+        species.getrank(),
+        species.getname()
+    );
     let file = std::fs::read_to_string(tempfile)?;
-    let info = fastafilter(&file, species, true, true).replace(" ", "_");
+    let info = fastafilter(&file, species.getname(), true, true).replace(" ", "_");
     let info = if orphonfilter {
         println!("Orphon filtering");
         fastafilter(&info, "/OR", false, false)
@@ -333,19 +337,24 @@ pub(crate) fn speciesandorphonfiltering(
     let finale = match (info.is_empty(), allmatch) {
         (true, _) => {
             println!(
-                "No match with IMGT/GENE-DB, the species {} might be a new species.",
-                species
+                "No match with IMGT/GENE-DB, the {} {} might be new.",
+                species.getrank(),
+                species.getname()
             );
             file
         }
         (false, false) => {
             if let Some(a) = locus {
                 println!(
-                    "No match with IMGT/GENE-DB with {} and {} loci.",
-                    species, a
+                    "No match with IMGT/GENE-DB for {} and {} loci.",
+                    species.getname(),
+                    a
                 );
             } else {
-                println!("No match with IMGT/GENE-DB with {} and some loci.", species);
+                println!(
+                    "No match with IMGT/GENE-DB with {} and some loci.",
+                    species.getname()
+                );
             }
             file
         }
@@ -516,24 +525,14 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
         blastresult.setstatus();
     }
 }
-pub(crate) fn matchmotif<T>(
+pub(crate) fn matchmotif(
     subject: &Path,
-    species: T,
+    species: &Species,
     locus: Option<&Locus>,
-) -> io::Result<Vec<Blastmatch>>
-where
-    T: AsRef<str>,
-{
-    let reference = match downloadmotifs().map(|a| {
-        speciesandorphonfiltering(
-            &a,
-            locus,
-            "motifs".to_string(),
-            species.as_ref(),
-            false,
-            false,
-        )
-    }) {
+) -> io::Result<Vec<Blastmatch>> {
+    let reference = match downloadmotifs()
+        .map(|a| speciesandorphonfiltering(&a, locus, "motifs".to_string(), species, false, false))
+    {
         Some(a) => a?,
         None => {
             return Err(io::Error::new(
@@ -597,14 +596,7 @@ pub(crate) fn genesblast(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let reference = match downloadref(true).map(|(a, b)| {
-        speciesandorphonfiltering(
-            &a,
-            Some(locus),
-            b,
-            &species.to_string(),
-            false,
-            args.cacheerase,
-        )
+        speciesandorphonfiltering(&a, Some(locus), b, &species, false, args.cacheerase)
     }) {
         Some(a) => a?,
         None => {
@@ -765,7 +757,7 @@ where
 pub(crate) fn getspeciesfromncbi<T>(
     client: &reqwest::blocking::Client,
     species: &T,
-) -> Result<(String, usize), Box<dyn Error>>
+) -> Result<(String, String, usize), Box<dyn Error>>
 where
     T: AsRef<str>,
 {
@@ -775,7 +767,7 @@ where
     } else {
         let response = client
             .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?")
-            .query(&[("db", "taxonomy"), ("term", species), ("format", "json")])
+            .query(&[("db", "taxonomy"), ("term", species), ("format", "xml")])
             .send()?;
         if response.status().is_server_error() {
             return Err(Box::new(io::Error::new(
@@ -788,64 +780,145 @@ where
                 "Unsuccessful NCBI response",
             )));
         }
-        let jsone: json::Value = json::from_str(&response.text().unwrap_or(String::new()))?;
-        jsone["esearchresult"]["idlist"]
-            .as_array()
-            .map(|f| f.iter().next())
-            .ok_or(io::Error::new(
-                ErrorKind::InvalidInput,
-                "Species not found on NCBI Taxonomy.",
-            ))?
-            .ok_or(io::Error::new(
-                ErrorKind::InvalidInput,
-                "Species not found on NCBI Taxonomy.",
-            ))?
-            .as_str()
-            .ok_or(io::Error::new(
-                ErrorKind::InvalidInput,
-                "No result for the term used",
-            ))?
-            .parse::<usize>()
-            .unwrap_or(0)
-    };
-    let val = &format!("{}", id);
-    let response = client
-        .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
-        .query(&[("db", "taxonomy"), ("id", val), ("format", "json")])
-        .send()?;
-    let jsone: json::Value = json::from_str(&response.text().unwrap_or(String::new()))?;
-    let mapping = jsone["result"].as_object().ok_or(io::Error::new(
-        ErrorKind::InvalidInput,
-        "No result for the term used",
-    ))?;
-    if let Some(data) = mapping.get(val) {
-        println!("Data is {:?}", data);
-        let elem = data.as_object().ok_or(io::Error::new(
-            ErrorKind::InvalidInput,
-            "No result for the id found",
-        ))?;
-        let text = String::from("species");
-        let subspecies = String::from("subspecies");
-        match (elem.get("rank"), elem.get("scientificname")) {
-            (Some(Value::String(text2)), Some(Value::String(name)))
-                if text2.as_str() == text.as_str() || text2.as_str() == subspecies.as_str() =>
-            {
-                Ok((name.to_string(), id))
+        let responsebody = match response.text() {
+            Ok(a) => a,
+            Err(_) => {
+                return Err(Box::new(io::Error::new(
+                    ErrorKind::HostUnreachable,
+                    "Badly formatted NCBI output.",
+                )));
             }
-            (Some(Value::String(rank)), _) => Err(Box::new(io::Error::new(
-                ErrorKind::InvalidInput,
-                format!("The term used is not a (sub)species but a {}", rank),
-            ))),
-            _ => Err(Box::new(io::Error::new(
-                ErrorKind::InvalidInput,
-                "Invalid term used",
-            ))),
+        };
+        let mut xml = quick_xml::Reader::from_str(&responsebody);
+        loop {
+            match xml.read_event() {
+                Ok(Event::Eof) => {
+                    return Err(Box::new(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "Invalid species from NCBI.",
+                    )));
+                }
+                Ok(Event::Start(c)) if c.name().as_ref().eq_ignore_ascii_case(b"Id") => {
+                    match xml
+                        .read_text(c.name())
+                        .map(|a| String::from_utf8_lossy(&a).parse::<usize>())
+                    {
+                        Ok(Ok(a)) => break a,
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            }
         }
-    } else {
-        Err(Box::new(io::Error::new(
-            ErrorKind::InvalidInput,
-            "Invalid mapping",
-        )))
+    };
+    let response = client
+        .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?")
+        .query(&[
+            ("db", "taxonomy"),
+            ("id", &format!("{id}")),
+            ("format", "xml"),
+        ])
+        .send()?;
+    if response.status().is_server_error() {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::HostUnreachable,
+            "Unsuccessful NCBI response",
+        )));
+    } else if !response.status().is_success() {
+        return Err(Box::new(io::Error::new(
+            ErrorKind::NotFound,
+            "Unsuccessful NCBI response",
+        )));
+    }
+    let responsebody = match response.text() {
+        Ok(a) => a,
+        Err(_) => {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::HostUnreachable,
+                "Badly formatted NCBI output.",
+            )));
+        }
+    };
+    let mut xml = quick_xml::Reader::from_str(&responsebody);
+    let mut lineage = false;
+    let mut rank = String::new();
+    let mut scientificname = String::new();
+    let mut id = 0;
+    let goodtaxononomy = loop {
+        match xml.read_event() {
+            Ok(Event::Eof) => break false,
+            Ok(Event::Start(b)) if b.name().as_ref() == b"LineageEx" => {
+                lineage = true;
+                continue;
+            }
+            Ok(Event::Start(a)) if a.name().as_ref() == b"TaxId" && lineage => {
+                match xml
+                    .read_text(a.name())
+                    .map(|a| String::from_utf8_lossy(&a).parse::<usize>())
+                {
+                    Ok(Ok(a)) if a == PHYLUMLIMIT => break true,
+                    _ => continue,
+                }
+            }
+            Ok(Event::Start(c))
+                if c.name().as_ref().eq_ignore_ascii_case(b"scientificname") && !lineage =>
+            {
+                match xml.read_text(c.name()) {
+                    Ok(a) => scientificname = String::from_utf8_lossy(&a).to_string(),
+                    _ => continue,
+                }
+            }
+            Ok(Event::Start(c)) if c.name().as_ref().eq_ignore_ascii_case(b"Rank") && !lineage => {
+                match xml.read_text(c.name()) {
+                    Ok(a) => rank = String::from_utf8_lossy(&a).to_string(),
+                    _ => continue,
+                }
+            }
+            Ok(Event::Start(c)) if c.name().as_ref().eq_ignore_ascii_case(b"TaxId") && !lineage => {
+                match xml
+                    .read_text(c.name())
+                    .map(|a| String::from_utf8_lossy(&a).parse::<usize>())
+                {
+                    Ok(Ok(a)) => id = a,
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        }
+    };
+    match (rank, id, goodtaxononomy, scientificname) {
+        (_, 0, ..) => {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Species was not found on NCBI.",
+            )));
+        }
+        (b, .., a) if a.is_empty() || b.is_empty() => {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Species was not found on NCBI.",
+            )));
+        }
+        (rank, _, false, _)
+            if rank.eq_ignore_ascii_case("species") || rank.eq_ignore_ascii_case("subspecies") =>
+        {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::InvalidInput,
+                "Species is not a jawed vertebrate.",
+            )));
+        }
+        (rank, id, true, name)
+            if !name.is_empty() && rank.eq_ignore_ascii_case("species")
+                || rank.eq_ignore_ascii_case("subspecies") =>
+        {
+            Ok((rank, name, id))
+        }
+        _ => {
+            return Err(Box::new(io::Error::new(
+                ErrorKind::InvalidInput,
+                "The term used is not a species or an subspecies.",
+            )));
+        }
     }
 }
 /*
@@ -1003,7 +1076,7 @@ pub(crate) fn submit(
                 )
             })?;
     }
-    let mut motifs = matchmotif(&sequencefile, &realspecies.to_string(), None)
+    let mut motifs = matchmotif(&sequencefile, &realspecies, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
@@ -1078,7 +1151,9 @@ pub(crate) fn submit(
         acc
     });
     println!("BLAST results were added.");
-    if let Err(e) = fs::write(file, &sequence) {
+    if !sequence.trim().is_empty()
+        && let Err(e) = fs::write(file, &sequence)
+    {
         eprintln!("An error has occured while priting sequence: {e}.");
         return Ok(());
     }

@@ -7,7 +7,7 @@ use crate::{
     BORNES, printpotentialbornes,
     r#struct::{
         Args, Blast, Blastcalc, Blastlevel, Blastmatch, Haplotype, Locus, LocusInfos, Name,
-        Position, Status, Strand,
+        Position, Species, Status, Strand,
     },
     submissions::{
         BORNESLINK, LOCUSSEPARATOR, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK,
@@ -25,14 +25,11 @@ use std::{
     thread,
 };
 
-pub(crate) fn locusallposition<T>(
+pub(crate) fn locusallposition(
     subject: &Path,
-    species: T,
+    species: &Species,
     args: &Args,
-) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)>
-where
-    T: AsRef<str>,
-{
+) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)> {
     let infos = if args.nobornes {
         None
     } else {
@@ -40,9 +37,8 @@ where
     };
     let (bornespath, referencepath) = match (
         infos,
-        downloadref(true).map(|(a, b)| {
-            speciesandorphonfiltering(&a, None, b, species.as_ref(), true, args.cacheerase)
-        }),
+        downloadref(true)
+            .map(|(a, b)| speciesandorphonfiltering(&a, None, b, species, true, args.cacheerase)),
     ) {
         (Some(a), Some(b)) => (Some(a), b?),
         (None, Some(b)) if args.nobornes => (None, b?),
@@ -160,7 +156,6 @@ where
         println!("Waiting for blast and bornes to finish.");
         (blast.join(), bornes.map(|d| d.join()))
     });
-    std::fs::write("/tmp/bornestest.txt", format!("{:#?}", bornes));
     let (mut blast, mut bornes) = match (blast, bornes) {
         (Ok(Ok(a)), Some(Ok(Some(b)))) => (a, Some(b)),
         (Ok(Ok(a)), Some(Ok(None))) | (Ok(Ok(a)), None) => {

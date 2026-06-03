@@ -185,8 +185,14 @@ pub(crate) enum Locus {
 }
 impl Locus {
     pub(crate) fn safestring(&self) -> Cow<'_, str> {
-        Cow::Owned(self.to_string().replace(" ", "_").replace("/", "-"))
+        safestring(self.to_string())
     }
+}
+pub(crate) fn safestring<'a, T>(val: T) -> Cow<'a, str>
+where
+    T: Into<Cow<'a, str>>,
+{
+    Cow::Owned(val.into().replace(" ", "_").replace("/", "-"))
 }
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Default, Eq, Hash)]
 pub(crate) enum Blastlevel {
@@ -217,6 +223,7 @@ impl Blastlevel {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Species {
+    rank: String,
     name: String,
     id: Option<usize>,
 }
@@ -224,36 +231,46 @@ impl Species {
     pub(crate) fn getname(&self) -> &str {
         &self.name
     }
+    pub(crate) fn safestring(&self) -> Cow<'_, str> {
+        safestring(self.to_string())
+    }
     pub(crate) fn getid(&self) -> Option<usize> {
         self.id
     }
     pub(crate) fn ischecked(&self) -> bool {
         self.id.is_some()
     }
+    pub(crate) fn getrank(&self) -> &str {
+        &self.rank
+    }
     pub(crate) fn new<T>(species: T) -> Result<Self, String>
     where
         T: AsRef<str>,
     {
-        let (text, id) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
-            Ok((b, id)) => (b, Some(id)),
+        let (rank, text, id) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
+            Ok((rank, b, id)) => (rank, b, Some(id)),
             Err(e) => match e.downcast_ref::<io::Error>() {
                 Some(b) if b.kind() == InvalidInput => {
-                    return Err(
-                        "The following error has occured with your species. Please change: {e}"
-                            .to_string(),
-                    );
+                    return Err(format!(
+                        "The following error has occured with your species: {}. Please change: {b}",
+                        species.as_ref()
+                    ));
                 }
                 Some(_) => {
                     eprintln!("NCBI unavailable, your species won't be checked.");
-                    (species.as_ref().to_string(), None)
+                    (String::from("Species"), species.as_ref().to_string(), None)
                 }
                 None => {
                     eprintln!("NCBI issue, your species won't be checked. Error is {e}");
-                    (species.as_ref().to_string(), None)
+                    (String::from("Species"), species.as_ref().to_string(), None)
                 }
             },
         };
-        Ok(Self { name: text, id })
+        Ok(Self {
+            rank,
+            name: text,
+            id,
+        })
     }
 }
 impl ToString for Species {
