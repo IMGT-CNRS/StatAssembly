@@ -50,7 +50,7 @@ cargo run --release
 Here is the command to execute with example files from the repository folder on linux 64bits:
 
 ```bash
-binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/
+binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -a example_files/assembly.fna -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/ full
 ```
 
 The list of arguments used in the example (more available in software help):
@@ -76,6 +76,24 @@ The script should last around 30 seconds.
 
 ## Script input files and data
 
+### Commands
+
+The script has three different command (last argument):
+
+- `find` allows to find the IG/TR loci and genes. The assembly (`-a`) must be provided.
+- `analyze` allows the analysis of IG/TR loci and genes.
+- `full` launches find command then analyze command.
+
+
+### Find
+
+By giving the assembly, you can generate the gene list and the locus position. The BAM file is not required for this part only.
+
+```bash
+binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -a example_files/assembly.fna -s human -o results/ find
+```
+
+### Analyze 
 * The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*. The use of HiFi reads should be preferred as short or noisy reads might give confusing results.
 
 > [!TIP]

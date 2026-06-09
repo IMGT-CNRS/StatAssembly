@@ -1,7 +1,9 @@
 use bio::io::fasta;
+use indicatif::ProgressBar;
 use itertools::Itertools;
-use serde::ser::{SerializeStruct, SerializeTupleStruct};
+use serde::ser::SerializeTupleStruct;
 use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
+use tempfile::NamedTempFile;
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
@@ -9,8 +11,8 @@ Available under EUPL license
 Made by: Guilhem Zeitoun
 */
 use crate::submissions::{
-    DELIMITERFASTA, REQUESTCLIENT, getallelefromblast, getchromosomefromblast,
-    getpositionfromblast, getspeciesfromncbi,
+    DELIMITERFASTA, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT,
+    getallelefromblast, getchromosomefromblast, getpositionfromblast, getspeciesfromncbi,
 };
 use crate::{MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO, locusisokay};
 use clap::{Parser, ValueEnum, crate_authors};
@@ -19,6 +21,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::ErrorKind::{self, InvalidInput};
 use std::ops::{Not, RangeInclusive};
+use std::path::Path;
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
 use strum_macros::EnumIter;
@@ -137,6 +140,25 @@ pub(crate) struct Args {
     /// Command
     #[arg(value_enum)]
     pub(crate) command: Command,
+}
+pub(crate) enum Filecrea {
+    Temp(NamedTempFile),
+    Plain(PathBuf),
+}
+impl Filecrea {
+    pub(crate) fn getpath(&self) -> &Path {
+        match self {
+            Self::Temp(a) => a.path(),
+            Self::Plain(b) => b.as_path(),
+        }
+    }
+    pub(crate) fn istemp(&self) -> bool {
+        matches!(self, Self::Temp(_))
+    }
+}
+#[derive(Debug, Deserialize)]
+pub(crate) struct GitLabTag {
+    pub(crate) name: String,
 }
 #[derive(Default, Debug, Clone, PartialEq, Eq, ValueEnum)]
 pub(crate) enum Command {
@@ -273,9 +295,24 @@ impl Species {
         })
     }
 }
-impl ToString for Species {
-    fn to_string(&self) -> String {
-        format!("{}", self.name)
+impl Display for Species {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name.to_string())
+    }
+}
+pub(crate) struct ProgressReader<R> {
+    pub(crate) reader: R,
+    pub(crate) progress_bar: ProgressBar,
+    pub(crate) total_bytes: u64,
+}
+
+impl<R: io::Read> io::Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.reader.read(buf)?;
+        if bytes_read > 0 {
+            self.progress_bar.inc(bytes_read as u64);
+        }
+        Ok(bytes_read)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -331,23 +368,17 @@ impl Name {
         }
     }
 }
-impl ToString for Name {
-    fn to_string(&self) -> String {
-        format!(
+impl Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
             "{}|{}|{}|U|{}|{}..{}|",
-            self.numacc
-                .as_ref()
-                .map(|b| b.clone())
-                .unwrap_or("N/A".to_string()),
+            self.numacc.clone().unwrap_or("N/A".to_string()),
             self.gene,
             self.species,
-            self.label
-                .as_ref()
-                .map(|b| b.clone())
-                .unwrap_or("REGION".to_string()),
+            self.label.clone().unwrap_or("REGION".to_string()),
             self.posstart.getobasedpos(),
-            self.posend.getobasedpos()
-        )
+            self.posend.getobasedpos(),
+        ))
     }
 }
 impl FromStr for Name {
@@ -429,48 +460,122 @@ impl FromStr for Name {
             },
             posstart: start,
             posend: end,
-            strand: strand,
+            strand,
         })
     }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Hash)]
-pub(crate) enum OkStatus {
+pub(crate) enum AcceptedStatus {
     #[default]
     Unknown,
     Accepted,
     Rejected,
 }
-impl Not for OkStatus {
+impl Not for AcceptedStatus {
     type Output = Self;
 
     fn not(self) -> Self::Output {
         match self {
-            OkStatus::Unknown => Self::Unknown,
-            OkStatus::Accepted => Self::Rejected,
-            OkStatus::Rejected => Self::Accepted,
+            AcceptedStatus::Unknown => Self::Unknown,
+            AcceptedStatus::Accepted => Self::Rejected,
+            AcceptedStatus::Rejected => Self::Accepted,
         }
+    }
+}
+impl Display for AcceptedStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcceptedStatus::Unknown => write!(f, "Unknown"),
+            AcceptedStatus::Accepted => write!(f, "Accepted"),
+            AcceptedStatus::Rejected => write!(f, "Rejected"),
+        }
+    }
+}
+impl FromStr for AcceptedStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "unknown" => Ok(Self::Unknown),
+            "accepted" => Ok(Self::Accepted),
+            "rejected" => Ok(Self::Rejected),
+            c => Err(format!("expected unknown, accepted and rejected, got {c}")),
+        }
+    }
+}
+impl AcceptedStatus {
+    pub(crate) fn isvalid(&self) -> bool {
+        *self == AcceptedStatus::Accepted
+    }
+    #[allow(dead_code)]
+    pub(crate) fn isinvalid(&self) -> bool {
+        *self == AcceptedStatus::Rejected
+    }
+    #[allow(dead_code)]
+    pub(crate) fn isunknown(&self) -> bool {
+        *self == AcceptedStatus::Unknown
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct OkStatus {
+    pub(crate) status: AcceptedStatus,
+    pub(crate) motif: Option<String>,
+}
+impl OkStatus {
+    pub(crate) fn new(status: AcceptedStatus, motif: Option<String>) -> Self {
+        let (status, motif) = match (status, motif) {
+            (a @ AcceptedStatus::Accepted | a @ AcceptedStatus::Unknown, _) => (a, None),
+            (a, b) => (a, b),
+        };
+        Self { status, motif }
+    }
+    pub(crate) fn getstatus(&self) -> &AcceptedStatus {
+        &self.status
+    }
+    pub(crate) fn getmotif(&self) -> &Option<String> {
+        &self.motif
     }
 }
 impl Display for OkStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OkStatus::Unknown => write!(f, "Unknown"),
-            OkStatus::Accepted => write!(f, "Accepted"),
-            OkStatus::Rejected => write!(f, "Rejected"),
-        }
+        write!(
+            f,
+            "{} {}",
+            self.status,
+            self.motif
+                .as_ref()
+                .map_or(String::new(), |a| format!("because {}", a))
+        )
     }
 }
-impl OkStatus {
-    pub(crate) fn isvalid(&self) -> bool {
-        *self == OkStatus::Accepted
+impl FromStr for OkStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (status, motif) = match s.split_once("because") {
+            Some((a, b)) => (AcceptedStatus::from_str(a.trim())?, Some(b.trim())),
+            None => (AcceptedStatus::from_str(s.trim())?, None),
+        };
+        Ok(Self {
+            status,
+            motif: motif.map(|a| a.to_string()),
+        })
     }
-    #[allow(dead_code)]
-    pub(crate) fn isinvalid(&self) -> bool {
-        *self == OkStatus::Rejected
+}
+impl Serialize for OkStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{}", self))
     }
-    #[allow(dead_code)]
-    pub(crate) fn isunknown(&self) -> bool {
-        *self == OkStatus::Unknown
+}
+impl<'de> Deserialize<'de> for OkStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s: &str = Deserialize::deserialize(deserializer)?;
+        OkStatus::from_str(s).map_err(de::Error::custom)
     }
 }
 impl TryFrom<String> for Locus {
@@ -515,28 +620,22 @@ impl Params {
     }
     pub(crate) fn goodparams(&self) -> io::Result<()> {
         match (self.mean, self.readavg, self.phredscore) {
-            (0, ..) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
-                ));
-            }
-            (_, b, _) if b < MIN_READLENGTH => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software"
-                    ),
-                ));
-            }
-            (.., c) if c < MIN_PHREDSCORE => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "The PHRED score does not exceed {MIN_READLENGTH}. For accurate results, please provide high-quality long-reads to the software"
-                    ),
-                ));
-            }
+            (0, ..) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Probably truncated BAM, you should give extracted length with the argument --extractedlength.",
+            )),
+            (_, b, _) if b < MIN_READLENGTH => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software"
+                ),
+            )),
+            (.., c) if c < MIN_PHREDSCORE => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "The PHRED score does not exceed {MIN_READLENGTH}. For accurate results, please provide high-quality long-reads to the software"
+                ),
+            )),
             _ => Ok(()),
         }
     }
@@ -1251,9 +1350,75 @@ impl Haplotype {
         self == &Haplotype::Primary
     }
 }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Genename {
+    pub(crate) name: String,
+    pub(crate) exon: Option<String>,
+}
+impl Genename {
+    ///Same as deserialize when it comes to exon, should be merged
+    pub(crate) fn new<T>(name: T, exon: Option<String>) -> io::Result<Self>
+    where
+        T: Into<String>,
+    {
+        let name = name.into();
+        if name
+            .chars()
+            .any(|f| !f.is_ascii() || f.is_ascii_whitespace())
+        {
+            return Err(io::Error::new(InvalidInput, "Invalid name for gene {name}"));
+        }
+        if let Some(a) = exon.as_ref()
+            && a.chars().any(|f| !f.is_ascii() || f.is_ascii_whitespace())
+        {
+            return Err(io::Error::new(
+                InvalidInput,
+                "Invalid name for gene {name} exon {a}",
+            ));
+        }
+        Ok(Self { name, exon })
+    }
+}
+impl<'de> Deserialize<'de> for Genename {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s: &str = Deserialize::deserialize(deserializer)?;
+        if s.chars().any(|f| !f.is_ascii() || f.is_ascii_whitespace()) {
+            return Err(serde::de::Error::custom("Invalid formatting"));
+        }
+        let (name, exon) = match s.trim().split_once('_') {
+            Some((a, b)) => (a.to_string(), Some(b.to_string())),
+            None => (s.trim().to_string(), None),
+        };
+        Ok(Self { name, exon })
+    }
+}
+impl Serialize for Genename {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+impl Display for Genename {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}{}",
+            self.name,
+            self.exon
+                .as_ref()
+                .map(|a| format!("_{}", a))
+                .unwrap_or_default()
+        )
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct GeneInfos {
-    pub(crate) gene: String,
+    pub(crate) gene: Genename,
     pub(crate) chromosome: String,
     pub(crate) strand: Strand,
     pub(crate) start: Position,
@@ -1263,7 +1428,7 @@ pub(crate) struct GeneInfos {
 }
 impl GeneInfos {
     pub(crate) fn new(
-        gene: String,
+        gene: Genename,
         chromosome: String,
         strand: Strand,
         start: Position,
@@ -1285,7 +1450,7 @@ impl GeneInfos {
         fasta.write(
             &format!(
                 "GENE|{}|{}|{}|{}..{}{}",
-                self.getgene(),
+                self.getgene().to_string(),
                 "species",
                 self.getchromosome(),
                 self.getstart().getobasedpos(),
@@ -1302,7 +1467,7 @@ impl GeneInfos {
     ) -> io::Result<String> {
         let (startpos, endpos) = match (
             self.getstart().getzbasedpos().try_into(),
-            self.getend().getobasedpos().try_into(),
+            self.getend().getobasedpos().try_into(), //Because stop is exclusive
         ) {
             (Ok(a), Ok(b)) => (a, b),
             _ => {
@@ -1313,17 +1478,42 @@ impl GeneInfos {
             }
         };
         fasta.fetch(self.getchromosome(), startpos, endpos)?;
-        let length = endpos.saturating_sub(startpos).saturating_add(1);
+        let length = self.getlength();
         let mut cap = Vec::with_capacity(length.try_into().unwrap_or(0));
         fasta.read(&mut cap)?;
+        let alphabet = bio::alphabets::dna::iupac_alphabet();
+        if !alphabet.is_word(&cap) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Sequence from {}:{}-{} is invalid (contains invalid nucleotide). Must contain {}.",
+                    self.getchromosome(),
+                    startpos,
+                    endpos,
+                    alphabet.symbols.iter().fold(String::new(), |mut acc, a| {
+                        if let Ok(a) = a.try_into()
+                            && let Some(b) = char::from_u32(a)
+                        {
+                            acc.push(b);
+                            acc
+                        } else {
+                            acc
+                        }
+                    })
+                ),
+            ));
+        }
         if self.strand.isrev() {
             cap = bio::alphabets::dna::revcomp(&cap);
         }
         String::from_utf8(cap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+    pub(crate) fn getlength(&self) -> i64 {
+        self.end.length(&self.start)
+    }
 }
 impl GenesList for GeneInfos {
-    fn getgene(&self) -> &str {
+    fn getgene(&self) -> &Genename {
         &self.gene
     }
 
@@ -1353,11 +1543,7 @@ impl GenesList for GeneInfos {
 }
 impl LocusInfos {
     pub(crate) fn setstatus(&mut self, mean: u64, pos: &BTreeMap<Position, HashMapinfo>) {
-        if locusisokay(mean, &pos.values().collect_vec()) {
-            self.status = OkStatus::Accepted
-        } else {
-            self.status = OkStatus::Rejected
-        }
+        self.status = locusisokay(mean, &pos.values().collect_vec())
     }
     pub(crate) fn locusinposition(
         &self,
@@ -1435,7 +1621,7 @@ impl LocusInfos {
         fasta: &mut fasta::IndexedReader<File>,
     ) -> io::Result<String> {
         let fake = GeneInfos {
-            gene: "FAKE".to_string(),
+            gene: Genename::new("FAKE", None)?,
             chromosome: self.contig.clone(),
             start: self.start,
             end: self.end,
@@ -1443,6 +1629,9 @@ impl LocusInfos {
             status: OkStatus::default(),
         };
         fake.extractsequence(fasta)
+    }
+    pub(crate) fn getlength(&self) -> i64 {
+        self.end.length(&self.start)
     }
 }
 impl PartialEq for GeneInfos {
@@ -1524,7 +1713,7 @@ impl Display for Strand {
     }
 }
 pub trait GenesList {
-    fn getgene(&self) -> &str;
+    fn getgene(&self) -> &Genename;
     fn getchromosome(&self) -> &str;
     fn getstrand(&self) -> &Strand;
     fn getstart(&self) -> &Position;
@@ -1533,20 +1722,48 @@ pub trait GenesList {
     fn getstatus(&self) -> &OkStatus;
     fn alterstatus(&mut self, status: OkStatus);
     fn setstatus(&mut self, reads100m: usize, hash: &BTreeMap<Position, Posread>) {
-        if hash
+        if let Some(a) = hash
             .iter()
-            .all(|(_, f)| f.isvalid() && f.softclips < SOFTCLIPRATIO)
-            && reads100m >= MATCHREADS
+            .find(|(_, f)| !f.isvalid() || f.softclips >= SOFTCLIPRATIO)
         {
-            self.alterstatus(OkStatus::Accepted);
+            let info = match a {
+                (f, a) if !a.isvalid() => OkStatus::new(
+                    AcceptedStatus::Rejected,
+                    Some(format!(
+                        "{} at position {} ({})",
+                        *SUSPICIOUSPOSITIONALERT,
+                        f.getobasedpos(),
+                        if a.iswarning() {
+                            "warning"
+                        } else {
+                            "suspicious"
+                        }
+                    )),
+                ),
+                (f, _) => OkStatus::new(
+                    AcceptedStatus::Rejected,
+                    Some(format!(
+                        "{} at position {}",
+                        *SOFTCLIPTOOMUCH,
+                        f.getobasedpos()
+                    )),
+                ),
+            };
+            self.alterstatus(info);
+        } else if reads100m >= MATCHREADS {
+            let m = OkStatus::new(
+                AcceptedStatus::Rejected,
+                Some(NOTENOUGHMATCHREADS.to_string()),
+            );
+            self.alterstatus(m);
         } else {
-            self.alterstatus(OkStatus::Rejected);
+            self.alterstatus(OkStatus::new(AcceptedStatus::Accepted, None));
         }
     }
 }
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct GeneInfosFinish {
-    pub(crate) gene: String,
+    pub(crate) gene: Genename,
     pub(crate) chromosome: String,
     pub(crate) strand: Strand,
     pub(crate) start: Position,
@@ -1562,7 +1779,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) status: OkStatus,
 }
 impl GenesList for GeneInfosFinish {
-    fn getgene(&self) -> &str {
+    fn getgene(&self) -> &Genename {
         &self.gene
     }
 
@@ -1813,11 +2030,6 @@ impl Ord for LocusInfos {
 impl PartialOrd for LocusInfos {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
-    }
-}
-impl LocusInfos {
-    pub(crate) fn getlength(&self) -> i64 {
-        self.end.length(&self.start)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

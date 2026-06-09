@@ -2,6 +2,9 @@
 #![warn(clippy::expect_used)]
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
+use chrono::TimeZone;
+use openssl_sys::X509_V_ERR_SUITE_B_CANNOT_SIGN_P_384_WITH_P_256;
+use regex::Regex;
 use tempfile::{NamedTempFile, TempPath};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
@@ -11,6 +14,7 @@ Made by: Guilhem Zeitoun
 */
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
+use crate::r#struct::AcceptedStatus::Rejected;
 ///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
 use itertools::Itertools;
@@ -23,14 +27,14 @@ use std::ops::RangeInclusive;
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use std::{env, fs, io};
 use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    REQUESTCLIENT, askforsubmission, checkifblastpresent, generatelightbam, genesblast,
-    getspeciesfromncbi, positionfiltering,
+    GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, REQUESTCLIENT, askforsubmission,
+    checkifblastpresent, generatelightbam, genesblast, getspeciesfromncbi, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -356,7 +360,7 @@ fn locusposparser(
             ));
         }
         if args.haploid {
-            records.retain(|p| p.haplotype.as_ref().map_or(false, |f| f.isprimary()));
+            records.retain(|p| p.haplotype.as_ref().is_some_and(|f| f.isprimary()));
         }
     }
     let mut locusrecord: (Vec<LocusInfos>, Option<Vec<Blastmatch>>) = (Vec::new(), None);
@@ -448,11 +452,13 @@ fn locusposparser(
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "The region {}-{} ({}) is more than {} bp and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
+                "The region {}-{} ({}) from {} is more than {} bp (actually: {}) and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
                 big.start.getobasedpos(),
                 big.end.getobasedpos(),
+                big.contig,
                 big.locus,
                 ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
+                big.getlength().to_formatted_string(&Locale::en),
                 &args
                     .locuspos
                     .as_ref()
@@ -497,19 +503,26 @@ where
 fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<TempPath>> {
     let mut finish: Vec<GeneInfos> = data
         .iter()
-        .map(|p| {
+        .filter_map(|p| {
             let strand = if p.send < p.sstart {
                 Strand::Minus
             } else {
                 Strand::Plus
             };
-            GeneInfos::new(
-                p.getquery().gene.clone(),
+            let gene = match Genename::new(&p.getquery().gene, p.getquery().label.clone()) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("Error with gene {}: {e}", p.getquery().gene);
+                    return None;
+                }
+            };
+            Some(GeneInfos::new(
+                gene,
                 p.getsubject().to_string(),
                 strand,
                 Position::new(false, p.sstart.try_into().unwrap_or_default()),
                 Position::new(false, p.send.try_into().unwrap_or_default()),
-            )
+            ))
         })
         .collect();
     checkandcorrectgenelistduplicate(&mut finish);
@@ -829,6 +842,9 @@ where
 }
 fn main() -> ExitCode {
     let mut args = Args::parse();
+    if checknewversion() {
+        return ExitCode::FAILURE;
+    }
     let firstinstant = Instant::now();
     let speciesblast = match Species::new(&args.species) {
         Ok(b) => b,
@@ -840,7 +856,7 @@ fn main() -> ExitCode {
     println!(
         "{} is {} (taxon: {}).",
         speciesblast.getrank(),
-        speciesblast.to_string(),
+        speciesblast.getname(),
         speciesblast
             .getid()
             .map_or("Unknown".to_string(), |f| f.to_string())
@@ -1372,7 +1388,8 @@ fn main() -> ExitCode {
                                 b.iter().map(|f| f.clone().into()).collect();
                             match genesblast(&geneinfo, &args, &speciesblast, &loci.locus) {
                                 Ok(blast) => {
-                                    if loci.status.isvalid() && b.iter().any(|f| f.status.isvalid())
+                                    if loci.status.getstatus().isvalid()
+                                        && b.iter().any(|f| f.status.getstatus().isvalid())
                                     {
                                         locushashresult.insert(loci.locus.clone(), blast);
                                     }
@@ -1433,10 +1450,15 @@ fn main() -> ExitCode {
                     data.retain(|a| {
                         result
                             .iter()
-                            .find(|c| c.gene == a.qseqid.gene)
-                            .is_some_and(|b| b.status.isvalid())
+                            .find(|c| {
+                                Genename::new(a.qseqid.gene.clone(), a.qseqid.label.clone())
+                                    .is_ok_and(|a| a == c.gene)
+                            })
+                            .is_some_and(|b| b.status.getstatus().isvalid())
                     });
-                    if loci.status.isvalid() && result.iter().any(|f| f.status.isvalid()) {
+                    if loci.status.getstatus().isvalid()
+                        && result.iter().any(|f| f.status.getstatus().isvalid())
+                    {
                         locushashresult.insert(loci.locus.clone(), data);
                     }
                 } else if !args.nosubmit {
@@ -1628,7 +1650,7 @@ fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
     let geneclone = genes.to_vec();
     let finish: Vec<&GeneInfos> = geneclone
         .iter()
-        .duplicates_by(|g| (g.gene.as_str(), g.chromosome.as_str()))
+        .duplicates_by(|g| (&g.gene, &g.chromosome))
         .collect();
     if !finish.is_empty() {
         println!(
@@ -1636,14 +1658,14 @@ fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
         );
         let mut count = 0;
         for name in genes.iter_mut() {
-            name.gene = if finish.iter().any(|g| g.gene.as_str() == name.gene.as_str()) {
+            name.gene.name = if finish.iter().any(|g| g.gene.eq(&name.gene)) {
                 count += 1;
-                format!("{}_{}", name.gene, count)
+                format!("{}_{}", name.gene.name, count)
                     .replace(",", "_")
                     .trim()
                     .to_string()
             } else {
-                name.gene.to_string().replace(",", "_").trim().to_string()
+                name.gene.name.replace(",", "_").trim().to_string()
             };
             name.chromosome = name.chromosome.replace(",", "_").trim().to_string()
         }
@@ -1800,7 +1822,7 @@ fn genelist(
             }
         }
         if empty {
-            let _ = writeln!(lock, "Empty records for gene {}", gene.gene);
+            let _ = writeln!(lock, "Empty records for gene {}", gene.gene.to_string());
             //PUT 0 value on the CSV
             let elem = GeneInfosFinish::make_default(gene);
             finale.push(elem);
@@ -1843,7 +1865,11 @@ fn genelist(
             println!("Creating the folder {}", plots.display());
             std::fs::create_dir_all(&plots)?;
         };
-        let mut output = plots.join(regexpword.replace_all(&gene.gene, "_").to_uppercase());
+        let mut output = plots.join(
+            regexpword
+                .replace_all(&gene.gene.to_string(), "_")
+                .to_uppercase(),
+        );
         gene.setstatus(reads100m, &hash);
         if !args.svg {
             output.set_extension("png");
@@ -2008,7 +2034,7 @@ fn printpossus(
     } else { */
     csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])?;
     for (gene, vec) in data {
-        csv.write_field(&gene.gene)?;
+        csv.write_field(&gene.gene.to_string())?;
         let infos = vec.iter().fold(String::new(), |mut acc, f| {
             acc.push_str(&format!("-{}({})", f.1, if f.0 { "!" } else { "~" }));
             acc
@@ -2041,7 +2067,7 @@ where
     let text_style = fontstyle.into_text_style(&root);
     let _ = root.fill(&plotters::prelude::WHITE);
     let max = hash.values().map(|p| p.gettotal()).max().unwrap_or(0) + 5;
-    let colorgene = if gene.status.isvalid() {
+    let colorgene = if gene.status.getstatus().isvalid() {
         full_palette::GREEN
     } else {
         full_palette::RED
@@ -2543,12 +2569,117 @@ where
     root.present().map_err(|_| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())
 }
-pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> bool {
+pub(crate) fn checknewversion() -> bool {
+    let r = match REQUESTCLIENT
+        .get(GITHUBVERSION.to_string())
+        .send()
+        .map(|a| a.json::<Vec<GitLabTag>>())
+    {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Error checking new version: {e}");
+            return false;
+        }
+    };
+    let r = if let Ok(r) = r {
+        r
+    } else {
+        return false;
+    };
+    if let Some(a) = r.first() {
+        let version = &a.name;
+        let regexp = if let Ok(a) = Regex::new(r"([0-9]+)\.([0-9]+)\.([0-9]+)") {
+            a
+        } else {
+            return false;
+        };
+        let cap = regexp.captures(version);
+        let cap2 = regexp.captures(VERSION);
+        let (major, minor, patch, major2, minor2, patch2) = match (cap, cap2) {
+            (Some(b), Some(c))
+                if let Some(maj) = b.get(1)
+                    && let Some(min) = b.get(2)
+                    && let Some(patch) = b.get(3)
+                    && let Some(maj2) = c.get(1)
+                    && let Some(min2) = c.get(2)
+                    && let Some(patch2) = c.get(3) =>
+            {
+                (
+                    maj.as_str(),
+                    min.as_str(),
+                    patch.as_str(),
+                    maj2.as_str(),
+                    min2.as_str(),
+                    patch2.as_str(),
+                )
+            }
+            _ => {
+                eprintln!("Invalid version");
+                return false;
+            }
+        };
+        let (major, minor, patch, major2, minor2, patch2) = match (
+            major.parse::<usize>(),
+            minor.parse::<usize>(),
+            patch.parse::<usize>(),
+            major2.parse::<usize>(),
+            minor2.parse::<usize>(),
+            patch2.parse::<usize>(),
+        ) {
+            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, e, f),
+            _ => {
+                eprintln!("Invalid version: {}", version);
+                return false;
+            }
+        };
+        let name = env!("CARGO_CRATE_NAME").replace("_", "/");
+        if major > major2 || (major == major2 && minor > minor2) {
+            eprintln!("Another version of {name} is available. Please update.");
+            true
+        } else if major == major2 && minor == minor2 && patch > patch2 {
+            eprintln!("A patch version of {name} is available. Please update.");
+            false
+        } else if major2 > major || (major == major2 && minor2 > minor) {
+            let now = chrono::Local::now();
+            let limit = chrono::DateTime::parse_from_str(LIMITDATE.as_str(), "%+");
+            if let Ok(date) = limit
+                && date.timestamp() < now.timestamp()
+            {
+                eprintln!(
+                    "You have a test version of {name}. Please use the public version or contact {AUTHOR} to reactive the test version."
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
     //Between a minimum and a maximum number of reads
-    graph.iter().all(|f| {
-        f.overlaps >= MINIMUMCOVERAGE.try_into().unwrap_or(i64::MAX)
-            && f.overlaps < ((mean as f32 * MAXCOVERAGERATIO).round() as i64)
-    })
+    if let Some(a) = graph
+        .iter()
+        .find(|f| coveragewindow(mean).contains(&f.overlaps))
+    {
+        OkStatus::new(
+            Rejected,
+            Some(format!(
+                "{} at position {}",
+                INVALIDCOVERAGE.to_string(),
+                a.position.getobasedpos()
+            )),
+        )
+    } else {
+        OkStatus::new(AcceptedStatus::Accepted, None)
+    }
+}
+pub(crate) fn coveragewindow(mean: u64) -> RangeInclusive<i64> {
+    (mean as f32 / MAXCOVERAGERATIO).round() as i64
+        ..=((mean as f32 * MAXCOVERAGERATIO).round() as i64)
 }
 fn readgraph<T>(
     outputfile: &std::path::Path,
@@ -2570,7 +2701,7 @@ where
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let tenlines = loci.getlength() / 9;
-    let colorgene = if loci.status.isvalid() {
+    let colorgene = if loci.status.getstatus().isvalid() {
         full_palette::GREEN
     } else {
         full_palette::RED
@@ -2630,6 +2761,7 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Mean coverage")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::BROWN));
+    let coveragewindows = coveragewindow(mean);
     chart
         .draw_series(
             AreaSeries::new(
@@ -2638,15 +2770,12 @@ where
                         .rem_euclid(std::cmp::max(tenlines, 1))
                         == 0
                     {
-                        Some((
-                            p.position.getobasedpos(),
-                            (mean as f32 * MAXCOVERAGERATIO).round() as i64,
-                        ))
+                        Some((p.position.getobasedpos(), *coveragewindows.end()))
                     } else {
                         None
                     }
                 }),
-                MINIMUMCOVERAGE.try_into().unwrap_or(i64::MAX),
+                *coveragewindows.start(),
                 full_palette::GREY_A700.mix(0.4).filled(),
             )
             .border_style(full_palette::BLACK.mix(0.8)),

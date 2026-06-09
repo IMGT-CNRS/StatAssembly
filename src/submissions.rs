@@ -2,16 +2,18 @@
 #![deny(clippy::expect_used)]
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastlevel, Blastmatch, GeneInfos, Haplotype, Locus, LocusInfos, Name,
-    Newfasta, Position, Seqresult, Species, Strand,
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Haplotype, Locus,
+    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand,
 };
-use crate::{PHYLUMLIMIT, getassemblyreader, getreaderoffile};
+use crate::{PHYLUMLIMIT, coveragewindow, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
+use indicatif::ProgressBar;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use quick_xml::events::Event;
+use reqwest::blocking::multipart;
 use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
@@ -33,7 +35,7 @@ use tempfile::{NamedTempFile, TempDir};
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(15, 0))
-        .timeout(Duration::new(300, 0))
+        .timeout(Duration::new(600, 0))
         .tcp_user_timeout(Duration::new(400, 0))
         .user_agent(format!("IMGT/StatAssembly version {}", VERSION))
         .referer(false)
@@ -49,11 +51,16 @@ lazy_static! {
         WEBSERVER.as_str(),
         obfstr::obfstr!("/download/GENE-DB/RELEASE")
     );
+    pub static ref LIMITDATE: String = obfstr::obfstring!("2026-06-30T23:59:59Z");
     pub static ref MOTIFLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
         obfstr::obfstring!("/submissions/newmotif_fusionne.fasta.gz")
     );
+    pub static ref INVALIDCOVERAGE: String = obfstr::obfstring!("Coverage is out of the window");
+    pub static ref NOTENOUGHMATCHREADS: String = obfstr::obfstring!("Not enough matching reads");
+    pub static ref SOFTCLIPTOOMUCH: String = obfstr::obfstring!("Too much softclips");
+    pub static ref SUSPICIOUSPOSITIONALERT: String = obfstr::obfstring!("A warning or suspicious position");
     /* pub static ref MOTIFLINK: String =
         obfstr::obfstring!("http://localhost:8910/submissions/newmotif_fusionne.fasta.gz");
     pub static ref BORNESLINK: String =
@@ -70,6 +77,8 @@ lazy_static! {
             "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
         )
     );
+    pub static ref GITHUBVERSION: String = obfstr::obfstring!(
+        "https://src.koda.cnrs.fr/api/v4/projects/imgt-igh%2Fstatassembly/repository/tags");
     pub static ref SUBMISSIONLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
@@ -80,24 +89,33 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const DELIMITERFASTA: char = '/';
 pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 
-pub(crate) fn readfromterminal(yes: &char, no: &char, force: bool) -> bool {
+pub(crate) fn readfromterminal(
+    yes: &char,
+    no: &char,
+    nothing: Option<&char>,
+    force: bool,
+) -> Option<bool> {
     let io = io::stdin();
     if !io.is_terminal() {
-        return false;
+        return Some(false);
     }
     let mut data = String::new();
     loop {
         data.clear();
         if io.read_line(&mut data).is_err() {
-            return false;
+            return Some(false);
         }
         if data.trim().is_empty() && !force {
-            return false;
+            return Some(false);
         }
         if data.to_lowercase().trim().chars().all(|p| &p == yes) {
-            return true;
+            return Some(true);
+        } else if let Some(c) = nothing
+            && data.to_lowercase().trim().chars().all(|p| &p == c)
+        {
+            return None;
         } else if data.to_lowercase().trim().chars().all(|p| &p == no) || !force {
-            return false;
+            return Some(false);
         }
     }
 }
@@ -169,8 +187,8 @@ pub(crate) fn fastafilter(text: &str, find: &str, present: bool, species: bool) 
             Ok(result) => match (present, species) {
                 (true, true) => result.species.eq_ignore_ascii_case(find),
                 (false, true) => !result.species.eq_ignore_ascii_case(find),
-                (false, false) => !result.gene.eq_ignore_ascii_case(find),
-                (true, false) => result.gene.eq_ignore_ascii_case(find),
+                (false, false) => !result.gene.contains(find),
+                (true, false) => result.gene.contains(find),
             },
             Err(_e) => {
                 //eprintln!("Error parsing line: {}. Error is {e}", val);
@@ -273,9 +291,9 @@ pub(crate) fn speciesandorphonfiltering(
     species: &Species,
     orphonfilter: bool,
     force: bool,
-) -> io::Result<PathBuf> {
+) -> io::Result<Filecrea> {
     let outfile = if force {
-        NamedTempFile::with_prefix_in(
+        Filecrea::Temp(NamedTempFile::with_prefix_in(
             format!(
                 "refseq{}-{}{}.fasta",
                 releaseversion.replace(" ", "_"),
@@ -283,11 +301,9 @@ pub(crate) fn speciesandorphonfiltering(
                 locus.map_or("".to_string(), |l| format!("-{}", l))
             ),
             env::temp_dir(),
-        )?
-        .into_temp_path()
-        .to_path_buf()
+        )?)
     } else {
-        Path::join(
+        Filecrea::Plain(Path::join(
             &env::temp_dir(),
             format!(
                 "refseq{}-{}{}.fasta",
@@ -295,9 +311,9 @@ pub(crate) fn speciesandorphonfiltering(
                 species.getname().replace(" ", "-"),
                 locus.map_or("".to_string(), |l| format!("-{}", l))
             ),
-        )
+        ))
     };
-    if outfile.try_exists().unwrap_or(false) && !force {
+    if outfile.getpath().try_exists().unwrap_or(false) && !force {
         println!("Filtering already done, retrieving...");
         return Ok(outfile);
     }
@@ -308,61 +324,67 @@ pub(crate) fn speciesandorphonfiltering(
     );
     let file = std::fs::read_to_string(tempfile)?;
     let info = fastafilter(&file, species.getname(), true, true).replace(" ", "_");
-    let info = if orphonfilter {
+    let (info, file) = if orphonfilter {
         println!("Orphon filtering");
-        fastafilter(&info, "/OR", false, false)
+        (
+            fastafilter(&info, "/OR", false, false),
+            fastafilter(&file, "/OR", false, false),
+        )
     } else {
-        info
+        (info, file)
     };
-    let tempnew = NamedTempFile::new_in(temp_dir())?;
-    fs::write(&tempnew, &info)?;
-    let read = fasta::Reader::from_file(&tempnew)
-        .map_err(|f| io::Error::new(ErrorKind::InvalidInput, f))?;
-    let allmatch = if let Some(l) = locus {
-        read.records()
-            .filter_map(Result::ok)
-            .any(|p| checklocus(&p, l))
-    } else {
-        let mut count = Locus::iter().map(|p| (p, 0)).collect_vec();
-        read.records().filter_map(Result::ok).for_each(|p| {
-            for (locus, count) in count.iter_mut() {
-                if checklocus(&p, locus) {
-                    *count += 1;
-                    break;
+    let finale = {
+        //Check if there is match for all loci or the loci
+        let tempnew = io::Cursor::new(&info);
+        let buf = BufReader::new(tempnew);
+        let read = fasta::Reader::from_bufread(buf);
+        let allmatch = if let Some(l) = locus {
+            read.records()
+                .filter_map(Result::ok)
+                .any(|p| checklocus(&p, l))
+        } else {
+            let mut count = Locus::iter().map(|p| (p, 0)).collect_vec();
+            read.records().filter_map(Result::ok).for_each(|p| {
+                for (locus, count) in count.iter_mut() {
+                    if checklocus(&p, locus) {
+                        *count += 1;
+                        break;
+                    }
                 }
-            }
-        });
-        count.iter().all(|(_, f)| *f > 0)
-    };
-    let finale = match (info.is_empty(), allmatch) {
-        (true, _) => {
-            println!(
-                "No match with IMGT/GENE-DB, the {} {} might be new.",
-                species.getrank(),
-                species.getname()
-            );
-            file
-        }
-        (false, false) => {
-            if let Some(a) = locus {
+            });
+            count.iter().all(|(_, f)| *f > 0)
+        };
+        match (info.is_empty(), allmatch) {
+            (true, _) => {
                 println!(
-                    "No match with IMGT/GENE-DB for {} and {} loci.",
-                    species.getname(),
-                    a
-                );
-            } else {
-                println!(
-                    "No match with IMGT/GENE-DB with {} and some loci.",
+                    "No match with IMGT/GENE-DB, the {} {} might be new.",
+                    species.getrank(),
                     species.getname()
                 );
+                file
             }
-            file
+            (false, false) => {
+                if let Some(a) = locus {
+                    println!(
+                        "No match with IMGT/GENE-DB for {} and {} loci.",
+                        species.getname(),
+                        a
+                    );
+                } else {
+                    println!(
+                        "No match with IMGT/GENE-DB with {} and some loci.",
+                        species.getname()
+                    );
+                }
+                file
+            }
+            _ => info,
         }
-        _ => info,
     };
     let info = if let Some(l) = locus {
-        let read = fasta::Reader::from_file(&tempnew)
-            .map_err(|f| io::Error::new(ErrorKind::InvalidInput, f))?;
+        let tempnew = io::Cursor::new(&finale);
+        let buf = BufReader::new(tempnew);
+        let read = fasta::Reader::from_bufread(buf);
         let records = read
             .records()
             .filter_map(Result::ok)
@@ -412,8 +434,8 @@ pub(crate) fn speciesandorphonfiltering(
     } else {
         newdata
     }; */
-    if tempfile != outfile {
-        std::fs::write(&outfile, &info)?;
+    if tempfile != outfile.getpath() {
+        std::fs::write(&outfile.getpath(), &info)?;
     }
     Ok(outfile)
 }
@@ -542,7 +564,7 @@ pub(crate) fn matchmotif(
         }
     };
     let mut blast: Vec<Blast> =
-        match blastcommand(reference.as_path(), subject, Blastlevel::default()) {
+        match blastcommand(reference.getpath(), subject, Blastlevel::default()) {
             Ok(b) => b,
             Err(e) => {
                 return Err(io::Error::new(ErrorKind::InvalidData, e));
@@ -607,7 +629,7 @@ pub(crate) fn genesblast(
         }
     };
     let mut blast = match blastcommand(
-        reference.as_path(),
+        reference.getpath(),
         &name.into_temp_path(),
         Blastlevel::default(),
     ) {
@@ -685,8 +707,8 @@ where
             "Subject file was not found",
         ));
     }
-    let reference = &format!("{}", reference.display()).replace(" ", "_");
-    let subject = &format!("{}", subject.display()).replace(" ", "_");
+    let reference = &format!("{}", reference.display());
+    let subject = &format!("{}", subject.display());
     let output = NamedTempFile::new()?;
     let output = &format!("{}", output.path().display());
     let command = Command::new("blastn")
@@ -745,7 +767,7 @@ where
                     }
                     result.push(r);
                 } else if let Err(r) = record {
-                    eprintln!("Error in {r}");
+                    eprintln!("Error parsing line. Error is: {r}.");
                     return Err(io::Error::new(ErrorKind::InvalidData, "error"));
                 }
             }
@@ -1009,7 +1031,7 @@ pub(crate) fn submit(
     realspecies: &Species,
 ) -> Result<(), String> {
     //let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
-    let dir = Path::new(&args.outdir);
+    let dir = env::temp_dir();
     /* if dir.is_dir() {
         eprintln!("Archive directory exists, going to be deleted.");
         if let Err(e) = fs::remove_dir_all(&dir) {
@@ -1045,37 +1067,7 @@ pub(crate) fn submit(
         .map_err(|p| format!("Error serializing locus position: {p}"))?; */
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
-    let sequencefile = dir.join("sequence.fasta");
-    let mut fastawriter = fasta::Writer::to_file(&sequencefile).map_err(|f| format!("{f}"))?;
-    for list in locus.iter() {
-        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
-            None => return Err("No assembly provided.".to_string()),
-            Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
-            Some(Ok(b)) => b,
-        };
-        let seq = list
-            .extractsequence(&mut assembly)
-            .unwrap_or("Sequence is unavailable".to_string());
-        fastawriter
-            .write(
-                &format!("{}:{}", list.locus, list.contig),
-                Some(&format!(
-                    "{}:{}-{}/{}/{}",
-                    list.locus,
-                    list.start.getobasedpos(),
-                    list.end.getobasedpos(),
-                    list.complement,
-                    list.haplotype
-                )),
-                seq.as_bytes(),
-            )
-            .map_err(|f| {
-                format!(
-                    "Unable to write fasta sequence {}. Error is {f}",
-                    list.locus
-                )
-            })?;
-    }
+    let sequencefile = generatesequence(args, dir, locus)?;
     let mut motifs = matchmotif(&sequencefile, &realspecies, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
@@ -1157,16 +1149,22 @@ pub(crate) fn submit(
         eprintln!("An error has occured while priting sequence: {e}.");
         return Ok(());
     }
+    if sequence.trim().is_empty() && args.mytoken.is_none() && !asknonewalleles() {
+        println!("Exiting");
+        return Ok(());
+    }
+    let link = Path::join(&args.outdir, "submission");
+    #[cfg(target_family = "unix")]
+    let _ = std::os::unix::fs::symlink(dirtemp.path(), &link);
+    #[cfg(target_family = "windows")]
+    let _ = std::os::windows::fs::symlink_dir(dirtemp.path(), &link);
     if !args.nosubmit {
-        if sequence.trim().is_empty() && args.mytoken.is_none() && !asknonewalleles() {
-            println!("Exiting");
-            return Ok(());
-        }
         if args.mytoken.is_none() {
             browseropening().map_err(|f| f.to_string())?;
         }
         preparesubmission(dir, realspecies, args);
     }
+    let _ = fs::remove_file(link);
     //let _ = fs::remove_dir_all(dir);
     Ok(())
     //form(&client);
@@ -1175,7 +1173,7 @@ pub fn asknonewalleles() -> bool {
     println!(
         "No new alleles has been found. IMGT can still process your data, do you want to continue (Y/n):"
     );
-    readfromterminal(&'y', &'n', false)
+    readfromterminal(&'y', &'n', None, false).is_some_and(|a| a)
 }
 pub(crate) fn askforsubmission(
     realspecies: &Species,
@@ -1222,7 +1220,7 @@ pub(crate) fn askforsubmission(
             }
         } else if args.mytoken.is_none() {
             println!("Do you want to submit your sequences to IMGT (y to yes or n to no)?");
-            if !readfromterminal(&'y', &'n', false) {
+            if !readfromterminal(&'y', &'n', None, false).is_some_and(|a| a) {
                 println!("Your sequences won't be submitted.");
                 return Ok(());
             }
@@ -1235,6 +1233,44 @@ pub(crate) fn askforsubmission(
             .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
     }
     Ok(())
+}
+pub(crate) fn generatesequence(
+    args: &Args,
+    dir: &Path,
+    locus: &[LocusInfos],
+) -> Result<PathBuf, String> {
+    let sequencefile = dir.join("sequence.fasta");
+    let mut fastawriter = fasta::Writer::to_file(&sequencefile).map_err(|f| format!("{f}"))?;
+    for list in locus.iter() {
+        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
+            None => return Err("No assembly provided.".to_string()),
+            Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
+            Some(Ok(b)) => b,
+        };
+        let seq = list
+            .extractsequence(&mut assembly)
+            .unwrap_or("Sequence is unavailable".to_string());
+        fastawriter
+            .write(
+                &format!("{}:{}", list.locus, list.contig),
+                Some(&format!(
+                    "{}:{}-{}/{}/{}",
+                    list.locus,
+                    list.start.getobasedpos(),
+                    list.end.getobasedpos(),
+                    list.complement,
+                    list.haplotype
+                )),
+                seq.as_bytes(),
+            )
+            .map_err(|f| {
+                format!(
+                    "Unable to write fasta sequence {}. Error is {f}",
+                    list.locus
+                )
+            })?;
+    }
+    Ok(sequencefile)
 }
 pub(crate) fn generatelightbam(
     args: &Args,
@@ -1286,21 +1322,21 @@ pub(crate) fn browseropening() -> io::Result<()> {
     println!(
         "Opening web browser to continue submission. Type (Y) to open the web browser, (e) to exit or (n) and go by yourself to {link}."
     );
-    if readfromterminal(&'y', &'e', false) {
-        let _ = webbrowser::open(link);
-    } else {
-        return Err(io::Error::new(
+    match readfromterminal(&'y', &'e', Some(&'n'), false) {
+        Some(true) => webbrowser::open(link),
+        None => Ok(()),
+        Some(false) => Err(io::Error::new(
             ErrorKind::ConnectionAborted,
             "Your sequences won't be submitted",
-        ));
+        )),
     }
-    Ok(())
 }
 pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<NamedTempFile> {
     let temp = tempfile::NamedTempFile::with_suffix_in("submission.tar.gz", dir)?;
     let file = File::create(&temp)?;
     let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);
+    tar.follow_symlinks(false);
     tar.append_dir_all(".", &args.outdir)?;
     tar.finish()?;
     Ok(temp)
@@ -1339,6 +1375,7 @@ pub(crate) fn preparesubmission(path: &Path, species: &Species, args: &Args) -> 
             return false;
         }
     };
+    println!("Submission in progress");
     if let Err(e) = submission(&token, species, archive) {
         eprintln!("An error has occured during submission: {e}. Please retry later.");
         return false;
@@ -1355,8 +1392,22 @@ pub(crate) fn submission(token: &str, species: &Species, archive: NamedTempFile)
     .file("locuspos", "submission/locus.txt")?
     .text("type","submission")
     .file("locus", "submission/locus.bam")?; */
+    let file_size = archive.path().metadata()?.len();
+    let pb = ProgressBar::new(file_size);
+    pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .map_err(|b| io::Error::new(ErrorKind::InvalidData,format!("issue with progress bar: {b}")))?
+            .progress_chars("#>-"),
+    );
+
+    let progress_reader = ProgressReader {
+        reader: archive,
+        progress_bar: pb,
+        total_bytes: file_size,
+    };
     let zip = reqwest::blocking::multipart::Form::new()
-        .file("archive", archive.path())?
+        .part("file", multipart::Part::reader(progress_reader))
         .text("version", VERSION)
         .text("type", "submission")
         .text("species", species.to_string())
@@ -1401,6 +1452,6 @@ pub(crate) fn submission(token: &str, species: &Species, archive: NamedTempFile)
             format!("An unexpected error has occured. Please retry later. Error is {e}"),
         )),
     }?;
-    std::fs::remove_file(archive)?;
+    //std::fs::remove_file(archive)?;
     Ok(())
 }

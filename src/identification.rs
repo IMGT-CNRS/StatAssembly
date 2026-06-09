@@ -4,7 +4,7 @@ use minimap2::Aligner;
 use reqwest::StatusCode;
 
 use crate::{
-    BORNES, printpotentialbornes,
+    BORNES, getassemblyreader, printpotentialbornes,
     r#struct::{
         Args, Blast, Blastcalc, Blastlevel, Blastmatch, Haplotype, Locus, LocusInfos, Name,
         Position, Species, Status, Strand,
@@ -64,11 +64,7 @@ pub(crate) fn locusallposition(
     println!("Blasting to get position of loci."); */
     let (blast, bornes) = thread::scope(|s| {
         let blast = s.spawn(|| {
-            let b = match blastcommand(
-                referencepath.clone(),
-                subject.to_path_buf(),
-                Blastlevel::Normal,
-            ) {
+            let b = match blastcommand(referencepath.getpath(), subject, Blastlevel::Normal) {
                 Ok(b) => b,
                 Err(e) => {
                     return Err(io::Error::new(ErrorKind::InvalidData, e));
@@ -76,8 +72,8 @@ pub(crate) fn locusallposition(
             };
             Ok(b.into_iter().collect())
         });
-        let bornes = if let Some(b) = bornespath {
-            Some(s.spawn(|| {
+        let bornes = bornespath.map(|b| {
+            s.spawn(|| {
                 let aligner = Aligner::builder()
                     .asm20()
                     .with_cigar()
@@ -125,7 +121,7 @@ pub(crate) fn locusallposition(
                                 Strand::Plus
                             },
                             Status::New,
-                            (&first)
+                            first
                                 .alignment
                                 .as_ref()
                                 .map(|p| p.alignment_score.map(|d| d as f32)),
@@ -149,11 +145,9 @@ pub(crate) fn locusallposition(
                 } else {
                     Some(aligns)
                 }
-            }))
-        } else {
-            None
-        };
-        println!("Waiting for blast and bornes to finish.");
+            })
+        });
+        println!("Waiting for blast and bornes to finish. It can take several minutes.");
         (blast.join(), bornes.map(|d| d.join()))
     });
     let (mut blast, mut bornes) = match (blast, bornes) {
@@ -192,12 +186,12 @@ pub(crate) fn locusallposition(
             ));
         }
     };
-    bornes.as_mut().map(|p| {
-        p.sort_unstable_by(|f, g| match f.getallelename().cmp(&g.getallelename()) {
+    if let Some(p) = bornes.as_mut() {
+        p.sort_unstable_by(|f, g| match f.getallelename().cmp(g.getallelename()) {
             Ordering::Equal => f.getidentity().total_cmp(&g.getidentity()).reverse(),
             e => e,
         });
-    });
+    }
     //Filter by locus
     retainbestmatch(&mut blast);
     blast.shrink_to_fit();
@@ -228,32 +222,52 @@ pub(crate) fn locusallposition(
     data.sort_unstable();
     data.dedup();
     data.shrink_to_fit();
-    let writer = csv::WriterBuilder::new()
-        .delimiter(b',')
-        .comment(Some(b'#'))
-        .has_headers(true)
-        .from_path(Path::join(&env::temp_dir(), "test2.txt"));
+    /* let writer = csv::WriterBuilder::new()
+    .delimiter(b',')
+    .comment(Some(b'#'))
+    .has_headers(true)
+    .from_path(Path::join(&env::temp_dir(), "test2.txt"));
     if let Ok(mut r) = writer {
         for elem in data.iter() {
             let _ = r.serialize(elem);
         }
-    }
+    }  */
     let range = find_global_best_range(&data, &bornes).ok_or(io::Error::new(
         ErrorKind::InvalidInput,
         "No locus found after BLAST analysis",
     ));
+    let infos = getassemblyreader(args)?;
+    //Set to maximum length of assembly if the locus is at the end of the sequence
+    let range = match range {
+        Ok(mut b) => {
+            b.iter_mut().for_each(|a| {
+                let max = infos
+                    .index
+                    .sequences()
+                    .iter()
+                    .find(|c| c.name == a.contig)
+                    .map(|b| b.len);
+                if let Some(max) = max
+                    && let Ok(maxi) = max.try_into()
+                    && a.end.getzbasedpos() > maxi
+                {
+                    a.end = Position::new(true, maxi);
+                }
+            });
+            Ok(b)
+        }
+        Err(a) => Err(a),
+    };
     if let Some(bornes2) = &mut bornes
         && let Ok(d) = &range
     {
         bornes2.retain(|p| d.iter().any(|k| k.contig == p.getsubject()));
-        bornes2.dedup_by(|a, b| {
-            if a.getallelename().eq_ignore_ascii_case(&b.getallelename()) {
-                true
-            } else {
-                false
-            }
-        });
-        printpotentialbornes(bornes2, &args)?;
+        bornes2.dedup_by(|a, b| a.getallelename().eq_ignore_ascii_case(b.getallelename()));
+        if bornes2.is_empty() {
+            eprintln!("No bornes were identified.");
+        } else {
+            printpotentialbornes(bornes2, args)?;
+        }
     }
     range.map(|f| (f, data))
 }
@@ -323,7 +337,7 @@ pub(crate) fn find_global_best_range(
         .filter_map(|p| p.getlocusname().map(|d| (d, p)))
         .into_group_map_by(|(l, f)| (l.clone(), f.getsubject()));
     hash.iter_mut().for_each(|(_, v)| {
-        v.sort_unstable_by(|(_, a), (_, b)| match a.getsubject().cmp(&b.getsubject()) {
+        v.sort_unstable_by(|(_, a), (_, b)| match a.getsubject().cmp(b.getsubject()) {
             Ordering::Equal => match a.getpos().0.cmp(&b.getpos().0) {
                 Ordering::Equal => b.getpos().1.cmp(&b.getpos().1).reverse(),
                 ord => ord,
@@ -367,7 +381,7 @@ pub(crate) fn find_global_best_range(
                     if std::cmp::max(b.sstart, b.send).abs_diff(std::cmp::min(a.send, a.sstart))
                         <= BORNES
                     {
-                        values.insert(borneblast.clone().into());
+                        values.insert(borneblast.clone());
                         break 'borne;
                     }
                 }
@@ -440,6 +454,7 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
                 Err(format!("Error getting URL. Code is {}", e.status()))
             }
         }
+        Err(e) if e.is_timeout() => Err(format!("Error getting URL (timeout): {e}").to_string()),
         Err(e) => Err(format!("Error getting URL: {e}").to_string()),
     }
 }
@@ -455,10 +470,10 @@ pub(crate) fn sendresultcompressed(
                     && let mut decode = flate2::read::GzDecoder::new(&bytes[..])
                     && let Err(e) = decode.read_to_string(&mut string)
                 {
-                    return Err(format!("Cannot decrypt motifs: {e}"));
+                    return Err(format!("Cannot decrypt data: {e}"));
                 }
                 if string.trim().is_empty() {
-                    return Err(format!("Cannot decrypt motifs, invalid body."));
+                    return Err("Cannot decrypt motifs, empty data.".to_string());
                 }
                 string.shrink_to_fit();
                 Ok(string)
@@ -466,6 +481,7 @@ pub(crate) fn sendresultcompressed(
                 Err(format!("Error getting URL. Code is {}", e.status()))
             }
         }
+        Err(e) if e.is_timeout() => Err(format!("Error getting URL (timeout): {e}").to_string()),
         Err(e) => Err(format!("Error getting URL: {e}").to_string()),
     }
 }
