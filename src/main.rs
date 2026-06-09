@@ -2,8 +2,6 @@
 #![warn(clippy::expect_used)]
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
-use chrono::TimeZone;
-use openssl_sys::X509_V_ERR_SUITE_B_CANNOT_SIGN_P_384_WITH_P_256;
 use regex::Regex;
 use tempfile::{NamedTempFile, TempPath};
 /*
@@ -27,14 +25,14 @@ use std::ops::RangeInclusive;
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 use std::{env, fs, io};
 use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
     GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, REQUESTCLIENT, askforsubmission,
-    checkifblastpresent, generatelightbam, genesblast, getspeciesfromncbi, positionfiltering,
+    checkifblastpresent, generatelightbam, genesblast, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
@@ -481,7 +479,7 @@ where
 {
     let func = || {
         eprintln!("You have not provided a gene list, BLASTING to get one.");
-        locusallposition(assembly.as_ref(), &speciesblast, &args).map(|(_, b)| b)
+        locusallposition(assembly.as_ref(), speciesblast, args).map(|(_, b)| b)
     };
     let mut data = match locushashresult {
         None => func()?,
@@ -787,7 +785,7 @@ fn getorsetparams(meanpath: &Path, args: &Args) -> io::Result<Params> {
         }
         _ => {
             println!("Getting mean coverage from calculations, it might take some minutes.");
-            let params = getmeancoveragelengthandphred(&args)?;
+            let params = getmeancoveragelengthandphred(args)?;
             println!(
                 "Mean coverage is {} and average length of reads is {}. PHRED score is {}",
                 params.getmean(),
@@ -931,7 +929,7 @@ fn main() -> ExitCode {
         } else {
             HashMap::new()
         }; */
-        if blastcheck.as_ref().map_or(true, |a| a.is_empty()) {
+        if blastcheck.as_ref().is_none_or(|a| a.is_empty()) {
             eprintln!("Error setting gene list result. Empty list.");
             return ExitCode::FAILURE;
         }
@@ -1361,9 +1359,9 @@ fn main() -> ExitCode {
                     && !args
                         .geneloc
                         .as_ref()
-                        .map_or(false, |f| f.try_exists().unwrap_or(false))
+                        .is_some_and(|f| f.try_exists().unwrap_or(false))
                 {
-                    match printgenelist(&a, &mut args, true) {
+                    match printgenelist(a, &mut args, true) {
                         Ok(a) => a,
                         Err(e) => {
                             eprintln!("Cannot create gene list. Error is {e}");
@@ -1411,9 +1409,9 @@ fn main() -> ExitCode {
                     let mut data = match generategenelist(
                         &blastcheck,
                         &speciesblast,
-                        &initiallocus,
+                        initiallocus,
                         b,
-                        &mut args,
+                        &args,
                     ) {
                         Ok(Some(a)) => a,
                         Ok(None) => continue,
@@ -1533,7 +1531,7 @@ where
         .quote_style(csv::QuoteStyle::Never)
         .from_writer(writer);
     for borne in bornes {
-        csv.write_record(&[
+        csv.write_record([
             borne.getallelename(),
             borne.getsubject(),
             &format!("{}", borne.getpos().0),
@@ -1822,7 +1820,7 @@ fn genelist(
             }
         }
         if empty {
-            let _ = writeln!(lock, "Empty records for gene {}", gene.gene.to_string());
+            let _ = writeln!(lock, "Empty records for gene {}", gene.gene);
             //PUT 0 value on the CSV
             let elem = GeneInfosFinish::make_default(gene);
             finale.push(elem);
@@ -1957,7 +1955,7 @@ fn printbreaks(
         }
     };
     let mut breakfile = File::create(outputdir.join(givename(
-        &species,
+        species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -2010,14 +2008,14 @@ fn printbreaks(
     Ok(())
 }
 fn printpossus(
-    args: &Args,
+    _args: &Args,
     species: &Species,
     loci: &LocusInfos,
     outputdir: &std::path::Path,
     data: &BTreeMap<GeneInfos, Vec<(bool, usize)>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
-        &species,
+        species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -2034,7 +2032,7 @@ fn printpossus(
     } else { */
     csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])?;
     for (gene, vec) in data {
-        csv.write_field(&gene.gene.to_string())?;
+        csv.write_field(gene.gene.to_string())?;
         let infos = vec.iter().fold(String::new(), |mut acc, f| {
             acc.push_str(&format!("-{}({})", f.1, if f.0 { "!" } else { "~" }));
             acc
@@ -2322,10 +2320,10 @@ fn createcsv(
     species: &Species,
     loci: &LocusInfos,
     pos: &[&HashMapinfo],
-    args: &Args,
+    _args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
-        &species,
+        species,
         &loci.locus,
         &loci.contig,
         loci.haplotype.isprimary(),
@@ -2669,7 +2667,7 @@ pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
             Rejected,
             Some(format!(
                 "{} at position {}",
-                INVALIDCOVERAGE.to_string(),
+                *INVALIDCOVERAGE,
                 a.position.getobasedpos()
             )),
         )
@@ -2678,8 +2676,10 @@ pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
     }
 }
 pub(crate) fn coveragewindow(mean: u64) -> RangeInclusive<i64> {
-    (mean as f32 / MAXCOVERAGERATIO).round() as i64
-        ..=((mean as f32 * MAXCOVERAGERATIO).round() as i64)
+    max(
+        MINIMUMCOVERAGE.try_into().unwrap_or_default(),
+        (mean as f32 / MAXCOVERAGERATIO).round() as i64,
+    )..=((mean as f32 * MAXCOVERAGERATIO).round() as i64)
 }
 fn readgraph<T>(
     outputfile: &std::path::Path,

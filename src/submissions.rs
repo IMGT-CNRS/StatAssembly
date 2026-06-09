@@ -2,10 +2,10 @@
 #![deny(clippy::expect_used)]
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Haplotype, Locus,
-    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand,
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusInfos, Name,
+    Newfasta, Position, ProgressReader, Seqresult, Species, Strand,
 };
-use crate::{PHYLUMLIMIT, coveragewindow, getassemblyreader, getreaderoffile};
+use crate::{PHYLUMLIMIT, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
@@ -21,7 +21,7 @@ use std::fmt::Debug;
 use std::io::IsTerminal;
 use std::str::FromStr;
 use std::{
-    env::{self, temp_dir},
+    env::{self},
     error::Error,
     fs::{self, File},
     io::{self, BufRead, BufReader, ErrorKind, Read as _},
@@ -120,6 +120,7 @@ pub(crate) fn readfromterminal(
     }
 }
 #[deprecated]
+#[allow(unused)]
 pub(crate) fn getnamefromblast<T>(text: T) -> Option<String>
 where
     T: AsRef<str>,
@@ -435,7 +436,7 @@ pub(crate) fn speciesandorphonfiltering(
         newdata
     }; */
     if tempfile != outfile.getpath() {
-        std::fs::write(&outfile.getpath(), &info)?;
+        std::fs::write(outfile.getpath(), &info)?;
     }
     Ok(outfile)
 }
@@ -453,7 +454,7 @@ where
             "{} {}\n{}",
             record.id(),
             record.desc().unwrap_or_default(),
-            String::from_utf8_lossy(record.seq()).to_string()
+            String::from_utf8_lossy(record.seq())
         );
         match Newfasta::from_str(&text) {
             Ok(a) => seqs.push(a),
@@ -504,7 +505,7 @@ pub(crate) fn statusblastmotifs(data: &mut Vec<Blast>) {
     }
 }
 pub(crate) fn statusblastvs(data: &mut Vec<Blast>) {
-    data.sort_unstable_by(|a, b| match a.getsubject().cmp(&b.getsubject()) {
+    data.sort_unstable_by(|a, b| match a.getsubject().cmp(b.getsubject()) {
         std::cmp::Ordering::Equal => a.getquery().gene.cmp(&b.getquery().gene),
         ord => ord,
     });
@@ -525,6 +526,7 @@ pub(crate) fn statusblastvs(data: &mut Vec<Blast>) {
         blastresult.setstatus();
     }
 }
+#[allow(unused)]
 pub(crate) fn statusblast(data: &mut Vec<Blast>) {
     data.sort_unstable_by(|a, b| match a.sstart.cmp(&b.sstart) {
         std::cmp::Ordering::Equal => a.send.cmp(&b.send),
@@ -577,7 +579,7 @@ pub(crate) fn matchmotif(
     if let Some(a) = locus {
         locusfiltering(a, &mut blast);
     }
-    blast.iter_mut().for_each(|p| {
+    blast.iter_mut().for_each(|_p| {
         //Already performed
         //if p.sstart > p.send {
         //    (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
@@ -605,7 +607,7 @@ pub(crate) fn genesblast(
                 .map_err(|p| io::Error::new(ErrorKind::InvalidInput, p));
             let bool = elem
                 .as_ref()
-                .map_or(false, |p| f.addtosequence(p, &mut fastawriter).is_err());
+                .is_ok_and(|p| f.addtosequence(p, &mut fastawriter).is_err());
 
             if bool {
                 Err(io::Error::new(
@@ -618,7 +620,7 @@ pub(crate) fn genesblast(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let reference = match downloadref(true).map(|(a, b)| {
-        speciesandorphonfiltering(&a, Some(locus), b, &species, false, args.cacheerase)
+        speciesandorphonfiltering(&a, Some(locus), b, species, false, args.cacheerase)
     }) {
         Some(a) => a?,
         None => {
@@ -651,6 +653,7 @@ pub(crate) fn genesblast(
     statusblastvs(&mut blast);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
+/*
 pub(crate) fn locuspos(
     search: &Locus,
     hap: &Haplotype,
@@ -674,6 +677,7 @@ pub(crate) fn locuspos(
     bl.retain(fil);
     Some((opt.clone(), bl))
 }
+     */
 pub(crate) fn filter_new_alleles<'a, T>(data: &'a [T], motifs: &[T]) -> impl Iterator<Item = &'a T>
 where
     T: Blastcalc + Debug,
@@ -725,11 +729,11 @@ where
             "-out",
             output,
             "-word_size",
-            blastlevel.into_word_size().to_string().as_str(),
+            blastlevel.as_word_size().to_string().as_str(),
             "-max_target_seqs",
-            blastlevel.into_max_matches().to_string().as_str(),
+            blastlevel.as_max_matches().to_string().as_str(),
             "-max_hsps",
-            blastlevel.into_max_matches().to_string().as_str(),
+            blastlevel.as_max_matches().to_string().as_str(),
             "-outfmt",
             "6 qseqid sseqid qstart qend sstart send qlen length pident gaps sseq",
         ])
@@ -909,25 +913,21 @@ where
         }
     };
     match (rank, id, goodtaxononomy, scientificname) {
-        (_, 0, ..) => {
-            return Err(Box::new(io::Error::new(
-                ErrorKind::InvalidInput,
-                "Species was not found on NCBI.",
-            )));
-        }
-        (b, .., a) if a.is_empty() || b.is_empty() => {
-            return Err(Box::new(io::Error::new(
-                ErrorKind::InvalidInput,
-                "Species was not found on NCBI.",
-            )));
-        }
+        (_, 0, ..) => Err(Box::new(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Species was not found on NCBI.",
+        ))),
+        (b, .., a) if a.is_empty() || b.is_empty() => Err(Box::new(io::Error::new(
+            ErrorKind::InvalidInput,
+            "Species was not found on NCBI.",
+        ))),
         (rank, _, false, _)
             if rank.eq_ignore_ascii_case("species") || rank.eq_ignore_ascii_case("subspecies") =>
         {
-            return Err(Box::new(io::Error::new(
+            Err(Box::new(io::Error::new(
                 ErrorKind::InvalidInput,
                 "Species is not a jawed vertebrate.",
-            )));
+            )))
         }
         (rank, id, true, name)
             if !name.is_empty() && rank.eq_ignore_ascii_case("species")
@@ -935,12 +935,10 @@ where
         {
             Ok((rank, name, id))
         }
-        _ => {
-            return Err(Box::new(io::Error::new(
-                ErrorKind::InvalidInput,
-                "The term used is not a species or an subspecies.",
-            )));
-        }
+        _ => Err(Box::new(io::Error::new(
+            ErrorKind::InvalidInput,
+            "The term used is not a species or an subspecies.",
+        ))),
     }
 }
 /*
@@ -1068,7 +1066,7 @@ pub(crate) fn submit(
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = generatesequence(args, dir, locus)?;
-    let mut motifs = matchmotif(&sequencefile, &realspecies, None)
+    let mut motifs = matchmotif(&sequencefile, realspecies, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus

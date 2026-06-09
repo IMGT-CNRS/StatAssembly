@@ -141,6 +141,7 @@ pub(crate) struct Args {
     #[arg(value_enum)]
     pub(crate) command: Command,
 }
+// Allow to manipulate tempfile and plain files and ensure remove of temp file when dropped.
 pub(crate) enum Filecrea {
     Temp(NamedTempFile),
     Plain(PathBuf),
@@ -152,6 +153,7 @@ impl Filecrea {
             Self::Plain(b) => b.as_path(),
         }
     }
+    #[allow(unused)]
     pub(crate) fn istemp(&self) -> bool {
         matches!(self, Self::Temp(_))
     }
@@ -189,12 +191,6 @@ pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
         _ => Err(String::from("Bad number, must be greater than 0.")),
     }
 }
-pub(crate) fn greater_than_0_64(s: &str) -> Result<u64, String> {
-    match s.parse::<u64>() {
-        Ok(s) if s != u64::MIN => Ok(s),
-        _ => Err(String::from("Bad number, must be greater than 0.")),
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter)]
 #[allow(clippy::upper_case_acronyms)]
 pub(crate) enum Locus {
@@ -227,7 +223,7 @@ pub(crate) enum Blastlevel {
 }
 impl Blastlevel {
     /// Word size
-    pub(crate) fn into_word_size(&self) -> usize {
+    pub(crate) fn as_word_size(&self) -> usize {
         match self {
             Blastlevel::Megablast => 28,
             Blastlevel::Normal => 15,
@@ -235,7 +231,7 @@ impl Blastlevel {
         }
     }
     /// Number of matches
-    pub(crate) fn into_max_matches(&self) -> usize {
+    pub(crate) fn as_max_matches(&self) -> usize {
         match self {
             Blastlevel::Megablast => 2,
             Blastlevel::Normal => 15,
@@ -303,6 +299,7 @@ impl Display for Species {
 pub(crate) struct ProgressReader<R> {
     pub(crate) reader: R,
     pub(crate) progress_bar: ProgressBar,
+    #[allow(dead_code)]
     pub(crate) total_bytes: u64,
 }
 
@@ -339,7 +336,7 @@ impl<'de> Deserialize<'de> for Name {
         D: de::Deserializer<'de>,
     {
         let val: &str = serde::Deserialize::deserialize(deserializer)?;
-        Name::from_str(val).map_err(|e| serde::de::Error::custom(e))
+        Name::from_str(val).map_err(serde::de::Error::custom)
     }
 }
 impl Name {
@@ -532,6 +529,7 @@ impl OkStatus {
     pub(crate) fn getstatus(&self) -> &AcceptedStatus {
         &self.status
     }
+    #[allow(unused)]
     pub(crate) fn getmotif(&self) -> &Option<String> {
         &self.motif
     }
@@ -660,9 +658,9 @@ impl FromStr for Params {
         Ok(Self::new(avg, mean, phredscore))
     }
 }
-impl ToString for Params {
-    fn to_string(&self) -> String {
-        format!("{}:{}:{}", self.readavg, self.mean, self.phredscore)
+impl Display for Params {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.readavg, self.mean, self.phredscore)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -943,7 +941,7 @@ impl Display for Blastmatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             ">{}{DELIMITERFASTA}{}:{}-{}-{}{DELIMITERFASTA}{}\n{}",
-            self.qseqid.to_string(),
+            self.qseqid,
             self.sseqid,
             self.sstart,
             self.send,
@@ -1155,7 +1153,7 @@ impl std::fmt::Display for &dyn Seqresult {
         write!(
             f,
             ">{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}-{}{}{DELIMITERFASTA}{}{DELIMITERFASTA}{}\n{}",
-            self.getquery().to_string(),
+            self.getquery(),
             self.getsubject(),
             start,
             end,
@@ -1450,7 +1448,7 @@ impl GeneInfos {
         fasta.write(
             &format!(
                 "GENE|{}|{}|{}|{}..{}{}",
-                self.getgene().to_string(),
+                self.getgene(),
                 "species",
                 self.getchromosome(),
                 self.getstart().getobasedpos(),
