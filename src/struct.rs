@@ -19,6 +19,7 @@ use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::ErrorKind::{self, InvalidInput};
 use std::ops::{Not, RangeInclusive};
 use std::path::Path;
@@ -140,6 +141,9 @@ pub(crate) struct Args {
     /// Command
     #[arg(value_enum)]
     pub(crate) command: Command,
+    /// Do one thread after the other if low memory
+    #[arg(long)]
+    pub(crate) lowmemory: bool,
 }
 // Allow to manipulate tempfile and plain files and ensure remove of temp file when dropped.
 pub(crate) enum Filecrea {
@@ -156,6 +160,27 @@ impl Filecrea {
     #[allow(unused)]
     pub(crate) fn istemp(&self) -> bool {
         matches!(self, Self::Temp(_))
+    }
+}
+impl From<PathBuf> for Filecrea {
+    fn from(value: PathBuf) -> Self {
+        Self::Plain(value)
+    }
+}
+impl From<NamedTempFile<File>> for Filecrea {
+    fn from(value: NamedTempFile<File>) -> Self {
+        Self::Temp(value)
+    }
+}
+impl Drop for Filecrea {
+    fn drop(&mut self) {
+        //Remove file if not already deleted on drop
+        match self {
+            Filecrea::Plain(_) => (),
+            Filecrea::Temp(e) => {
+                let _ = fs::remove_file(e);
+            }
+        }
     }
 }
 #[derive(Debug, Deserialize)]
@@ -189,6 +214,29 @@ pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
     match s.parse::<u32>() {
         Ok(s) if s != u32::MIN => Ok(s),
         _ => Err(String::from("Bad number, must be greater than 0.")),
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LocusHaplo {
+    locus: Locus,
+    haplo: Haplotype,
+}
+impl LocusHaplo {
+    fn getlocus(&self) -> &Locus {
+        &self.locus
+    }
+    fn gethaplo(&self) -> &Haplotype {
+        &self.haplo
+    }
+}
+impl Display for LocusHaplo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.locus, self.haplo)
+    }
+}
+impl LocusHaplo {
+    pub(crate) fn new(locus: Locus, haplo: Haplotype) -> Self {
+        Self { locus, haplo }
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, Hash, EnumIter)]

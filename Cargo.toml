@@ -1,7 +1,7 @@
 [package]
 name = "IMGT_StatAssembly"
 description = "Assess quality of assemblies and allele confidence on IG and TR loci"
-version = "2.0.0"
+version = "2.1.0-alpha"
 edition = "2024"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>", "IMGT contact <contact-imgt@igh.cnrs.fr>"]
 rust-version = "1.93"
@@ -14,20 +14,20 @@ bio-types = "1.0.4"
 bzip2-sys = { version = "0.1.13", features = ["static"] }
 clap = { version = "4.6.1", features = ["derive", "cargo"] }
 csv = "1.4.0"
-itertools = "0.14.0"
+itertools = "0.15.0"
 #noodles-core = "0.15.0"
 #noodles-fasta = "0.46.0"
 num-format = "0.4.4"
-openssl-sys = { version = "0.9.116", features = ["vendored"] }
+openssl-sys = { version = "0.9.117", features = ["vendored"] }
 ordered-float = "5.3.0"
 plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
 ranges = "0.4.0"
 #extended-htslib = { version = "*", features = ["bzip2","curl","lzma","static"] }
-extended-htslib = { version = "*", features = ["bzip2","curl","lzma","static"] }
+extended-htslib = { version = "0.3.0", features = ["bzip2","curl","lzma","static"] }
 serde = { version = "1.0.228", features = ["serde_derive"] }
 lazy_static = "1.5.0"
-regex = "1.12.3"
-bio = "3.0.0"
+regex = "1.12.4"
+bio = "4.0.0"
 flate2 = "1.1.9"
 reqwest = { version = "0.13.4", features = ["blocking", "multipart", "query", "json","http3"] }
 tempfile = "3.27.0"
@@ -35,7 +35,7 @@ tar = "0.4.46"
 webbrowser = "1.2.1"
 strum = { version = "0.28.0", features = ["strum_macros"] }
 strum_macros = "0.28.0"
-serde_with = "3.20.0"
+serde_with = "3.21.0"
 obfstr = "0.4.4"
 minimap2 = { version = "0.1.31", features = ["static"]}
 quick-xml = "0.40.1"

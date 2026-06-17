@@ -2,8 +2,8 @@
 #![deny(clippy::expect_used)]
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusInfos, Name,
-    Newfasta, Position, ProgressReader, Seqresult, Species, Strand,
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusHaplo,
+    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand,
 };
 use crate::{PHYLUMLIMIT, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
@@ -14,6 +14,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use quick_xml::events::Event;
 use reqwest::blocking::multipart;
+use reqwest::header::REFERER;
 use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
@@ -323,7 +324,7 @@ pub(crate) fn speciesandorphonfiltering(
         species.getrank(),
         species.getname()
     );
-    let file = std::fs::read_to_string(tempfile)?;
+    let file = std::fs::read_to_string(tempfile)?.replace(" ", "_");
     let info = fastafilter(&file, species.getname(), true, true).replace(" ", "_");
     let (info, file) = if orphonfilter {
         println!("Orphon filtering");
@@ -565,15 +566,18 @@ pub(crate) fn matchmotif(
             ));
         }
     };
-    let mut blast: Vec<Blast> =
-        match blastcommand(reference.getpath(), subject, Blastlevel::default()) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(io::Error::new(ErrorKind::InvalidData, e));
-            }
+    let mut blast: Vec<Blast> = match blastcommand(
+        reference,
+        subject.to_path_buf().into(),
+        Blastlevel::default(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(io::Error::new(ErrorKind::InvalidData, e));
         }
-        .into_iter()
-        .collect();
+    }
+    .into_iter()
+    .collect();
     //Filter by locus
     retainbestmatch(&mut blast);
     if let Some(a) = locus {
@@ -597,8 +601,7 @@ pub(crate) fn genesblast(
 ) -> io::Result<Vec<Blastmatch>> {
     let mut reader = getassemblyreader(args)?;
     let name = NamedTempFile::with_suffix("genes_blast.txt")?;
-    let file = File::create(&name)?;
-    let mut fastawriter = fasta::Writer::new(file);
+    let mut fastawriter = fasta::Writer::to_file(&name)?;
     subject
         .iter()
         .map(|f| {
@@ -630,11 +633,7 @@ pub(crate) fn genesblast(
             ));
         }
     };
-    let mut blast = match blastcommand(
-        reference.getpath(),
-        &name.into_temp_path(),
-        Blastlevel::default(),
-    ) {
+    let mut blast = match blastcommand(reference, Filecrea::from(name), Blastlevel::default()) {
         Ok(b) => b,
         Err(e) => {
             return Err(io::Error::new(ErrorKind::InvalidData, e));
@@ -690,29 +689,59 @@ where
         })
     })
 }
+//if there is space, BLAST would cut the header and parsing would fail, we therefore regenerate a file for reference without this issue
+fn checknospaceinheader(reference: &mut Filecrea, _subject: &mut Filecrea) -> io::Result<()> {
+    let refreader = fasta::Reader::from_file(reference.getpath())
+        .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
+    let haspaces = refreader
+        .records()
+        .filter_map(Result::ok)
+        .any(|f| f.desc().is_some()); //One sequence has a space because it has a description
+    if haspaces {
+        let refnew = NamedTempFile::new()?;
+        let mut writer = fasta::Writer::to_file(&refnew)?;
+        let refreader = fasta::Reader::from_file(reference.getpath())
+            .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
+        for seq in refreader.records().filter_map(Result::ok) {
+            writer.write(
+                &format!(
+                    "{}{}",
+                    seq.id(),
+                    seq.desc().map_or(String::new(), |d| format!("_{d}"))
+                ),
+                None,
+                seq.seq(),
+            )?;
+        }
+        *reference = Filecrea::Temp(refnew)
+    }
+    Ok(())
+}
 pub(crate) fn blastcommand<T>(
-    reference: T,
-    subject: T,
+    mut reference: T,
+    mut subject: T,
     blastlevel: Blastlevel,
 ) -> io::Result<Vec<Blast>>
 where
-    T: AsRef<Path>,
+    T: Into<Filecrea>,
 {
-    let (reference, subject) = (reference.as_ref(), subject.as_ref());
-    if !reference.try_exists().unwrap_or(false) {
+    let (mut reference, mut subject) = (reference.into(), subject.into());
+    checknospaceinheader(&mut reference, &mut subject)?;
+    let (refpath, subpath) = (reference.getpath(), subject.getpath());
+    if !refpath.try_exists().unwrap_or(false) {
         return Err(io::Error::new(
             ErrorKind::NotFound,
             "Reference file was not found",
         ));
     }
-    if !subject.try_exists().unwrap_or(false) {
+    if !subpath.try_exists().unwrap_or(false) {
         return Err(io::Error::new(
             ErrorKind::NotFound,
             "Subject file was not found",
         ));
     }
-    let reference = &format!("{}", reference.display());
-    let subject = &format!("{}", subject.display());
+    let reference = &format!("{}", refpath.display());
+    let subject = &format!("{}", subpath.display());
     let output = NamedTempFile::new()?;
     let output = &format!("{}", output.path().display());
     let command = Command::new("blastn")
@@ -772,7 +801,8 @@ where
                     result.push(r);
                 } else if let Err(r) = record {
                     eprintln!("Error parsing line. Error is: {r}.");
-                    return Err(io::Error::new(ErrorKind::InvalidData, "error"));
+                    continue;
+                    //return Err(io::Error::new(ErrorKind::InvalidData, r.to_string()));
                 }
             }
         };
@@ -1177,7 +1207,7 @@ pub(crate) fn askforsubmission(
     realspecies: &Species,
     locus: &[LocusInfos],
     args: &Args,
-    infos: &HashMap<Locus, Vec<Blastmatch>>,
+    infos: &HashMap<LocusHaplo, Vec<Blastmatch>>,
 ) -> io::Result<()> {
     let quest = REQUESTCLIENT
         .get(SUBMISSIONLINK.as_str())

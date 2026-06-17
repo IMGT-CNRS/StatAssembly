@@ -6,8 +6,8 @@ use reqwest::StatusCode;
 use crate::{
     BORNES, getassemblyreader, printpotentialbornes,
     r#struct::{
-        Args, Blast, Blastcalc, Blastlevel, Blastmatch, Haplotype, Locus, LocusInfos, Name,
-        Position, Species, Status, Strand,
+        Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, Haplotype, Locus, LocusInfos,
+        Name, Position, Species, Status, Strand,
     },
     submissions::{
         BORNESLINK, LOCUSSEPARATOR, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK,
@@ -22,63 +22,50 @@ use std::{
     io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
+    sync::mpsc::channel,
     thread,
+    time::Duration,
 };
-
-pub(crate) fn locusallposition(
-    subject: &Path,
-    species: &Species,
+pub(crate) fn threadlaunch<T, E>(
+    referencepath: Filecrea,
+    subject: T,
     args: &Args,
-) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)> {
-    let infos = if args.nobornes {
-        None
-    } else {
-        downloadbornes()
-    };
-    let (bornespath, referencepath) = match (
-        infos,
-        downloadref(true)
-            .map(|(a, b)| speciesandorphonfiltering(&a, None, b, species, true, args.cacheerase)),
-    ) {
-        (Some(a), Some(b)) => (Some(a), b?),
-        (None, Some(b)) if args.nobornes => (None, b?),
-        (None, ..) if !args.nobornes => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "Bornes from IMGT cannot be downloaded",
-            ));
-        }
-        _ => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "Reference from IMGT cannot be downloaded",
-            ));
-        }
-    };
-    /* let file = NamedTempFile::new_in(&env::temp_dir())?;
-    let mut merge = File::create(&file)?;
-    let read = fs::read_to_string(&reference.0)?;
-    let read2 = fs::read_to_string(&reference.1)?;
-    merge.write_all(read.as_bytes())?;
-    merge.write_all(read2.as_bytes())?;
-    println!("Blasting to get position of loci."); */
-    let (blast, bornes) = thread::scope(|s| {
-        let blast = s.spawn(|| {
-            let b = match blastcommand(referencepath.getpath(), subject, Blastlevel::Normal) {
+    bornespath: Option<E>,
+) -> io::Result<(Vec<Blast>, Option<Option<Vec<Blastmatch>>>)>
+where
+    T: AsRef<Path> + Send + Sync + Clone,
+    E: AsRef<Path> + Send + Sync + Clone,
+{
+    thread::scope(|s| {
+        let subjectbis = subject.clone().as_ref().to_path_buf();
+        let blast = s.spawn(move || {
+            let b = match blastcommand(referencepath, subjectbis.into(), Blastlevel::Normal) {
                 Ok(b) => b,
                 Err(e) => {
                     return Err(io::Error::new(ErrorKind::InvalidData, e));
                 }
             };
-            Ok(b.into_iter().collect())
+            Ok(b)
         });
-        let bornes = bornespath.map(|b| {
-            s.spawn(|| {
+        let (sender, receiver) = channel();
+        let bornes = bornespath.as_ref().map(|b| {
+            s.spawn(move || {
+                match receiver.recv_timeout(Duration::from_mins(30)) {
+                    Ok("kill") => {
+                        eprintln!("aborted by main");
+                        return None;
+                    }
+                    Ok(_) => (),
+                    Err(e) => {
+                        eprintln!("Error is {e}");
+                        return None;
+                    }
+                };
                 let aligner = Aligner::builder()
                     .asm20()
                     .with_cigar()
                     .with_index_threads(args.threads)
-                    .with_index(subject, None)
+                    .with_index(subject.as_ref(), None)
                     .ok()?;
                 let read = fasta::Reader::from_file(b).ok()?;
                 let mut aligns: Vec<Blastmatch> = Vec::new();
@@ -140,6 +127,7 @@ pub(crate) fn locusallposition(
                         aligns.push(matche);
                     }
                 }
+                println!("Bornes finished.");
                 if aligns.is_empty() {
                     None
                 } else {
@@ -148,41 +136,88 @@ pub(crate) fn locusallposition(
             })
         });
         println!("Waiting for blast and bornes to finish. It can take several minutes.");
-        (blast.join(), bornes.map(|d| d.join()))
-    });
-    let (mut blast, mut bornes) = match (blast, bornes) {
-        (Ok(Ok(a)), Some(Ok(Some(b)))) => (a, Some(b)),
-        (Ok(Ok(a)), Some(Ok(None))) | (Ok(Ok(a)), None) => {
+        let blast = if args.lowmemory {
+            println!("You have low memory, BLAST would be launched first.");
+            let r = blast
+                .join()
+                .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "Error with blast thread"))??;
+            println!("Starting minimap2 now.");
+            let _ = sender.send("start"); //No need to check, it will turn into Err on receiver and kill the process
+            r
+        } else {
+            let _ = sender.send("start"); //No need to check, it will turn into Err on receiver and kill the process
+            blast
+                .join()
+                .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "Error with blast thread"))??
+        };
+        let bornes = bornes.map(|d| {
+            d.join()
+                .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "Error with bornes thread"))
+                .ok()?
+        });
+        let _ = sender.send("kill"); // just in case, should be useless
+        Ok((blast, bornes))
+    })
+}
+pub(crate) fn locusallposition(
+    subject: &Path,
+    species: &Species,
+    args: &Args,
+) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)> {
+    let infos = if args.nobornes {
+        None
+    } else {
+        downloadbornes()
+    };
+    let (bornespath, referencepath) = match (
+        infos,
+        downloadref(true)
+            .map(|(a, b)| speciesandorphonfiltering(&a, None, b, species, true, args.cacheerase)),
+    ) {
+        (Some(a), Some(b)) => (Some(a), b?),
+        (None, Some(b)) if args.nobornes => (None, b?),
+        (None, ..) if !args.nobornes => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Bornes from IMGT cannot be downloaded",
+            ));
+        }
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Reference from IMGT cannot be downloaded",
+            ));
+        }
+    };
+    /* let file = NamedTempFile::new_in(&env::temp_dir())?;
+    let mut merge = File::create(&file)?;
+    let read = fs::read_to_string(&reference.0)?;
+    let read2 = fs::read_to_string(&reference.1)?;
+    merge.write_all(read.as_bytes())?;
+    merge.write_all(read2.as_bytes())?;
+    println!("Blasting to get position of loci."); */
+    let info = threadlaunch(referencepath, subject, &args, bornespath);
+    let (mut blast, mut bornes) = match info {
+        Ok((a, Some(Some(b)))) => (a, Some(b)),
+        Ok((a, Some(None))) => {
             if !args.nobornes {
                 eprintln!("No bornes found.");
             }
             (a, None)
         }
-        (Ok(Err(a)), _) => {
+        Ok((_, None)) => {
             return Err(io::Error::new(
                 ErrorKind::BrokenPipe,
-                format!("Blast error. Error is: {}", a),
+                format!("Bornes could not be analyzed"),
             ));
         }
-        (Err(a), Some(Err(b))) => {
+        Err(a) => {
             return Err(io::Error::new(
                 ErrorKind::BrokenPipe,
                 format!(
-                    "Blast and bornes could not be performed. Error are: {:?} and {:?}",
-                    a, b
+                    "Blast and bornes could not be performed. Error are: {:?}",
+                    a
                 ),
-            ));
-        }
-        (Err(a), _) => {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!("Blast could not be performed. Error is: {:?}", a),
-            ));
-        }
-        (_, Some(Err(b))) => {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!("Bornes could not be performed. Error is: {:?}", b),
             ));
         }
     };
@@ -262,7 +297,23 @@ pub(crate) fn locusallposition(
         && let Ok(d) = &range
     {
         bornes2.retain(|p| d.iter().any(|k| k.contig == p.getsubject()));
-        bornes2.dedup_by(|a, b| a.getallelename().eq_ignore_ascii_case(b.getallelename()));
+        bornes2.sort_unstable_by(|a, b| {
+            match a
+                .getallelename()
+                .to_lowercase()
+                .cmp(&b.getallelename().to_lowercase())
+            {
+                Ordering::Equal => a
+                    .getsubject()
+                    .to_lowercase()
+                    .cmp(&b.getsubject().to_lowercase()),
+                ord => ord,
+            }
+        });
+        bornes2.dedup_by(|a, b| {
+            a.getsubject() == b.getsubject()
+                && a.getallelename().eq_ignore_ascii_case(b.getallelename())
+        });
         if bornes2.is_empty() {
             eprintln!("No bornes were identified.");
         } else {

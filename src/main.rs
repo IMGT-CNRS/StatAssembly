@@ -1,19 +1,18 @@
-#![warn(clippy::unwrap_used)]
-#![warn(clippy::expect_used)]
-use bio::io::fasta;
-use bio_types::sequence::SequenceRead;
-use regex::Regex;
-use tempfile::{NamedTempFile, TempPath};
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
 Made by: Guilhem Zeitoun
 */
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
+use bio::io::fasta;
+use bio_types::sequence::SequenceRead;
+use regex::Regex;
+use tempfile::{NamedTempFile, TempPath};
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
 use crate::r#struct::AcceptedStatus::Rejected;
-///Assess quality of an assembly based on reads mapping, pourquoi la fin c'est 9 overlaps?, dû au samtools view
 use clap::Parser;
 use itertools::Itertools;
 use plotters::coord::Shift;
@@ -34,7 +33,8 @@ use crate::submissions::{
     GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, REQUESTCLIENT, askforsubmission,
     checkifblastpresent, generatelightbam, genesblast, positionfiltering,
 };
-use extended_htslib::bam::ext::{BamRecordExtensions, CsValue, IterAlignedPairs};
+use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
+use extended_htslib::bam::record::CsValue;
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
 use lazy_static::lazy_static;
 use num_format::{Locale, ToFormattedString};
@@ -79,17 +79,19 @@ lazy_static! {
 }
 //Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
-    match (record.getcsaligned(), record.aligned_blocks_match()) {
+    match (
+        record.aligned_blocks_match(),
+        record.getorgeneratecsblock(false),
+    ) {
         //There is a CIGAR =
-        (_, Some(d)) => Some(d.collect()),
+        (Some(d), _) => Some(d.collect()),
         //There is a MD/CS tag
-        (Some(d), None) => Some(
+        (None, Ok(d)) => Some(
             d.into_iter()
                 .filter_map(|p| match (&p.state, p.getgenomepos()) {
                     (CsValue::Same(d), Some(pos)) => Some([
                         pos,
-                        pos.checked_add((*d).try_into().unwrap_or(0))
-                            .and_then(|f| f.checked_sub(1))
+                        pos.checked_add(d.getsize().checked_sub(1)?.try_into().ok()?)
                             .unwrap_or(0),
                     ]),
                     _ => None,
@@ -97,7 +99,10 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
                 .collect(),
         ),
         //We have nothing
-        (None, None) => None,
+        (None, Err(e)) => {
+            eprintln!("No cigar X/= and MD/CS tag cannot be parsed. Error is {e}");
+            None
+        }
     }
 }
 /* fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
@@ -838,10 +843,26 @@ where
     };
     Ok(())
 }
+fn available_memory() -> Option<usize> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mem_info = contents
+        .lines()
+        .find(|line| line.starts_with("MemAvailable"))?;
+    let size = mem_info.split(" ").nth(4)?;
+    let available_mem: usize = size.parse().ok()?;
+    Some(available_mem)
+}
 fn main() -> ExitCode {
     let mut args = Args::parse();
     if checknewversion() {
         return ExitCode::FAILURE;
+    }
+    if !args.lowmemory
+        && let Some(b) = available_memory()
+        && b < 12_usize.saturating_mul(10_usize.saturating_pow(6))
+    {
+        println!("You have low memory. {b}");
+        args.lowmemory = true; //Force low memory if less than 12 Go of free memory (in kb normally in /proc/meminfo).
     }
     let firstinstant = Instant::now();
     let speciesblast = match Species::new(&args.species) {
@@ -969,7 +990,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut locushashresult: HashMap<Locus, Vec<Blastmatch>> = HashMap::new();
+    let mut locushashresult: HashMap<LocusHaplo, Vec<Blastmatch>> = HashMap::new();
     for locus in grouped.iter_mut() {
         let haplotype = locus.len();
         let nlocus = locus.clone();
@@ -1100,6 +1121,7 @@ fn main() -> ExitCode {
         let mut lock = stdout().lock();
         //For each individual haplotype inside locus
         for loci in locus.iter_mut() {
+            let locushap = LocusHaplo::new(loci.locus.clone(), loci.haplotype.clone());
             let mut reader = match getreaderoffile(&args) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1351,7 +1373,7 @@ fn main() -> ExitCode {
                         }
                     })
                     .collect();
-                locushashresult.insert(loci.locus.clone(), element);
+                locushashresult.insert(locushap.clone(), element);
             }
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
@@ -1389,7 +1411,7 @@ fn main() -> ExitCode {
                                     if loci.status.getstatus().isvalid()
                                         && b.iter().any(|f| f.status.getstatus().isvalid())
                                     {
-                                        locushashresult.insert(loci.locus.clone(), blast);
+                                        locushashresult.insert(locushap.clone(), blast);
                                     }
                                 }
                                 Err(e) => {
@@ -1457,7 +1479,7 @@ fn main() -> ExitCode {
                     if loci.status.getstatus().isvalid()
                         && result.iter().any(|f| f.status.getstatus().isvalid())
                     {
-                        locushashresult.insert(loci.locus.clone(), data);
+                        locushashresult.insert(locushap.clone(), data);
                     }
                 } else if !args.nosubmit {
                     eprintln!("No assembly to check gene list.");
@@ -1545,7 +1567,7 @@ where
 fn printvalidatedalleles<T>(
     args: &Args,
     release: Option<T>,
-    locushash: &HashMap<Locus, Vec<Blastmatch>>,
+    locushash: &HashMap<LocusHaplo, Vec<Blastmatch>>,
 ) -> io::Result<()>
 where
     T: AsRef<str>,
@@ -1561,6 +1583,7 @@ where
     csv.write_record([
         "name",
         "position",
+        "subject",
         "locus",
         "strand",
         "bestmatch",
@@ -1578,6 +1601,7 @@ where
             csv.write_record(&[
                 name.to_string(),
                 format!("{}-{}", start, end),
+                matches.sseqid.to_string(),
                 locus.to_string(),
                 matches.complement.to_string(),
                 name.to_string(),
@@ -2661,13 +2685,20 @@ pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
     //Between a minimum and a maximum number of reads
     if let Some(a) = graph
         .iter()
-        .find(|f| coveragewindow(mean).contains(&f.overlaps))
+        .find(|f| !coveragewindow(mean).contains(&f.overlaps))
     {
         OkStatus::new(
             Rejected,
             Some(format!(
-                "{} at position {}",
+                "{} at position {} ({})",
                 *INVALIDCOVERAGE,
+                if let Some(b) = coveragewindow(mean).max()
+                    && a.overlaps > b
+                {
+                    "too high"
+                } else {
+                    "too low"
+                },
                 a.position.getobasedpos()
             )),
         )
