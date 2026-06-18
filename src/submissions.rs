@@ -170,6 +170,9 @@ pub(crate) fn getpositionfromblast(text: &str) -> Option<(Position, Position, St
         }
     })
 }
+pub(crate) fn removeallspaces(text: &mut String) {
+    *text = text.chars().filter(|p| !p.is_ascii_whitespace()).collect();
+}
 #[must_use]
 pub(crate) fn fastafilter(text: &str, find: &str, present: bool, species: bool) -> String {
     let buffer = BufReader::new(text.as_bytes());
@@ -186,12 +189,18 @@ pub(crate) fn fastafilter(text: &str, find: &str, present: bool, species: bool) 
             record.desc().map_or(String::new(), |a| format!(" {a}"))
         );
         let keep = match Name::from_str(&val) {
-            Ok(result) => match (present, species) {
-                (true, true) => result.species.eq_ignore_ascii_case(find),
-                (false, true) => !result.species.eq_ignore_ascii_case(find),
-                (false, false) => !result.gene.contains(find),
-                (true, false) => result.gene.contains(find),
-            },
+            Ok(mut result) => {
+                let mut find = find.to_string();
+                removeallspaces(&mut result.species);
+                removeallspaces(&mut result.gene);
+                removeallspaces(&mut find);
+                match (present, species) {
+                    (true, true) => result.species.eq_ignore_ascii_case(&find),
+                    (false, true) => !result.species.eq_ignore_ascii_case(&find),
+                    (false, false) => !result.gene.contains(&find),
+                    (true, false) => result.gene.contains(&find),
+                }
+            }
             Err(_e) => {
                 //eprintln!("Error parsing line: {}. Error is {e}", val);
                 false
@@ -287,7 +296,7 @@ pub(crate) fn checklocus(p: &fasta::Record, locus: &Locus) -> bool {
     }
 }
 pub(crate) fn speciesandorphonfiltering(
-    tempfile: &Path,
+    tempfile: &mut Filecrea,
     locus: Option<&Locus>,
     releaseversion: String,
     species: &Species,
@@ -295,17 +304,17 @@ pub(crate) fn speciesandorphonfiltering(
     force: bool,
 ) -> io::Result<Filecrea> {
     let outfile = if force {
-        Filecrea::Temp(NamedTempFile::with_prefix_in(
-            format!(
+        Filecrea::createtemp(
+            None,
+            Some(format!(
                 "refseq{}-{}{}.fasta",
                 releaseversion.replace(" ", "_"),
                 species.getname().replace(" ", "-"),
                 locus.map_or("".to_string(), |l| format!("-{}", l))
-            ),
-            env::temp_dir(),
-        )?)
+            )),
+        )?
     } else {
-        Filecrea::Plain(Path::join(
+        Filecrea::createfrompath(Path::join(
             &env::temp_dir(),
             format!(
                 "refseq{}-{}{}.fasta",
@@ -315,7 +324,7 @@ pub(crate) fn speciesandorphonfiltering(
             ),
         ))
     };
-    if outfile.getpath().try_exists().unwrap_or(false) && !force {
+    if !outfile.istemp() && outfile.getpath().try_exists().unwrap_or(false) && !force {
         println!("Filtering already done, retrieving...");
         return Ok(outfile);
     }
@@ -324,13 +333,14 @@ pub(crate) fn speciesandorphonfiltering(
         species.getrank(),
         species.getname()
     );
-    let file = std::fs::read_to_string(tempfile)?.replace(" ", "_");
-    let info = fastafilter(&file, species.getname(), true, true).replace(" ", "_");
+    let mut file = String::new();
+    tempfile.getfile()?.read_to_string(&mut file)?;
+    let info = fastafilter(&file, species.getname(), true, true);
     let (info, file) = if orphonfilter {
         println!("Orphon filtering");
         (
-            fastafilter(&info, "/OR", false, false),
-            fastafilter(&file, "/OR", false, false),
+            fastafilter(&info, "/OR", false, false).replace(" ", "_"),
+            fastafilter(&file, "/OR", false, false).replace(" ", "_"),
         )
     } else {
         (info, file)
@@ -390,6 +400,7 @@ pub(crate) fn speciesandorphonfiltering(
         let records = read
             .records()
             .filter_map(Result::ok)
+            .filter(|a| a.check().is_ok())
             .filter(|p| checklocus(p, l));
         let seq = records.fold(String::new(), |mut acc, f| {
             acc.push_str(&format!(
@@ -436,7 +447,7 @@ pub(crate) fn speciesandorphonfiltering(
     } else {
         newdata
     }; */
-    if tempfile != outfile.getpath() {
+    if tempfile.getpath() != outfile.getpath() {
         std::fs::write(outfile.getpath(), &info)?;
     }
     Ok(outfile)
@@ -553,11 +564,12 @@ pub(crate) fn statusblast(data: &mut Vec<Blast>) {
 pub(crate) fn matchmotif(
     subject: &Path,
     species: &Species,
+    args: &Args,
     locus: Option<&Locus>,
 ) -> io::Result<Vec<Blastmatch>> {
-    let reference = match downloadmotifs()
-        .map(|a| speciesandorphonfiltering(&a, locus, "motifs".to_string(), species, false, false))
-    {
+    let reference = match downloadmotifs(&args).map(|mut a| {
+        speciesandorphonfiltering(&mut a, locus, "motifs".to_string(), species, false, false)
+    }) {
         Some(a) => a?,
         None => {
             return Err(io::Error::new(
@@ -600,9 +612,9 @@ pub(crate) fn genesblast(
     locus: &Locus,
 ) -> io::Result<Vec<Blastmatch>> {
     let mut reader = getassemblyreader(args)?;
-    let name = NamedTempFile::with_suffix("genes_blast.txt")?;
-    let mut fastawriter = fasta::Writer::to_file(&name)?;
-    subject
+    let name = Filecrea::createtemp(None, Some("genes_blast.txt"))?;
+    let mut fastawriter = fasta::Writer::to_file(&name.getpath())?;
+    let count = subject
         .iter()
         .map(|f| {
             let elem = f
@@ -622,8 +634,12 @@ pub(crate) fn genesblast(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let reference = match downloadref(true).map(|(a, b)| {
-        speciesandorphonfiltering(&a, Some(locus), b, species, false, args.cacheerase)
+    if count.len() == 0 {
+        eprintln!("No genes found for this locus, skipped.");
+        return Ok(Vec::new());
+    }
+    let reference = match downloadref(true).map(|(mut a, b)| {
+        speciesandorphonfiltering(&mut a, Some(locus), b, species, false, args.cacheerase)
     }) {
         Some(a) => a?,
         None => {
@@ -633,7 +649,7 @@ pub(crate) fn genesblast(
             ));
         }
     };
-    let mut blast = match blastcommand(reference, Filecrea::from(name), Blastlevel::default()) {
+    let mut blast = match blastcommand(reference, name, Blastlevel::default()) {
         Ok(b) => b,
         Err(e) => {
             return Err(io::Error::new(ErrorKind::InvalidData, e));
@@ -690,7 +706,10 @@ where
     })
 }
 //if there is space, BLAST would cut the header and parsing would fail, we therefore regenerate a file for reference without this issue
-fn checknospaceinheader(reference: &mut Filecrea, _subject: &mut Filecrea) -> io::Result<()> {
+fn checknospaceinheaderandvalidseq(
+    reference: &mut Filecrea,
+    _subject: &mut Filecrea,
+) -> io::Result<()> {
     let refreader = fasta::Reader::from_file(reference.getpath())
         .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
     let haspaces = refreader
@@ -698,11 +717,15 @@ fn checknospaceinheader(reference: &mut Filecrea, _subject: &mut Filecrea) -> io
         .filter_map(Result::ok)
         .any(|f| f.desc().is_some()); //One sequence has a space because it has a description
     if haspaces {
-        let refnew = NamedTempFile::new()?;
-        let mut writer = fasta::Writer::to_file(&refnew)?;
+        let refnew = Filecrea::createtemp(None::<&Path>, None::<&Path>)?;
+        let mut writer = fasta::Writer::to_file(&refnew.getpath())?;
         let refreader = fasta::Reader::from_file(reference.getpath())
             .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
         for seq in refreader.records().filter_map(Result::ok) {
+            if let Err(e) = seq.check() {
+                eprintln!("Sequence {} has invalid sequence. Error is {}", seq.id(), e);
+                continue;
+            }
             writer.write(
                 &format!(
                     "{}{}",
@@ -713,20 +736,20 @@ fn checknospaceinheader(reference: &mut Filecrea, _subject: &mut Filecrea) -> io
                 seq.seq(),
             )?;
         }
-        *reference = Filecrea::Temp(refnew)
+        *reference = refnew;
     }
     Ok(())
 }
 pub(crate) fn blastcommand<T>(
-    mut reference: T,
-    mut subject: T,
+    reference: T,
+    subject: T,
     blastlevel: Blastlevel,
 ) -> io::Result<Vec<Blast>>
 where
     T: Into<Filecrea>,
 {
     let (mut reference, mut subject) = (reference.into(), subject.into());
-    checknospaceinheader(&mut reference, &mut subject)?;
+    checknospaceinheaderandvalidseq(&mut reference, &mut subject)?;
     let (refpath, subpath) = (reference.getpath(), subject.getpath());
     if !refpath.try_exists().unwrap_or(false) {
         return Err(io::Error::new(
@@ -742,8 +765,8 @@ where
     }
     let reference = &format!("{}", refpath.display());
     let subject = &format!("{}", subpath.display());
-    let output = NamedTempFile::new()?;
-    let output = &format!("{}", output.path().display());
+    let output = Filecrea::createtemp(None::<&Path>, None::<&Path>)?;
+    let output = &format!("{}", output.getpath().display());
     let command = Command::new("blastn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1096,7 +1119,7 @@ pub(crate) fn submit(
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, locus)?;
     let sequencefile = generatesequence(args, dir, locus)?;
-    let mut motifs = matchmotif(&sequencefile, realspecies, None)
+    let mut motifs = matchmotif(&sequencefile, realspecies, &args, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
@@ -1359,9 +1382,9 @@ pub(crate) fn browseropening() -> io::Result<()> {
         )),
     }
 }
-pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<NamedTempFile> {
-    let temp = tempfile::NamedTempFile::with_suffix_in("submission.tar.gz", dir)?;
-    let file = File::create(&temp)?;
+pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<Filecrea> {
+    let temp = Filecrea::createtemp(Some(dir), Some(Path::new("submission.tar.gz")))?;
+    let file = File::create(&temp.getpath())?;
     let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);
     tar.follow_symlinks(false);
@@ -1413,14 +1436,14 @@ pub(crate) fn preparesubmission(path: &Path, species: &Species, args: &Args) -> 
     );
     true
 }
-pub(crate) fn submission(token: &str, species: &Species, archive: NamedTempFile) -> io::Result<()> {
+pub(crate) fn submission(token: &str, species: &Species, archive: Filecrea) -> io::Result<()> {
     /* let multipart = reqwest::blocking::multipart::Form::new()
     .file("genelist", "submission/genelist.csv")?
     .file("sequences", "submission/sequences.txt")?
     .file("locuspos", "submission/locus.txt")?
     .text("type","submission")
     .file("locus", "submission/locus.bam")?; */
-    let file_size = archive.path().metadata()?.len();
+    let file_size = archive.getpath().metadata()?.len();
     let pb = ProgressBar::new(file_size);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
@@ -1430,7 +1453,7 @@ pub(crate) fn submission(token: &str, species: &Species, archive: NamedTempFile)
     );
 
     let progress_reader = ProgressReader {
-        reader: archive,
+        reader: archive.getfile()?,
         progress_bar: pb,
         total_bytes: file_size,
     };

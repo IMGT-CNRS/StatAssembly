@@ -9,7 +9,6 @@ Made by: Guilhem Zeitoun
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
 use regex::Regex;
-use tempfile::{NamedTempFile, TempPath};
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
 use crate::r#struct::AcceptedStatus::Rejected;
@@ -55,6 +54,8 @@ use std::{
 mod identification;
 mod r#struct;
 mod submissions;
+#[cfg(test)]
+mod test;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = "IMGT®";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
@@ -503,7 +504,7 @@ where
     }
     Ok(None)
 }
-fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<TempPath>> {
+fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>> {
     let mut finish: Vec<GeneInfos> = data
         .iter()
         .filter_map(|p| {
@@ -529,15 +530,12 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
         })
         .collect();
     checkandcorrectgenelistduplicate(&mut finish);
-    let (tempfile, genenamefile) = if tmp {
-        let tempfile = NamedTempFile::with_suffix_in("genelist_new.csv", env::temp_dir())?;
-        let i = tempfile.into_temp_path();
-        let p = i.to_path_buf();
-        (Some(i), p)
+    let genenamefile = if tmp {
+        Filecrea::createtemp(None, Some("genelist_new.csv"))?
     } else {
-        (None, args.outdir.join("genelist_new.csv"))
+        Filecrea::createfrompath(args.outdir.join("genelist_new.csv"))
     };
-    let genefile = File::create(&genenamefile)?;
+    let genefile = File::create(genenamefile.getpath())?;
     let mut csv = csv::WriterBuilder::new()
         .delimiter(b',')
         .has_headers(true)
@@ -553,8 +551,8 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
         }
     }
     csv.flush()?;
-    args.geneloc = Some(genenamefile.to_path_buf());
-    Ok(tempfile)
+    args.geneloc = Some(genenamefile.getpath().to_path_buf());
+    Ok(Some(genenamefile))
 }
 fn printnewloc(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
     let file = File::create(args.outdir.join("newloc.csv"))?;
@@ -2687,21 +2685,26 @@ pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
         .iter()
         .find(|f| !coveragewindow(mean).contains(&f.overlaps))
     {
-        OkStatus::new(
-            Rejected,
-            Some(format!(
-                "{} at position {} ({})",
-                *INVALIDCOVERAGE,
-                if let Some(b) = coveragewindow(mean).max()
-                    && a.overlaps > b
-                {
-                    "too high"
-                } else {
-                    "too low"
-                },
-                a.position.getobasedpos()
-            )),
-        )
+        match a {
+            a if a.overlaps < *coveragewindow(mean).start() => OkStatus::new(
+                Rejected,
+                Some(format!(
+                    "{} at position {} ({})",
+                    *INVALIDCOVERAGE,
+                    a.position.getobasedpos(),
+                    "too low",
+                )),
+            ),
+            _ => OkStatus::new(
+                Rejected,
+                Some(format!(
+                    "{} at position {} ({})",
+                    *INVALIDCOVERAGE,
+                    a.position.getobasedpos(),
+                    "too high",
+                )),
+            ),
+        }
     } else {
         OkStatus::new(AcceptedStatus::Accepted, None)
     }
@@ -2776,6 +2779,7 @@ where
                     if (p.position.getobasedpos() - loci.start.getobasedpos())
                         .rem_euclid(std::cmp::max(tenlines, 1))
                         == 0
+                        || p.position == loci.end
                     {
                         Some((
                             p.position.getobasedpos(),
@@ -2800,6 +2804,7 @@ where
                     if (p.position.getobasedpos() - loci.start.getobasedpos())
                         .rem_euclid(std::cmp::max(tenlines, 1))
                         == 0
+                        || p.position == loci.end
                     {
                         Some((p.position.getobasedpos(), *coveragewindows.end()))
                     } else {

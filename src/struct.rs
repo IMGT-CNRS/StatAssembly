@@ -21,7 +21,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind::{self, InvalidInput};
-use std::ops::{Not, RangeInclusive};
+use std::ops::{Deref, Not, RangeInclusive};
 use std::path::Path;
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
@@ -73,7 +73,7 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) force: bool,
     /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 10 and 15 minutes.
-    #[arg(long, conflicts_with = "meancoverage", default_value_t = 0)]
+    #[arg(long, default_value_t = 0)]
     pub(crate) extractedlength: u64,
     /// Params file if not default and already calculated, else will be calculated at startup (10-15 minutes) if not stored already.
     #[arg(long)]
@@ -157,9 +157,32 @@ impl Filecrea {
             Self::Plain(b) => b.as_path(),
         }
     }
+    pub(crate) fn getfile(&self) -> io::Result<File> {
+        let a = self.getpath();
+        File::open(a)
+    }
     #[allow(unused)]
     pub(crate) fn istemp(&self) -> bool {
         matches!(self, Self::Temp(_))
+    }
+    // Origin or/and suffix
+    pub(crate) fn createtemp<T>(origin: Option<T>, suffix: Option<T>) -> io::Result<Self>
+    where
+        T: AsRef<Path>,
+    {
+        let file = match (origin, suffix) {
+            (Some(d), Some(s)) => NamedTempFile::with_suffix_in(s.as_ref(), d),
+            (Some(d), None) => NamedTempFile::new_in(d),
+            (None, Some(s)) => NamedTempFile::with_suffix(s.as_ref()),
+            (None, None) => NamedTempFile::new(),
+        }?;
+        Ok(Self::Temp(file))
+    }
+    pub(crate) fn createfrompath<T>(path: T) -> Self
+    where
+        T: Into<PathBuf>,
+    {
+        Self::Plain(path.into())
     }
 }
 impl From<PathBuf> for Filecrea {
@@ -183,6 +206,11 @@ impl Drop for Filecrea {
         }
     }
 }
+impl Into<PathBuf> for Filecrea {
+    fn into(self) -> PathBuf {
+        self.getpath().to_path_buf()
+    }
+}
 #[derive(Debug, Deserialize)]
 pub(crate) struct GitLabTag {
     pub(crate) name: String,
@@ -194,7 +222,7 @@ pub(crate) enum Command {
     #[default]
     Full,
 }
-fn checktoken(s: &str) -> Result<String, String> {
+pub(crate) fn checktoken(s: &str) -> Result<String, String> {
     let s = s.trim();
     if !s.is_ascii() || s.len() != 24 || !s.chars().any(|p| p.is_ascii_alphanumeric()) {
         Err(String::from(
@@ -586,11 +614,11 @@ impl Display for OkStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} {}",
+            "{}{}",
             self.status,
             self.motif
                 .as_ref()
-                .map_or(String::new(), |a| format!("because {}", a))
+                .map_or(String::new(), |a| format!(" because {}", a))
         )
     }
 }
@@ -1796,7 +1824,7 @@ pub trait GenesList {
                 ),
             };
             self.alterstatus(info);
-        } else if reads100m >= MATCHREADS {
+        } else if reads100m < MATCHREADS {
             let m = OkStatus::new(
                 AcceptedStatus::Rejected,
                 Some(NOTENOUGHMATCHREADS.to_string()),
