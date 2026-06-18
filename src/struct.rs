@@ -250,9 +250,11 @@ pub(crate) struct LocusHaplo {
     haplo: Haplotype,
 }
 impl LocusHaplo {
+    #[allow(unused)]
     fn getlocus(&self) -> &Locus {
         &self.locus
     }
+    #[allow(unused)]
     fn gethaplo(&self) -> &Haplotype {
         &self.haplo
     }
