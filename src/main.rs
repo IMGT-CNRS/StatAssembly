@@ -988,7 +988,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut locushashresult: HashMap<LocusHaplo, Vec<Blastmatch>> = HashMap::new();
+    let mut locushashresult: HashMap<LocusInfos, Vec<Blastmatch>> = HashMap::new();
     for locus in grouped.iter_mut() {
         let haplotype = locus.len();
         let nlocus = locus.clone();
@@ -1119,7 +1119,6 @@ fn main() -> ExitCode {
         let mut lock = stdout().lock();
         //For each individual haplotype inside locus
         for loci in locus.iter_mut() {
-            let locushap = LocusHaplo::new(loci.locus.clone(), loci.haplotype.clone());
             let mut reader = match getreaderoffile(&args) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1371,7 +1370,7 @@ fn main() -> ExitCode {
                         }
                     })
                     .collect();
-                locushashresult.insert(locushap.clone(), element);
+                locushashresult.insert(loci.clone(), element);
             }
             if args.geneloc.is_some() {
                 println!("Gene list starting!");
@@ -1409,7 +1408,7 @@ fn main() -> ExitCode {
                                     if loci.status.getstatus().isvalid()
                                         && b.iter().any(|f| f.status.getstatus().isvalid())
                                     {
-                                        locushashresult.insert(locushap.clone(), blast);
+                                        locushashresult.insert(loci.clone(), blast);
                                     }
                                 }
                                 Err(e) => {
@@ -1477,7 +1476,7 @@ fn main() -> ExitCode {
                     if loci.status.getstatus().isvalid()
                         && result.iter().any(|f| f.status.getstatus().isvalid())
                     {
-                        locushashresult.insert(locushap.clone(), data);
+                        locushashresult.insert(loci.clone(), data);
                     }
                 } else if !args.nosubmit {
                     eprintln!("No assembly to check gene list.");
@@ -1565,7 +1564,7 @@ where
 fn printvalidatedalleles<T>(
     args: &Args,
     release: Option<T>,
-    locushash: &HashMap<LocusHaplo, Vec<Blastmatch>>,
+    locushash: &HashMap<LocusInfos, Vec<Blastmatch>>,
 ) -> io::Result<()>
 where
     T: AsRef<str>,
@@ -1595,12 +1594,28 @@ where
     for (locus, elem) in locushash {
         for matches in elem {
             let name = matches.getallelename();
-            let (start, end) = matches.getpos();
+            let (subject, start, end, strand) = if let Ok(r) = Name::from_str(&matches.sseqid) //Check if it is a full composite or not
+                && let Some(a) = r.numacc && let Some((start,end,strand)) = locus.positioninlocus(&Position::new(false, matches.sstart.try_into().unwrap_or_default()), &Position::new(false,matches.send.try_into().unwrap_or_default()), &matches.complement)
+            {
+                (a, start, end, strand)
+            } else {
+                (
+                    matches.sseqid.clone(),
+                    Position::new(false, matches.sstart.try_into().unwrap_or_default()),
+                    Position::new(false, matches.send.try_into().unwrap_or_default()),
+                    matches.complement.clone(),
+                )
+            };
             csv.write_record(&[
                 name.to_string(),
-                format!("{}-{}", start, end),
-                matches.sseqid.to_string(),
-                locus.to_string(),
+                format!(
+                    "{}-{}{}",
+                    start.getobasedpos(),
+                    end.getobasedpos(),
+                    if strand.isrev() { "/rc" } else { "" }
+                ),
+                subject,
+                LocusHaplo::from(locus.clone()).to_string(),
                 matches.complement.to_string(),
                 name.to_string(),
                 matches.getidentity().to_string(),

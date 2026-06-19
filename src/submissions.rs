@@ -622,7 +622,7 @@ pub(crate) fn genesblast(
                 .map_err(|p| io::Error::new(ErrorKind::InvalidInput, p));
             let bool = elem
                 .as_ref()
-                .is_ok_and(|p| f.addtosequence(p, &mut fastawriter).is_err());
+                .is_ok_and(|p| f.addtosequence(p, &mut fastawriter, species).is_err());
 
             if bool {
                 Err(io::Error::new(
@@ -1230,7 +1230,7 @@ pub(crate) fn askforsubmission(
     realspecies: &Species,
     locus: &[LocusInfos],
     args: &Args,
-    infos: &HashMap<LocusHaplo, Vec<Blastmatch>>,
+    infos: &HashMap<LocusInfos, Vec<Blastmatch>>,
 ) -> io::Result<()> {
     let quest = REQUESTCLIENT
         .get(SUBMISSIONLINK.as_str())

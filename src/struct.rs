@@ -249,6 +249,11 @@ pub(crate) struct LocusHaplo {
     locus: Locus,
     haplo: Haplotype,
 }
+impl From<LocusInfos> for LocusHaplo {
+    fn from(value: LocusInfos) -> Self {
+        LocusHaplo::new(value.locus, value.haplotype)
+    }
+}
 impl LocusHaplo {
     #[allow(unused)]
     fn getlocus(&self) -> &Locus {
@@ -1519,23 +1524,25 @@ impl GeneInfos {
             status: OkStatus::default(),
         }
     }
-    pub(crate) fn addtosequence<T>(&self, seq: T, fasta: &mut fasta::Writer<File>) -> io::Result<()>
+    pub(crate) fn addtosequence<T>(
+        &self,
+        seq: T,
+        fasta: &mut fasta::Writer<File>,
+        spec: &Species,
+    ) -> io::Result<()>
     where
         T: AsRef<[u8]>,
     {
-        fasta.write(
-            &format!(
-                "GENE|{}|{}|{}|{}..{}{}",
-                self.getgene(),
-                "species",
-                self.getchromosome(),
-                self.getstart().getobasedpos(),
-                self.getend().getobasedpos(),
-                if self.getstrand().isrev() { "/rc" } else { "" }
-            ),
+        let gene = Name::new(
             None,
-            seq.as_ref(),
-        )
+            self.getgene().to_string(),
+            spec.safestring().to_string(),
+            Some(self.getchromosome().to_string()),
+            *self.getstart(),
+            *self.getend(),
+            self.getstrand().clone(),
+        );
+        fasta.write(&gene.to_string(), None, seq.as_ref())
     }
     pub(crate) fn extractsequence(
         &self,
@@ -1844,7 +1851,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) strand: Strand,
     pub(crate) start: Position,
     pub(crate) end: Position,
-    pub(crate) length: i64,
+    pub(crate) length: u64,
     pub(crate) readscoverage: f32,
     pub(crate) reads: usize,
     pub(crate) matchpos: String,
@@ -1936,10 +1943,10 @@ impl GeneInfosFinish {
         coveragex: usize,
     ) -> Self {
         GeneInfosFinish {
-            gene: gene.gene,
-            chromosome: gene.chromosome,
-            strand: gene.strand,
-            length: gene.end.length(&gene.start),
+            gene: gene.gene.clone(),
+            chromosome: gene.chromosome.clone(),
+            strand: gene.strand.clone(),
+            length: gene.getlength().try_into().unwrap_or_default(),
             start: gene.start,
             end: gene.end,
             reads,
