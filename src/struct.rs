@@ -1,6 +1,12 @@
 use bio::io::fasta;
 use indicatif::ProgressBar;
 use itertools::Itertools;
+use plotters::coord::Shift;
+use plotters::drawing::IntoDrawingArea;
+use plotters::prelude::{
+    AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoSegmentedCoord, PathElement,
+    SVGBackend, full_palette,
+};
 use serde::ser::SerializeTupleStruct;
 use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
 use tempfile::NamedTempFile;
@@ -19,12 +25,13 @@ use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fs;
 use std::io::ErrorKind::{self, InvalidInput};
-use std::ops::{Deref, Not, RangeInclusive};
+use std::num::Saturating;
+use std::ops::{Add, Deref, Not, RangeInclusive, Sub};
 use std::path::Path;
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
+use std::{env, fs};
 use strum_macros::EnumIter;
 #[derive(Parser, Debug)]
 #[clap(
@@ -211,6 +218,48 @@ impl Into<PathBuf> for Filecrea {
         self.getpath().to_path_buf()
     }
 }
+pub(crate) enum Image<'a> {
+    Png(DrawingArea<BitMapBackend<'a>, Shift>),
+    Svg(DrawingArea<SVGBackend<'a>, Shift>),
+}
+impl<'a> Image<'a> {
+    pub fn getsvg(&self) -> Option<&DrawingArea<SVGBackend<'a>, Shift>> {
+        match self {
+            Self::Svg(a) => Some(a),
+            _ => None,
+        }
+    }
+    pub fn getpng(&self) -> Option<&DrawingArea<BitMapBackend<'a>, Shift>> {
+        match self {
+            Self::Png(a) => Some(a),
+            _ => None,
+        }
+    }
+}
+pub(crate) enum ImageType {
+    Svg((PathBuf, (u32, u32))),
+    Png((PathBuf, (u32, u32))),
+}
+impl ImageType {
+    pub fn newsvg(svg: PathBuf, size: (u32, u32)) -> Self {
+        Self::Svg((svg, size))
+    }
+    pub fn newpng(png: PathBuf, size: (u32, u32)) -> Self {
+        Self::Png((png, size))
+    }
+    pub fn get(&self) -> &Self {
+        &self
+    }
+    pub fn ispng(&self) -> bool {
+        matches!(self, Self::Png(_))
+    }
+    pub fn getpath(&self) -> &Path {
+        match self {
+            Self::Svg(a) => &a.0,
+            Self::Png(a) => &a.0,
+        }
+    }
+}
 #[derive(Debug, Deserialize)]
 pub(crate) struct GitLabTag {
     pub(crate) name: String,
@@ -293,7 +342,12 @@ pub(crate) fn safestring<'a, T>(val: T) -> Cow<'a, str>
 where
     T: Into<Cow<'a, str>>,
 {
-    Cow::Owned(val.into().replace(" ", "_").replace("/", "-"))
+    Cow::Owned(
+        val.into()
+            .replace(" ", "_")
+            .replace("/", "-")
+            .replace(",", "_"),
+    )
 }
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Default, Eq, Hash)]
 pub(crate) enum Blastlevel {
@@ -511,7 +565,6 @@ impl FromStr for Name {
                     (numacc, a, b, None, g, h)
                 }
                 _ => {
-                    eprintln!("String is {}", s);
                     return Err("Invalid formatting".to_string());
                 }
             }
@@ -816,6 +869,36 @@ impl PartialOrd for Position {
 impl Ord for Position {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.getzbasedpos().cmp(&other.getzbasedpos())
+    }
+}
+impl Add for Position {
+    type Output = Position;
+    fn add(self, rhs: Self) -> Self::Output {
+        match self.iszbased() {
+            true => Position::new(
+                self.iszbased(),
+                self.getzbasedpos().saturating_add(rhs.getzbasedpos()),
+            ),
+            false => Position::new(
+                self.iszbased(),
+                self.getobasedpos().saturating_add(rhs.getobasedpos()),
+            ),
+        }
+    }
+}
+impl Sub for Position {
+    type Output = Position;
+    fn sub(self, rhs: Self) -> Self::Output {
+        match self.iszbased() {
+            true => Position::new(
+                self.iszbased(),
+                self.getzbasedpos().saturating_sub(rhs.getzbasedpos()),
+            ),
+            false => Position::new(
+                self.iszbased(),
+                self.getobasedpos().saturating_sub(rhs.getobasedpos()),
+            ),
+        }
     }
 }
 ///Serialize as a 1-based position
@@ -1534,16 +1617,70 @@ impl GeneInfos {
         T: AsRef<[u8]>,
     {
         let gene = Name::new(
-            None,
+            Some(self.getchromosome().to_string()),
             self.getgene().to_string(),
             spec.safestring().to_string(),
-            Some(self.getchromosome().to_string()),
+            self.getgene().exon.clone(),
             *self.getstart(),
             *self.getend(),
             self.getstrand().clone(),
         );
         fasta.write(&gene.to_string(), None, seq.as_ref())
     }
+    /*
+    * let (imagereadtop, imagereadbottom, imagematchtop, imagematchbottom) =
+        match (haplotypebool, readpath, mismatchpath) {
+            (true, ImageType::Png((a, rsize)), ImageType::Png((b, lsize))) => {
+                let (rsplit, rsplit2) = BitMapBackend::new(a.as_path(), rsize)
+                    .into_drawing_area()
+                    .split_vertically(50);
+                let (lsplit, lsplit2) = BitMapBackend::new(b.as_path(), lsize)
+                    .into_drawing_area()
+                    .split_vertically(50);
+                (
+                    Image::Png(rsplit),
+                    Some(Image::Png(rsplit2)),
+                    Image::Png(lsplit),
+                    Some(Image::Png(lsplit2)),
+                )
+            }
+            (false, ImageType::Png((a, rsize)), ImageType::Png((b, lsize))) => (
+                Image::Png(BitMapBackend::new(&a, rsize).into_drawing_area()),
+                None,
+                Image::Png(BitMapBackend::new(&b, lsize).into_drawing_area()),
+                None,
+            ),
+            (true, ImageType::Svg((a, rsize)), ImageType::Svg((b, lsize))) => {
+                let (rsplit, rsplit2) = SVGBackend::new(&a, rsize)
+                    .into_drawing_area()
+                    .split_vertically(50);
+                let (lsplit, lsplit2) = SVGBackend::new(&b, lsize)
+                    .into_drawing_area()
+                    .split_vertically(50);
+                (
+                    Image::Svg(rsplit),
+                    Some(Image::Svg(rsplit2)),
+                    Image::Svg(lsplit),
+                    Some(Image::Svg(lsplit2)),
+                )
+            }
+            (false, ImageType::Svg((a, rsize)), ImageType::Svg((b, lsize))) => (
+                Image::Svg(SVGBackend::new(&a, rsize).into_drawing_area()),
+                None,
+                Image::Svg(SVGBackend::new(&b, lsize).into_drawing_area()),
+                None,
+            ),
+            _ => unreachable!("Error in format"),
+        };
+    infos.insert(
+        (keys, "readresult".to_string()),
+        (imagereadtop, imagereadbottom),
+    );
+    infos.insert(
+        (keys, "mismatchresult".to_string()),
+        (imagematchtop, imagematchbottom),
+    );
+    */
     pub(crate) fn extractsequence(
         &self,
         fasta: &mut fasta::IndexedReader<File>,
@@ -1628,6 +1765,30 @@ impl LocusInfos {
     pub(crate) fn setstatus(&mut self, mean: u64, pos: &BTreeMap<Position, HashMapinfo>) {
         self.status = locusisokay(mean, &pos.values().collect_vec())
     }
+    //Get position for alignment
+    pub(crate) fn fullposition(&self, record: &Blastmatch) -> Option<(Position, Position, Strand)> {
+        let (start, end) = if self.complement.isrev() {
+            let end = record.qseqid.posend - Position::new(true, record.sstart.try_into().ok()?);
+            let start = record.qseqid.posend - Position::new(true, record.send.try_into().ok()?);
+            (start, end)
+        } else {
+            let start =
+                record.qseqid.posstart + Position::new(true, record.sstart.try_into().ok()?);
+            let end = record.qseqid.posstart - Position::new(true, record.send.try_into().ok()?);
+            (start, end)
+        };
+        let complement = record.qseqid.strand.isrev() ^ record.getstrand().isrev();
+        Some((
+            start,
+            end,
+            if complement {
+                Strand::Minus
+            } else {
+                Strand::Plus
+            },
+        ))
+    }
+    //From local position
     pub(crate) fn locusinposition(
         &self,
         newstart: &Position,
@@ -1661,6 +1822,7 @@ impl LocusInfos {
             },
         ))
     }
+    //Get global position
     pub(crate) fn positioninlocus(
         &self,
         start: &Position,

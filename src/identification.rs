@@ -163,20 +163,23 @@ pub(crate) fn locusallposition(
     subject: &Path,
     species: &Species,
     args: &Args,
-) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>)> {
+) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>, String)> {
     let infos = if args.nobornes {
         None
     } else {
         downloadbornes(&args)
     };
-    let (bornespath, referencepath) = match (
+    let (bornespath, referencepath, releaseversion) = match (
         infos,
-        downloadref(true).map(|(mut a, b)| {
-            speciesandorphonfiltering(&mut a, None, b, species, true, args.cacheerase)
+        downloadref(true, &None).map(|(mut a, b)| {
+            (
+                speciesandorphonfiltering(&mut a, None, b.clone(), species, true, args.cacheerase),
+                b,
+            )
         }),
     ) {
-        (Some(a), Some(b)) => (Some(a), b?),
-        (None, Some(b)) if args.nobornes => (None, b?),
+        (Some(a), Some((b, c))) => (Some(a), b?, c),
+        (None, Some((b, c))) if args.nobornes => (None, b?, c),
         (None, ..) if !args.nobornes => {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -321,7 +324,7 @@ pub(crate) fn locusallposition(
             printpotentialbornes(bornes2, args)?;
         }
     }
-    range.map(|f| (f, data))
+    range.map(|f| (f, data, releaseversion))
 }
 pub(crate) fn retainbestmatch(blast: &mut Vec<Blast>) {
     blast.retain(|f| f.length * 100 / f.qlen > 80 && f.pident >= 75.0);
@@ -612,13 +615,20 @@ pub(crate) fn sendresultcompressed(
         Err(e) => Err(format!("Error getting URL: {e}").to_string()),
     }
 }
-pub(crate) fn downloadref(allowdownload: bool) -> Option<(Filecrea, String)> {
-    println!("Checking reference sequence from IMGT/GENE-DB");
-    let releaseversion = match sendresult(&REQUESTCLIENT, RELEASELINK.as_str()) {
-        Ok(e) => e,
-        Err(e) => {
-            println!("Release fetched failed because: {e}");
-            return None;
+pub(crate) fn downloadref(
+    allowdownload: bool,
+    releaseversion: &Option<String>,
+) -> Option<(Filecrea, String)> {
+    let releaseversion = if let Some(r) = releaseversion {
+        r.to_string()
+    } else {
+        println!("Checking reference sequence from IMGT/GENE-DB");
+        match sendresult(&REQUESTCLIENT, RELEASELINK.as_str()) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("Release fetched failed because: {e}");
+                return None;
+            }
         }
     };
     if !allowdownload {

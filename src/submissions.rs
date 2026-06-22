@@ -3,10 +3,11 @@
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
     Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusHaplo,
-    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand,
+    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
 };
 use crate::{PHYLUMLIMIT, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
+use extended_htslib::bam::index::Type;
 use extended_htslib::bam::{self, Read};
 use flate2::{Compression, write::GzEncoder};
 use indicatif::ProgressBar;
@@ -21,6 +22,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::IsTerminal;
 use std::str::FromStr;
+use std::thread::available_parallelism;
 use std::{
     env::{self},
     error::Error,
@@ -608,12 +610,13 @@ pub(crate) fn matchmotif(
 pub(crate) fn genesblast(
     subject: &[GeneInfos],
     args: &Args,
+    releaseversion: &Option<String>,
     species: &Species,
     locus: &Locus,
-) -> io::Result<Vec<Blastmatch>> {
-    let mut reader = getassemblyreader(args)?;
+) -> io::Result<(Vec<Blastmatch>, Option<String>)> {
     let name = Filecrea::createtemp(None, Some("genes_blast.txt"))?;
     let mut fastawriter = fasta::Writer::to_file(&name.getpath())?;
+    let mut reader = getassemblyreader(args)?;
     let count = subject
         .iter()
         .map(|f| {
@@ -634,14 +637,25 @@ pub(crate) fn genesblast(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
+    fastawriter.flush()?;
     if count.len() == 0 {
         eprintln!("No genes found for this locus, skipped.");
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
-    let reference = match downloadref(true).map(|(mut a, b)| {
-        speciesandorphonfiltering(&mut a, Some(locus), b, species, false, args.cacheerase)
+    let (reference, version) = match downloadref(true, releaseversion).map(|(mut a, b)| {
+        (
+            speciesandorphonfiltering(
+                &mut a,
+                Some(locus),
+                b.clone(),
+                species,
+                false,
+                args.cacheerase,
+            ),
+            b,
+        )
     }) {
-        Some(a) => a?,
+        Some((a, b)) => (a?, b),
         None => {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -666,7 +680,7 @@ pub(crate) fn genesblast(
         }
     });
     statusblastvs(&mut blast);
-    Ok(blast.into_iter().map(|f| f.into()).collect())
+    Ok((blast.into_iter().map(|f| f.into()).collect(), Some(version)))
 }
 /*
 pub(crate) fn locuspos(
@@ -712,10 +726,9 @@ fn checknospaceinheaderandvalidseq(
 ) -> io::Result<()> {
     let refreader = fasta::Reader::from_file(reference.getpath())
         .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
-    let haspaces = refreader
-        .records()
-        .filter_map(Result::ok)
-        .any(|f| f.desc().is_some()); //One sequence has a space because it has a description
+    let haspaces = refreader.records().filter_map(Result::ok).any(|f| {
+        f.desc().is_some() || f.id().contains(',') || f.desc().is_some_and(|f| f.contains(','))
+    }); //One sequence has a space because it has a description
     if haspaces {
         let refnew = Filecrea::createtemp(None::<&Path>, None::<&Path>)?;
         let mut writer = fasta::Writer::to_file(&refnew.getpath())?;
@@ -729,8 +742,9 @@ fn checknospaceinheaderandvalidseq(
             writer.write(
                 &format!(
                     "{}{}",
-                    seq.id(),
-                    seq.desc().map_or(String::new(), |d| format!("_{d}"))
+                    safestring(seq.id()),
+                    seq.desc()
+                        .map_or(String::new(), |d| format!("_{}", safestring(d)))
                 ),
                 None,
                 seq.seq(),
@@ -1117,7 +1131,7 @@ pub(crate) fn submit(
     csv.flush()
         .map_err(|p| format!("Error serializing locus position: {p}"))?; */
     let lightbam = dir.join("outlight.bam");
-    generatelightbam(args, &lightbam, locus)?;
+    generatelightbam(args, &lightbam, None, locus)?;
     let sequencefile = generatesequence(args, dir, locus)?;
     let mut motifs = matchmotif(&sequencefile, realspecies, &args, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
@@ -1292,12 +1306,12 @@ pub(crate) fn generatesequence(
 ) -> Result<PathBuf, String> {
     let sequencefile = dir.join("sequence.fasta");
     let mut fastawriter = fasta::Writer::to_file(&sequencefile).map_err(|f| format!("{f}"))?;
+    let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
+        None => return Err("No assembly provided.".to_string()),
+        Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
+        Some(Ok(b)) => b,
+    };
     for list in locus.iter() {
-        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
-            None => return Err("No assembly provided.".to_string()),
-            Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
-            Some(Ok(b)) => b,
-        };
         let seq = list
             .extractsequence(&mut assembly)
             .unwrap_or("Sequence is unavailable".to_string());
@@ -1321,11 +1335,13 @@ pub(crate) fn generatesequence(
                 )
             })?;
     }
+    fastawriter.flush().map_err(|e| e.to_string())?;
     Ok(sequencefile)
 }
 pub(crate) fn generatelightbam(
     args: &Args,
     light: &Path,
+    lightindex: Option<&Path>,
     locus: &[LocusInfos],
 ) -> Result<(), String> {
     println!("Generating small BAM for submission");
@@ -1334,38 +1350,53 @@ pub(crate) fn generatelightbam(
     } else {
         return Err("Cannot access BAM file for light bam.".to_string());
     };
-    let mut writer = if let Ok(files) = bam::Writer::from_path(
-        light,
-        &bam::Header::from_template(bam.header()),
-        bam::Format::Bam,
-    ) {
-        files
-    } else {
-        let file = light.display();
-        return Err(format!("Cannot create file {file} for light bam."));
-    };
-    for f in locus.iter() {
-        let mut bam = if let Ok(r) = getreaderoffile(args) {
-            r
+    {
+        let mut writer = if let Ok(files) = bam::Writer::from_path(
+            light,
+            &bam::Header::from_template(bam.header()),
+            bam::Format::Bam,
+        ) {
+            files
         } else {
-            return Err("Cannot access BAM file for light bam.".to_string());
+            let file = light.display();
+            return Err(format!("Cannot create file {file} for light bam."));
         };
-        if bam
-            .fetch((
-                f.contig.as_bytes(),
-                f.start.getzbasedpos(),
-                f.end.getzbasedpos().saturating_add(1),
-            ))
-            .is_err()
-        {
-            return Err("Cannot read BAM file region for light bam.".to_string());
-        }
-        for read in bam.rc_records().filter_map(Result::ok) {
-            if writer.write(&read).is_err() {
-                return Err("Cannot read BAM file region for light bam.".to_string());
+        for f in locus.iter() {
+            let mut bam = if let Ok(r) = getreaderoffile(args) {
+                r
+            } else {
+                return Err("Cannot access BAM file for light bam.".to_string());
             };
+            if bam
+                .fetch((
+                    f.contig.as_bytes(),
+                    f.start.getzbasedpos(),
+                    f.end.getzbasedpos().saturating_add(1),
+                ))
+                .is_err()
+            {
+                return Err("Cannot read BAM file region for light bam.".to_string());
+            }
+            for read in bam.rc_records().filter_map(Result::ok) {
+                if writer.write(&read).is_err() {
+                    return Err("Cannot read BAM file region for light bam.".to_string());
+                };
+            }
         }
     }
+    //Drop writer else there is an issue when making index
+    println!("Building index");
+    bam::index::build(
+        light,
+        lightindex,
+        Type::Csi(2_u32.pow(14)),
+        available_parallelism()
+            .map(|a| a.get())
+            .unwrap_or(1)
+            .try_into()
+            .unwrap_or(1),
+    )
+    .map_err(|e| return format!("Cannot build index. Error is {}", e))?;
     Ok(())
 }
 pub(crate) fn browseropening() -> io::Result<()> {
