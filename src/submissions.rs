@@ -847,6 +847,7 @@ where
     //let _ = fs::remove_file(output);
     Ok(result)
 }
+/// Returns rank, name and id
 pub(crate) fn getspeciesfromncbi<T>(
     client: &reqwest::blocking::Client,
     species: &T,
@@ -992,7 +993,7 @@ where
             if rank.eq_ignore_ascii_case("species") || rank.eq_ignore_ascii_case("subspecies") =>
         {
             Err(Box::new(io::Error::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::Unsupported,
                 "Species is not a jawed vertebrate.",
             )))
         }

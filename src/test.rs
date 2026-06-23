@@ -1,11 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, thread::sleep, time::Duration};
 
     use crate::{
-        extractgenelist, genelist, generategeneinfos, locusposparser,
-        r#struct::{Args, Command, Species},
-        submissions::{checkifblastpresent, generatelightbam},
+        extractgenelist, genelist, generategeneinfos,
+        identification::{sendresult, sendresultcompressed},
+        locusposparser,
+        r#struct::{Args, Command, Species, SpeciesError},
+        submissions::{
+            BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, generatelightbam,
+            getspeciesfromncbi,
+        },
     };
     use clap::Parser;
     use extended_htslib::bam::{self, Read};
@@ -15,6 +20,50 @@ mod tests {
     #[test]
     fn checkblast() {
         assert!(checkifblastpresent())
+    }
+    #[test]
+    #[allow(non_snake_case)]
+    fn checkIMGTservers() {
+        assert!(
+            sendresult(&REQUESTCLIENT, &RELEASELINK).is_ok(),
+            "Error with release link"
+        );
+        assert!(
+            sendresultcompressed(&REQUESTCLIENT, &BORNESLINK).is_ok(),
+            "Error with bornes link"
+        );
+    }
+    #[test]
+    fn checkspecies() {
+        let human = Species::new("Homo sapiens").unwrap();
+        assert_eq!(human.ischecked(), true, "Species could not be validated");
+        assert_eq!(human.getid(), Some(9606), "Species taxon is invalid");
+        assert!(
+            human.getrank().eq_ignore_ascii_case("species"),
+            "Species has not a valid rank"
+        );
+        assert!(
+            human.getname().eq_ignore_ascii_case("Homo sapiens"),
+            "Homo sapiens is not valid"
+        );
+        sleep(Duration::new(3, 0)); //Sleep for NCBI
+        let dog = Species::new("dog").unwrap();
+        assert_eq!(dog.ischecked(), true, "Species could not be validated");
+        assert_eq!(dog.getid(), Some(9615), "Species taxon is invalid");
+        assert!(
+            dog.getrank().eq_ignore_ascii_case("subspecies"),
+            "Subspecies has not a valid rank"
+        );
+        assert!(
+            dog.getname().eq_ignore_ascii_case("Canis lupus familiaris"),
+            "Dog is not valid"
+        );
+        sleep(Duration::new(3, 0)); //Sleep for NCBI
+        let lamprey = Species::new("least brook lamprey");
+        assert!(
+            matches!(lamprey, Err(SpeciesError::Blocked)),
+            "Lamprey should be blocked"
+        );
     }
     #[test]
     fn testlocuspositiononlyandbam() {
@@ -48,8 +97,12 @@ mod tests {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
         };
+        eprintln!(
+            "Data is {:?}",
+            result.iter().map(|a| (&a.locus, &a.haplotype, &a.status))
+        );
         assert!(
-            result.iter().all(|f| !f.status.status.isvalid()),
+            result.iter().all(|f| f.status.status.isvalid()),
             "One locus is not valid"
         );
         generatelightbam(
@@ -108,7 +161,6 @@ mod tests {
             .map_err(|f| f.to_string())
             .unwrap();
         let spec = Species::new(&args4.species).unwrap();
-        println!("Species is {}", spec);
         let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,

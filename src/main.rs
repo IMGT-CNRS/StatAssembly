@@ -925,7 +925,7 @@ fn main() -> ExitCode {
     let speciesblast = match Species::new(&args.species) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("Species {} has failed: {e}", &args.species);
             return ExitCode::FAILURE;
         }
     };

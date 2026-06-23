@@ -23,8 +23,10 @@ use crate::submissions::{
 use crate::{MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO, locusisokay};
 use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
+use std::backtrace::BacktraceStatus::Unsupported;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fmt::Error;
 use std::io::ErrorKind::{self, InvalidInput};
 use std::num::Saturating;
 use std::ops::{Add, Deref, Not, RangeInclusive, Sub};
@@ -376,6 +378,20 @@ impl Blastlevel {
         }
     }
 }
+#[derive(Clone, Debug)]
+pub(crate) enum SpeciesError {
+    Invalid(String),
+    Blocked,
+}
+impl Display for SpeciesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(a) => write!(f, "Invalid: {}", a),
+            Self::Blocked => write!(f, "Species is not a jawed vertebrate"),
+        }
+    }
+}
+impl std::error::Error for SpeciesError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Species {
     rank: String,
@@ -398,18 +414,20 @@ impl Species {
     pub(crate) fn getrank(&self) -> &str {
         &self.rank
     }
-    pub(crate) fn new<T>(species: T) -> Result<Self, String>
+    pub(crate) fn new<T>(species: T) -> Result<Self, SpeciesError>
     where
         T: AsRef<str>,
     {
         let (rank, text, id) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
             Ok((rank, b, id)) => (rank, b, Some(id)),
             Err(e) => match e.downcast_ref::<io::Error>() {
+                Some(a) if a.kind() == ErrorKind::Unsupported => {
+                    return Err(SpeciesError::Blocked);
+                }
                 Some(b) if b.kind() == InvalidInput => {
-                    return Err(format!(
-                        "The following error has occured with your species: {}. Please change: {b}",
-                        species.as_ref()
-                    ));
+                    return Err(SpeciesError::Invalid(format!(
+                        "Invalid species. Error is {b}"
+                    )));
                 }
                 Some(_) => {
                     eprintln!("NCBI unavailable, your species won't be checked.");

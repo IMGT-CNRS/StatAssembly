@@ -556,17 +556,22 @@ pub(crate) fn sendresultcompressed(
     match request.get(url).send() {
         Ok(e) => {
             if e.status() == StatusCode::OK {
+                let mut buf = Vec::new();
+                let (contentlength, headers) = (e.content_length().clone(), e.headers().clone());
+                let stream = e.bytes().map_err(|e| e.to_string())?;
                 let total_size = match (
-                    e.content_length(),
-                    e.headers().get(header::CONTENT_LENGTH).map(|a| {
+                    contentlength,
+                    headers.get(header::CONTENT_LENGTH).map(|a| {
                         a.to_str()
                             .map_err(|_| format!("Error reading headers"))
                             .map(|a| a.parse::<u64>())
                             .map_err(|_| format!("Error reading headers"))
                     }),
+                    stream.len(),
                 ) {
-                    (Some(a), _) => a,
-                    (_, Some(Ok(Ok(b)))) => b,
+                    (Some(a), ..) => a,
+                    (_, Some(Ok(Ok(b))), _) => b,
+                    (.., c) if let Ok(s) = c.try_into() => s,
                     _ => 0,
                 };
                 let pb = ProgressBar::new(total_size);
@@ -576,8 +581,6 @@ pub(crate) fn sendresultcompressed(
                                     .map_err(|b| format!("issue with progress bar: {b}"))?
                                     .progress_chars("#>-")
                             );
-                let mut buf = Vec::new();
-                let stream = e.bytes().map_err(|e| e.to_string())?;
                 let mut downloaded = 0;
                 // Read the stream in chunks
                 let d = Cursor::new(stream);
