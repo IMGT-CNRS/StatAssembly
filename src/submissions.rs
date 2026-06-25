@@ -2,10 +2,10 @@
 #![deny(clippy::expect_used)]
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusHaplo,
-    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusInfos, Name,
+    Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
 };
-use crate::{PHYLUMLIMIT, getassemblyreader, getreaderoffile};
+use crate::{PHYLUMLIMIT, TIMEOUT_IN_MN, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::index::Type;
 use extended_htslib::bam::{self, Read};
@@ -15,14 +15,13 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use quick_xml::events::Event;
 use reqwest::blocking::multipart;
-use reqwest::header::REFERER;
 use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::IsTerminal;
 use std::str::FromStr;
-use std::thread::available_parallelism;
+use std::thread::{self, available_parallelism, sleep};
 use std::{
     env::{self},
     error::Error,
@@ -34,7 +33,7 @@ use std::{
     time::Duration,
 };
 use strum::IntoEnumIterator;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 lazy_static! {
     pub static ref REQUESTCLIENT: reqwest::blocking::Client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::new(15, 0))
@@ -159,8 +158,8 @@ pub(crate) fn getpositionfromblast(text: &str) -> Option<(Position, Position, St
             (Some(Ok(a)), Some(Ok(b)), c) => {
                 let complement = c.is_some_and(|f| !f.is_empty());
                 Some((
-                    Position::new(false, a),
-                    Position::new(false, b),
+                    Position::newfromoposition(a),
+                    Position::newfromoposition(b),
                     if complement {
                         Strand::Minus
                     } else {
@@ -691,7 +690,7 @@ pub(crate) fn locuspos(
 ) -> Option<(LocusInfos, Vec<Blastmatch>)> {
     let opt = locus
         .iter()
-        .find(|p| &p.locus == search && &p.haplotype == hap)?;
+        .find(|p| &p.getlocus()== search && &p.haplotype == hap)?;
     let fil = |a: &Blastmatch| {
         let opt = opt.clone();
         a.getlocusname() == Some(opt.locus)
@@ -781,7 +780,7 @@ where
     let subject = &format!("{}", subpath.display());
     let output = Filecrea::createtemp(None::<&Path>, None::<&Path>)?;
     let output = &format!("{}", output.getpath().display());
-    let command = Command::new("blastn")
+    let mut command = Command::new("blastn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -809,37 +808,64 @@ where
         "BLAST has been launched with id {}. Please wait.",
         command.id()
     );
-    let outputc = command.wait_with_output()?;
+    let threadoutput = thread::spawn(move || {
+        let mut time = 0;
+        while time < TIMEOUT_IN_MN.saturating_mul(60) {
+            if !command.try_wait().is_ok_and(|f| f.is_none()) {
+                return command.wait_with_output().map(|a| Some(a));
+            }
+            sleep(Duration::new(1, 0));
+            time += 1;
+        }
+        command.kill().map(|_| None)
+    })
+    .join();
+    let threadoutput = threadoutput.map_err(|_| io::Error::from(ErrorKind::BrokenPipe))?;
     let mut result: Vec<Blast> = Vec::new();
     {
-        if !outputc.status.success() {
-            return Err(io::Error::new(
-                ErrorKind::BrokenPipe,
-                format!(
-                    "BLAST has failed with status {}. Error is {}",
-                    outputc.status,
-                    &String::from_utf8_lossy(&outputc.stderr)
-                ),
-            ));
-        } else {
-            println!("BLAST has been done. Parsing.");
-            let file = File::open(output)?;
-            let reader = BufReader::new(file);
-            let mut csv = csv::ReaderBuilder::new()
-                .delimiter(b'\t')
-                .comment(Some(b'#'))
-                .has_headers(false)
-                .from_reader(reader);
-            for record in csv.deserialize::<Blast>() {
-                if let Ok(mut r) = record {
-                    if r.sstart > r.send {
-                        (r.sstart, r.send, r.complement) = (r.send, r.sstart, Strand::Minus)
+        match threadoutput {
+            Err(e) => {
+                return Err(io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    format!("BLAST has failed. Error is {}", e),
+                ));
+            }
+            Ok(None) => {
+                return Err(io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    format!("BLAST has timeout. Please retry later."),
+                ));
+            }
+            Ok(Some(b)) if !b.status.success() => {
+                return Err(io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    format!(
+                        "BLAST has failed. Errorcode is {}. Error is {}",
+                        b.status,
+                        String::from_utf8_lossy(&b.stderr)
+                    ),
+                ));
+            }
+            Ok(Some(_)) => {
+                println!("BLAST has been done. Parsing.");
+                let file = File::open(output)?;
+                let reader = BufReader::new(file);
+                let mut csv = csv::ReaderBuilder::new()
+                    .delimiter(b'\t')
+                    .comment(Some(b'#'))
+                    .has_headers(false)
+                    .from_reader(reader);
+                for record in csv.deserialize::<Blast>() {
+                    if let Ok(mut r) = record {
+                        if r.sstart > r.send {
+                            (r.sstart, r.send, r.complement) = (r.send, r.sstart, Strand::Minus)
+                        }
+                        result.push(r);
+                    } else if let Err(r) = record {
+                        eprintln!("Error parsing line. Error is: {r}.");
+                        continue;
+                        //return Err(io::Error::new(ErrorKind::InvalidData, r.to_string()));
                     }
-                    result.push(r);
-                } else if let Err(r) = record {
-                    eprintln!("Error parsing line. Error is: {r}.");
-                    continue;
-                    //return Err(io::Error::new(ErrorKind::InvalidData, r.to_string()));
                 }
             }
         };
@@ -1139,10 +1165,10 @@ pub(crate) fn submit(
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
             .iter()
-            .find(|k| format!("{}:{}", k.locus, k.contig) == p.sseqid)
+            .find(|k| format!("{}:{}", k.getlocus(), k.contig) == p.sseqid)
             && let Some((newstart, newend, newcomplement)) = find.positioninlocus(
-                &Position::new(false, p.sstart.try_into().unwrap_or_default()),
-                &Position::new(false, p.send.try_into().unwrap_or_default()),
+                &Position::newfromoposition(p.sstart.try_into().unwrap_or_default()),
+                &Position::newfromoposition(p.send.try_into().unwrap_or_default()),
                 &p.complement,
             )
         {
@@ -1156,7 +1182,8 @@ pub(crate) fn submit(
     c.iter_mut().for_each(|p| {
         if let Some(loc) = p.getlocusname()
             && let Some(find) = locus.iter().find(|fi| {
-                p.getchromosomefromsubject().is_some_and(|a| a == fi.contig) && fi.locus == loc
+                p.getchromosomefromsubject().is_some_and(|a| a == fi.contig)
+                    && fi.getlocus() == &loc
             })
             && p.sseqid.starts_with("GENE")
             && let Some((start, end, complement)) = p.getpositionfromsubject()
@@ -1164,8 +1191,8 @@ pub(crate) fn submit(
                 &start,
                 &end,
                 &complement,
-                &Position::new(false, p.sstart.try_into().unwrap_or_default()),
-                &Position::new(false, p.send.try_into().unwrap_or_default()),
+                &Position::newfromoposition(p.sstart.try_into().unwrap_or_default()),
+                &Position::newfromoposition(p.send.try_into().unwrap_or_default()),
                 &p.complement,
             )
         {
@@ -1225,10 +1252,16 @@ pub(crate) fn submit(
     #[cfg(target_family = "windows")]
     let _ = std::os::windows::fs::symlink_dir(dirtemp.path(), &link);
     if !args.nosubmit {
-        if args.mytoken.is_none() {
-            browseropening().map_err(|f| f.to_string())?;
+        let result = match &args.mytoken {
+            Some(_) => Ok(()),
+            None => browseropening(),
+        };
+        if let Err(e) = result {
+            let _ = fs::remove_file(link);
+            return Err(e.to_string());
+        } else {
+            preparesubmission(dir, realspecies, args);
         }
-        preparesubmission(dir, realspecies, args);
     }
     let _ = fs::remove_file(link);
     //let _ = fs::remove_dir_all(dir);
@@ -1305,8 +1338,9 @@ pub(crate) fn generatesequence(
     dir: &Path,
     locus: &[LocusInfos],
 ) -> Result<PathBuf, String> {
-    let sequencefile = dir.join("sequence.fasta");
-    let mut fastawriter = fasta::Writer::to_file(&sequencefile).map_err(|f| format!("{f}"))?;
+    let sequencefile = Filecrea::createfrompath(Path::join(&dir, "sequence.fasta"));
+    let mut fastawriter =
+        fasta::Writer::to_file(&sequencefile.getpath()).map_err(|f| format!("{f}"))?;
     let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
         None => return Err("No assembly provided.".to_string()),
         Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
@@ -1318,26 +1352,26 @@ pub(crate) fn generatesequence(
             .unwrap_or("Sequence is unavailable".to_string());
         fastawriter
             .write(
-                &format!("{}:{}", list.locus, list.contig),
+                &format!("{}:{}", list.getlocus(), list.contig),
                 Some(&format!(
                     "{}:{}-{}/{}/{}",
-                    list.locus,
+                    list.getlocus(),
                     list.start.getobasedpos(),
                     list.end.getobasedpos(),
                     list.complement,
-                    list.haplotype
+                    list.gethaplotype()
                 )),
                 seq.as_bytes(),
             )
             .map_err(|f| {
                 format!(
                     "Unable to write fasta sequence {}. Error is {f}",
-                    list.locus
+                    list.getlocus()
                 )
             })?;
     }
     fastawriter.flush().map_err(|e| e.to_string())?;
-    Ok(sequencefile)
+    Ok(sequencefile.getpath().to_path_buf())
 }
 pub(crate) fn generatelightbam(
     args: &Args,

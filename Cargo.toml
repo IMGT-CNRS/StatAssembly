@@ -1,7 +1,7 @@
 [package]
 name = "IMGT_StatAssembly"
 description = "Assess quality of assemblies and allele confidence on IG and TR loci"
-version = "2.1.0-alpha"
+version = "2.2.0-alpha"
 edition = "2024"
 authors = ["Guilhem Zeitoun <guilhem.zeitoun@cnrs.fr>", "IMGT contact <contact-imgt@igh.cnrs.fr>"]
 rust-version = "1.93"
@@ -11,6 +11,7 @@ publish = false
 categories = ["science::bioinformatics::sequence-analysis"]
 [dependencies]
 bio-types = "1.0.4"
+bam = { version = "0.1.4", optional = true }
 bzip2-sys = { version = "0.1.13", features = ["static"] }
 clap = { version = "4.6.1", features = ["derive", "cargo"] }
 csv = "1.4.0"

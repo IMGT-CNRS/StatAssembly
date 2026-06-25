@@ -1,12 +1,9 @@
 use bio::io::fasta;
 use indicatif::ProgressBar;
 use itertools::Itertools;
+use plotters::backend::{BitMapBackend, DrawingBackend, SVGBackend};
 use plotters::coord::Shift;
-use plotters::drawing::IntoDrawingArea;
-use plotters::prelude::{
-    AreaSeries, BitMapBackend, DrawingArea, DrawingBackend, IntoSegmentedCoord, PathElement,
-    SVGBackend, full_palette,
-};
+use plotters::drawing::DrawingArea;
 use serde::ser::SerializeTupleStruct;
 use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
 use tempfile::NamedTempFile;
@@ -20,16 +17,15 @@ use crate::submissions::{
     DELIMITERFASTA, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT,
     getallelefromblast, getchromosomefromblast, getpositionfromblast, getspeciesfromncbi,
 };
-use crate::{MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO, locusisokay};
+use crate::{
+    ALERTPERC, MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO, WARNINGPERC, locusisokay,
+};
 use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
-use std::backtrace::BacktraceStatus::Unsupported;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::fmt::Error;
 use std::io::ErrorKind::{self, InvalidInput};
-use std::num::Saturating;
-use std::ops::{Add, Deref, Not, RangeInclusive, Sub};
+use std::ops::{Add, Not, RangeInclusive, Sub};
 use std::path::Path;
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
@@ -70,13 +66,13 @@ pub(crate) struct Args {
     #[arg(short, long, default_value_t = 10, value_parser=greater_than_0)]
     pub(crate) coverage: u32,
     /// Minimum number of match reads (included) for warning positions
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = MATCHREADS)]
     pub(crate) minreads: u32,
     /// Percent warning position for mismatch reads (included)
-    #[arg(long, default_value_t = 80, value_parser=less_than_100)]
+    #[arg(long, default_value_t = WARNINGPERC, value_parser=less_than_100)]
     pub(crate) percentwarning: u8,
     /// Percent alerting position for mismatch reads (included)
-    #[arg(long, default_value_t = 60, value_parser=less_than_100)]
+    #[arg(long, default_value_t = ALERTPERC, value_parser=less_than_100)]
     pub(crate) percentalerting: u8,
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
@@ -159,6 +155,12 @@ pub(crate) enum Filecrea {
     Temp(NamedTempFile),
     Plain(PathBuf),
 }
+pub(crate) struct DrawingImage<T: DrawingBackend> {
+    pub(crate) readresulttop: DrawingArea<T, Shift>,
+    pub(crate) readresultbottom: Option<DrawingArea<T, Shift>>,
+    pub(crate) mismatchtop: DrawingArea<T, Shift>,
+    pub(crate) mismatchbottom: Option<DrawingArea<T, Shift>>,
+}
 impl Filecrea {
     pub(crate) fn getpath(&self) -> &Path {
         match self {
@@ -220,6 +222,7 @@ impl Into<PathBuf> for Filecrea {
         self.getpath().to_path_buf()
     }
 }
+/*
 pub(crate) enum Image<'a> {
     Png(DrawingArea<BitMapBackend<'a>, Shift>),
     Svg(DrawingArea<SVGBackend<'a>, Shift>),
@@ -238,23 +241,29 @@ impl<'a> Image<'a> {
         }
     }
 }
+ */
 pub(crate) enum ImageType {
     Svg((PathBuf, (u32, u32))),
     Png((PathBuf, (u32, u32))),
 }
 impl ImageType {
+    #[allow(unused)]
     pub fn newsvg(svg: PathBuf, size: (u32, u32)) -> Self {
         Self::Svg((svg, size))
     }
+    #[allow(unused)]
     pub fn newpng(png: PathBuf, size: (u32, u32)) -> Self {
         Self::Png((png, size))
     }
+    #[allow(unused)]
     pub fn get(&self) -> &Self {
         &self
     }
+    #[allow(unused)]
     pub fn ispng(&self) -> bool {
         matches!(self, Self::Png(_))
     }
+    #[allow(unused)]
     pub fn getpath(&self) -> &Path {
         match self {
             Self::Svg(a) => &a.0,
@@ -300,9 +309,53 @@ pub(crate) struct LocusHaplo {
     locus: Locus,
     haplo: Haplotype,
 }
+impl PartialOrd for LocusHaplo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(&other))
+    }
+}
+impl Ord for LocusHaplo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self
+            .getlocus()
+            .to_string()
+            .cmp(&other.getlocus().to_string())
+        {
+            Ordering::Equal => self.haplo.cmp(&other.haplo),
+            ord => ord,
+        }
+    }
+}
+impl Serialize for LocusHaplo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{}", self))
+    }
+}
+impl<'de> Deserialize<'de> for LocusHaplo {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let val: &str = serde::Deserialize::deserialize(deserializer)?;
+        match val.split_once(' ') {
+            Some((a, b)) => {
+                let i = b.chars().filter(|p| p.is_alphabetic());
+                let s: String = i.into_iter().collect();
+                match (Locus::from_str(a), Haplotype::from_str(&s)) {
+                    (Ok(a), Ok(b)) => Ok(Self::new(a, b)),
+                    _ => Err(serde::de::Error::custom("Invalid haplotype or locus")),
+                }
+            }
+            None => Err(serde::de::Error::custom("Invalid haplotype or locus")),
+        }
+    }
+}
 impl From<LocusInfos> for LocusHaplo {
     fn from(value: LocusInfos) -> Self {
-        LocusHaplo::new(value.locus, value.haplotype)
+        value.locusinfo
     }
 }
 impl LocusHaplo {
@@ -317,7 +370,7 @@ impl LocusHaplo {
 }
 impl Display for LocusHaplo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.locus, self.haplo)
+        write!(f, "{} ({})", self.getlocus(), self.haplo)
     }
 }
 impl LocusHaplo {
@@ -595,7 +648,10 @@ impl FromStr for Name {
             } else {
                 Strand::Plus
             };
-        let (start, end) = (Position::new(false, posstart), Position::new(false, posend));
+        let (start, end) = (
+            Position::newfromoposition(posstart),
+            Position::newfromoposition(posend),
+        );
         Ok(Self {
             numacc: if numacc.trim().is_empty() || numacc.trim() == "N/A" {
                 None
@@ -730,9 +786,9 @@ impl<'de> Deserialize<'de> for OkStatus {
         OkStatus::from_str(s).map_err(de::Error::custom)
     }
 }
-impl TryFrom<String> for Locus {
-    type Error = io::Error;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
+impl FromStr for Locus {
+    type Err = io::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_uppercase().as_str() {
             "IGH" => Ok(Locus::IGH),
             "IGK" => Ok(Locus::IGK),
@@ -932,7 +988,7 @@ impl FromStr for Position {
     type Err = std::num::ParseIntError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Position::new(false, s.parse()?))
+        Ok(Position::newfromoposition(s.parse()?))
     }
 }
 impl<'de> Deserialize<'de> for Position {
@@ -943,7 +999,7 @@ impl<'de> Deserialize<'de> for Position {
         let s: &str = de::Deserialize::deserialize(deserializer)?;
 
         match s.parse::<i64>() {
-            Ok(pos) => Ok(Position::new(false, pos)),
+            Ok(pos) => Ok(Position::newfromoposition(pos)),
             Err(_) => Err(de::Error::invalid_type(
                 de::Unexpected::Str(s),
                 &"expected i64",
@@ -988,11 +1044,18 @@ impl Position {
     pub(crate) fn iszbased(&self) -> bool {
         self.zbased
     }
+    pub(crate) fn newfromzposition(position: i64) -> Self {
+        Self::new(true, position)
+    }
+    pub(crate) fn newfromoposition(position: i64) -> Self {
+        Self::new(false, position)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub(crate) struct Posread {
     pub(crate) r#match: usize,
     pub(crate) indel: usize,
+    pub(crate) insertion: usize,
     pub(crate) total: usize,
     pub(crate) minreads: u32,
     pub(crate) percentwarning: u8,
@@ -1010,6 +1073,79 @@ impl Alerting for Posread {
 
     fn isvalid(&self) -> bool {
         self.getstate().isvalid()
+    }
+}
+impl Default for Posread {
+    fn default() -> Self {
+        Self {
+            r#match: 0,
+            indel: 0,
+            insertion: 0,
+            total: 0,
+            minreads: MATCHREADS,
+            percentwarning: WARNINGPERC,
+            percentalerting: ALERTPERC,
+            softclips: SOFTCLIPRATIO,
+        }
+    }
+}
+impl Posread {
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        r#match: usize,
+        indel: usize,
+        insert: usize,
+        total: usize,
+        softclips: f32,
+        args: &Args,
+    ) -> Result<Self, MyError> {
+        if r#match + indel > total {
+            return Err(MyError(String::from("Invalid total")));
+        }
+        Ok(Self {
+            r#match,
+            indel,
+            insertion: insert,
+            total,
+            minreads: args.minreads,
+            percentwarning: args.percentwarning,
+            percentalerting: args.percentalerting,
+            softclips,
+        })
+    }
+    ///Get the state of the position
+    fn getstate(&self) -> Alertpos {
+        Alertpos::new(self)
+    }
+    pub(crate) fn gettotal(&self) -> usize {
+        self.total
+    }
+    pub(crate) fn getmismatchcount(&self) -> usize {
+        self.getindel().saturating_sub(self.getmatch())
+    }
+    pub(crate) fn getindelcount(&self) -> usize {
+        self.gettotal().saturating_sub(self.getindel())
+    }
+    pub(crate) fn addtotal(&mut self, count: usize) {
+        self.total += count
+    }
+    pub(crate) fn getmatch(&self) -> usize {
+        self.r#match
+    }
+    pub(crate) fn addmatch(&mut self, count: usize) {
+        self.r#match += count
+    }
+    pub(crate) fn getindel(&self) -> usize {
+        self.indel
+    }
+    pub(crate) fn addindel(&mut self, count: usize) {
+        self.indel += count
+    }
+    pub(crate) fn addinsertion(&mut self, count: usize) {
+        self.insertion += count
+    }
+    pub(crate) fn getinsertion(&self) -> usize {
+        self.insertion
     }
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -1172,7 +1308,7 @@ pub trait Blastcalc {
     }
     #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
-        Locus::try_from(self.getallelename().split_at(3).0.to_string()).ok()
+        Locus::from_str(&self.getallelename().split_at(3).0.to_string()).ok()
     }
     fn getidentity(&self) -> f32;
 }
@@ -1417,57 +1553,6 @@ impl std::fmt::Display for MyError {
     }
 }
 impl std::error::Error for MyError {}
-impl Posread {
-    #[allow(dead_code)]
-    pub(crate) fn new(
-        r#match: usize,
-        indel: usize,
-        total: usize,
-        softclips: f32,
-        args: &Args,
-    ) -> Result<Self, MyError> {
-        if r#match + indel > total {
-            return Err(MyError(String::from("Invalid total")));
-        }
-        Ok(Self {
-            r#match,
-            indel,
-            total,
-            minreads: args.minreads,
-            percentwarning: args.percentwarning,
-            percentalerting: args.percentalerting,
-            softclips,
-        })
-    }
-    ///Get the state of the position
-    fn getstate(&self) -> Alertpos {
-        Alertpos::new(self)
-    }
-    pub(crate) fn gettotal(&self) -> usize {
-        self.total
-    }
-    pub(crate) fn getmismatchcount(&self) -> usize {
-        self.getindel().saturating_sub(self.getmatch())
-    }
-    pub(crate) fn getindelcount(&self) -> usize {
-        self.gettotal().saturating_sub(self.getindel())
-    }
-    pub(crate) fn addtotal(&mut self, count: usize) {
-        self.total += count
-    }
-    pub(crate) fn getmatch(&self) -> usize {
-        self.r#match
-    }
-    pub(crate) fn addmatch(&mut self, count: usize) {
-        self.r#match += count
-    }
-    pub(crate) fn getindel(&self) -> usize {
-        self.indel
-    }
-    pub(crate) fn addindel(&mut self, count: usize) {
-        self.indel += count
-    }
-}
 impl Display for Locus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1780,19 +1865,32 @@ impl GenesList for GeneInfos {
     }
 }
 impl LocusInfos {
+    pub(crate) fn getlocus(&self) -> &Locus {
+        &self.locusinfo.locus
+    }
+    pub(crate) fn gethaplotype(&self) -> &Haplotype {
+        &self.locusinfo.haplo
+    }
+    #[allow(unused)]
+    pub(crate) fn getlocushaplo(&self) -> &LocusHaplo {
+        &self.locusinfo
+    }
     pub(crate) fn setstatus(&mut self, mean: u64, pos: &BTreeMap<Position, HashMapinfo>) {
         self.status = locusisokay(mean, &pos.values().collect_vec())
     }
     //Get position for alignment
     pub(crate) fn fullposition(&self, record: &Blastmatch) -> Option<(Position, Position, Strand)> {
         let (start, end) = if self.complement.isrev() {
-            let end = record.qseqid.posend - Position::new(true, record.sstart.try_into().ok()?);
-            let start = record.qseqid.posend - Position::new(true, record.send.try_into().ok()?);
+            let end =
+                record.qseqid.posend - Position::newfromzposition(record.sstart.try_into().ok()?);
+            let start =
+                record.qseqid.posend - Position::newfromzposition(record.send.try_into().ok()?);
             (start, end)
         } else {
             let start =
-                record.qseqid.posstart + Position::new(true, record.sstart.try_into().ok()?);
-            let end = record.qseqid.posstart - Position::new(true, record.send.try_into().ok()?);
+                record.qseqid.posstart + Position::newfromzposition(record.sstart.try_into().ok()?);
+            let end =
+                record.qseqid.posstart - Position::newfromzposition(record.send.try_into().ok()?);
             (start, end)
         };
         let complement = record.qseqid.strand.isrev() ^ record.getstrand().isrev();
@@ -1831,8 +1929,8 @@ impl LocusInfos {
         };
         let complement = matchcomplement.isrev() ^ complement.isrev();
         Some((
-            Position::new(false, start),
-            Position::new(false, end),
+            Position::newfromoposition(start),
+            Position::newfromoposition(end),
             if complement {
                 Strand::Minus
             } else {
@@ -1861,8 +1959,8 @@ impl LocusInfos {
                 .saturating_sub(std::cmp::max(end.getobasedpos(), start.getobasedpos()));
             let complement = !complement.clone();
             Some((
-                Position::new(false, newstart),
-                Position::new(false, newend),
+                Position::newfromoposition(newstart),
+                Position::newfromoposition(newend),
                 complement,
             ))
         } else {
@@ -1873,8 +1971,8 @@ impl LocusInfos {
             let newend = self.start.getobasedpos().saturating_add(end.getobasedpos());
             let complement = complement.clone();
             Some((
-                Position::new(false, newstart),
-                Position::new(false, newend),
+                Position::newfromoposition(newstart),
+                Position::newfromoposition(newend),
                 complement,
             ))
         }
@@ -2013,7 +2111,7 @@ pub trait GenesList {
                 ),
             };
             self.alterstatus(info);
-        } else if reads100m < MATCHREADS {
+        } else if reads100m < MATCHREADS.try_into().unwrap_or_default() {
             let m = OkStatus::new(
                 AcceptedStatus::Rejected,
                 Some(NOTENOUGHMATCHREADS.to_string()),
@@ -2185,8 +2283,8 @@ pub(crate) struct FakeLocusinfo {
 impl From<LocusInfos> for FakeLocusinfo {
     fn from(value: LocusInfos) -> Self {
         FakeLocusinfo {
-            locus: value.locus,
-            haplotype: Some(value.haplotype),
+            locus: value.locusinfo.locus,
+            haplotype: Some(value.locusinfo.haplo),
             contig: Some(value.contig),
             start: Some(value.start),
             end: Some(value.end),
@@ -2232,8 +2330,7 @@ impl FakeLocusinfo {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 #[repr(C)]
 pub(crate) struct LocusInfos {
-    pub(crate) locus: Locus,
-    pub(crate) haplotype: Haplotype,
+    pub(crate) locusinfo: LocusHaplo,
     pub(crate) contig: String,
     pub(crate) start: Position,
     pub(crate) end: Position,
@@ -2251,9 +2348,8 @@ impl Serialize for LocusInfos {
         if new.complement.isrev() {
             (new.start, new.end) = (self.end, self.start)
         };
-        let mut se = serializer.serialize_tuple_struct("LocusInfos", 6)?;
-        se.serialize_field(&new.locus)?;
-        se.serialize_field(&new.haplotype)?;
+        let mut se = serializer.serialize_tuple_struct("LocusInfos", 5)?;
+        se.serialize_field(&new.locusinfo)?;
         se.serialize_field(&new.contig)?;
         se.serialize_field(&new.start)?;
         se.serialize_field(&new.end)?;
@@ -2271,8 +2367,7 @@ impl LocusInfos {
         complement: Strand,
     ) -> Self {
         Self {
-            locus,
-            haplotype,
+            locusinfo: LocusHaplo::new(locus, haplotype),
             contig,
             start,
             end,
@@ -2283,11 +2378,7 @@ impl LocusInfos {
 }
 impl Ord for LocusInfos {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.locus.to_string().cmp(&other.locus.to_string()) {
-            std::cmp::Ordering::Equal => (),
-            ord => return ord,
-        };
-        self.haplotype.cmp(&other.haplotype)
+        self.locusinfo.cmp(&other.locusinfo)
     }
 }
 impl PartialOrd for LocusInfos {

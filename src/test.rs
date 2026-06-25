@@ -1,22 +1,21 @@
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, thread::sleep, time::Duration};
+    use std::{thread::sleep, time::Duration};
 
     use crate::{
-        extractgenelist, genelist, generategeneinfos,
+        extractgenelist, generategeneinfos,
         identification::{sendresult, sendresultcompressed},
         locusposparser,
-        r#struct::{Args, Command, Species, SpeciesError},
+        r#struct::{Args, Species, SpeciesError},
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, generatelightbam,
-            getspeciesfromncbi,
         },
     };
     use clap::Parser;
     use extended_htslib::bam::{self, Read};
     use indicatif::ProgressBar;
     use itertools::Itertools;
-    use tempfile::{NamedTempFile, TempDir, env};
+    use tempfile::{NamedTempFile, TempDir};
     #[test]
     fn checkblast() {
         assert!(checkifblastpresent())
@@ -99,7 +98,9 @@ mod tests {
         };
         eprintln!(
             "Data is {:?}",
-            result.iter().map(|a| (&a.locus, &a.haplotype, &a.status))
+            result
+                .iter()
+                .map(|a| (a.getlocus(), a.gethaplotype(), &a.status))
         );
         assert!(
             result.iter().all(|f| f.status.status.isvalid()),

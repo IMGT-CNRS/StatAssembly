@@ -9,6 +9,7 @@ Made by: Guilhem Zeitoun
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
 use regex::Regex;
+use serde_with::NoneAsEmptyString;
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
 use crate::r#struct::AcceptedStatus::Rejected;
@@ -17,7 +18,7 @@ use itertools::Itertools;
 use plotters::coord::Shift;
 use std::collections::HashMap;
 use std::io::ErrorKind::InvalidInput;
-use std::io::{stderr, stdout};
+use std::io::stdout;
 use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -30,10 +31,10 @@ use strum::IntoEnumIterator;
 use crate::r#struct::*;
 use crate::submissions::{
     GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, REQUESTCLIENT, askforsubmission,
-    checkifblastpresent, generatelightbam, genesblast, positionfiltering,
+    checkifblastpresent, generatelightbam, generatesequence, genesblast, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
-use extended_htslib::bam::record::CsValue;
+use extended_htslib::bam::record::{Cigar, CsValue};
 use extended_htslib::bam::{self, FetchDefinition, IndexedReader, Read};
 use lazy_static::lazy_static;
 use num_format::{Locale, ToFormattedString};
@@ -62,12 +63,15 @@ const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
 const MIN_READLENGTH: u64 = 1_000;
 const MIN_PHREDSCORE: u64 = 30;
+const TIMEOUT_IN_MN: u64 = 60;
 const READGAPMESSAGE: u64 = 200;
 const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: f32 = 2.0;
 const PHYLUMLIMIT: usize = 7776; //obfstr::obf!("Gnathostomata");
-const MATCHREADS: usize = 10;
+const MATCHREADS: u32 = 10;
 const BORNES: usize = 10_000;
+const WARNINGPERC: u8 = 80;
+const ALERTPERC: u8 = 60;
 const SOFTCLIPRATIO: f32 = 0.4;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
@@ -118,8 +122,8 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
             gene: getnamefromblast(elem.qseqid()).unwrap_or("unknown".to_string()),
             chromosome: elem.sseqid.clone(),
             strand: elem.getstrand(),
-            start: Position::new(false, min(posa, posb)),
-            end: Position::new(false, max(posa, posb)),
+            start: Position::newfromoposition( min(posa, posb)),
+            end: Position::newfromoposition( max(posa, posb)),
             status: OkStatus::default(),
         };
         vec.push(info);
@@ -249,15 +253,15 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     for loci in locus {
         match elem
             .iter()
-            .find(|p| p.iter().any(|f| f.locus == loci.locus))
+            .find(|p| p.iter().any(|f| f.getlocus() == loci.getlocus()))
         {
             Some(d) if Some(d) != elem.last() => {
-                eprintln!("Locus {} is splited! Aborted.", loci.locus);
+                eprintln!("Locus {} is splited! Aborted.", loci.getlocus());
                 return None;
             }
             _ => (),
         };
-        let alternate = if !loci.haplotype.isprimary() {
+        let alternate = if !loci.gethaplotype().isprimary() {
             if actual.is_empty() {
                 eprintln!("Empty without a corresponding primary!");
                 return None;
@@ -268,12 +272,12 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
             false
         };
         match actual.first() {
-            Some(e) if e.locus == loci.locus && alternate && actual.len() >= 2 => {
+            Some(e) if e.getlocus() == loci.getlocus() && alternate && actual.len() >= 2 => {
                 eprintln!("Only one alternate is allowed!");
                 return None;
             }
-            Some(e) if e.locus == loci.locus && alternate => actual.push(loci.clone()),
-            Some(e) if e.locus != loci.locus && alternate => {
+            Some(e) if e.getlocus() == loci.getlocus() && alternate => actual.push(loci.clone()),
+            Some(e) if e.getlocus() != loci.getlocus() && alternate => {
                 eprintln!("Alternate without a corresponding primary!");
                 return None;
             }
@@ -381,7 +385,8 @@ fn locusposparser(
             release = release4;
             b.into_iter().for_each(|p| {
                 let find = locus.iter().find(|r| {
-                    r.haplotype == p.haplotype.clone().unwrap_or_default() && r.locus == p.locus
+                    r.gethaplotype() == &p.haplotype.clone().unwrap_or_default()
+                        && r.getlocus() == &p.locus
                 });
                 if let Some(a) = find {
                     *p = a.clone().into();
@@ -434,8 +439,8 @@ fn locusposparser(
             std::io::ErrorKind::InvalidData,
             format!(
                 "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique gene name.",
-                d.locus,
-                d.haplotype,
+                d.getlocus(),
+                d.gethaplotype(),
                 d.contig,
                 d.start.getobasedpos(),
                 d.end.getobasedpos()
@@ -462,7 +467,7 @@ fn locusposparser(
                 big.start.getobasedpos(),
                 big.end.getobasedpos(),
                 big.contig,
-                big.locus,
+                big.getlocus(),
                 ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
                 big.getlength().to_formatted_string(&Locale::en),
                 &args
@@ -503,7 +508,7 @@ where
             (b.to_vec(), None)
         }
     };
-    //locusfiltering(&loci.locus, &mut data);
+    //locusfiltering(&loci.getlocus(), &mut data);
     positionfiltering(locus, &mut data);
     if data.is_empty() {
         eprintln!("No data after filtering gene list. Skipped.");
@@ -532,8 +537,8 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
                 gene,
                 p.getsubject().to_string(),
                 strand,
-                Position::new(false, p.sstart.try_into().unwrap_or_default()),
-                Position::new(false, p.send.try_into().unwrap_or_default()),
+                Position::newfromoposition(p.sstart.try_into().unwrap_or_default()),
+                Position::newfromoposition(p.send.try_into().unwrap_or_default()),
             ))
         })
         .collect();
@@ -624,14 +629,14 @@ fn processcounting(
     record: &bam::Record,
     sep: i64,
 ) -> io::Result<bool> {
-    let start = &Position::new(true, record.reference_start());
-    let end = &Position::new(true, record.reference_end());
+    let start = &Position::newfromzposition(record.reference_start());
+    let end = &Position::newfromzposition(record.reference_end());
     //Get range to put the reads inclusive pos
     let newrange = Position::new(
         true,
         max(record.reference_start(), locus.start.getzbasedpos()),
     )
-        ..Position::new(true, min(locus.end.getobasedpos(), record.reference_end()));
+        ..Position::newfromzposition(min(locus.end.getobasedpos(), record.reference_end()));
     if pos.contains_key(start)
         && let Some(d) = pos.get_mut(start)
         && record.cigar().leading_softclips() > 0
@@ -884,7 +889,7 @@ fn setgraphbitmap<'a>(
             let ext = if args.svg { "svg" } else { "png" };
             let outputfile = outputdir.join(givename(
                 &speciesblast,
-                &floci.locus,
+                &floci.getlocus(),
                 &floci.contig,
                 haplotypebool,
                 &format!("{fgraph}.{ext}"),
@@ -1026,6 +1031,7 @@ fn main() -> ExitCode {
         if let Some(b) = r {
             let v = match generategenelist(&blastcheck, &speciesblast, &locus, b, &args) {
                 Ok((Some(a), b)) => {
+                    #[allow(unused_assignments)]
                     if let Some(release) = b {
                         releaseversion = Some(release);
                     }
@@ -1076,29 +1082,123 @@ fn main() -> ExitCode {
             }
         };
         if haplotype > 2 {
-            eprintln!("There is more than 2 haplotypes for {}", floci.locus);
+            eprintln!("There is more than 2 haplotypes for {}", floci.getlocus());
             return ExitCode::FAILURE;
         }
         let haplotypebool = haplotype == 1; //IS there one or two haplotypes?
         println!(
             "Going for {} locus - {}",
-            floci.locus,
+            floci.getlocus(),
             if !haplotypebool { "diploid" } else { "haploid" }
         );
-        let graphs = setgraphbitmap(
+        let mut graphs = match setgraphbitmap(
             haplotype,
             haplotypebool,
             &args,
             &outputdir,
             &speciesblast,
             floci,
-        );
-        let mut graphs = match graphs {
+        ) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Error setting graphs. Error is {e}. Exiting");
                 return ExitCode::FAILURE;
             }
+        };
+        let readresultsize = (
+            1800,
+            1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
+        );
+        let mismatchsize = (
+            1200,
+            600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
+        );
+        let structe = {
+            if args.svg {
+                let loc = if let Some(a) = locus.first() {
+                    a
+                } else {
+                    eprintln!("Error with some locus, continuing");
+                    continue;
+                };
+                let name = Path::join(
+                    &args.outdir,
+                    givename(
+                        &speciesblast,
+                        loc.getlocus(),
+                        &loc.contig,
+                        haplotypebool,
+                        "readresult.svg",
+                        true,
+                    ),
+                );
+                let (top, bottom) = if haplotypebool {
+                    let r = SVGBackend::new(name.as_path(), readresultsize)
+                        .into_drawing_area()
+                        .split_vertically(50);
+                    (r.0, Some(r.1))
+                } else {
+                    let r = SVGBackend::new(name.as_path(), readresultsize).into_drawing_area();
+                    (r, None)
+                };
+                let (mtop, mbottom) = if haplotypebool {
+                    let r = SVGBackend::new(name.as_path(), mismatchsize)
+                        .into_drawing_area()
+                        .split_vertically(50);
+                    (r.0, Some(r.1))
+                } else {
+                    let r = SVGBackend::new(name.as_path(), mismatchsize).into_drawing_area();
+                    (r, None)
+                };
+                DrawingImage {
+                    readresulttop: top,
+                    readresultbottom: bottom,
+                    mismatchtop: mtop,
+                    mismatchbottom: mbottom,
+                }
+            } else {
+                let loc = if let Some(a) = locus.first() {
+                    a
+                } else {
+                    eprintln!("Error with some locus, continuing");
+                    continue;
+                };
+                let name = Path::join(
+                    &args.outdir,
+                    givename(
+                        &speciesblast,
+                        loc.getlocus(),
+                        &loc.contig,
+                        haplotypebool,
+                        "readresult.svg",
+                        true,
+                    ),
+                );
+                let (top, bottom) = if haplotypebool {
+                    let r = BitMapBackend::new(name.as_path(), readresultsize)
+                        .into_drawing_area()
+                        .split_vertically(50);
+                    (r.0, Some(r.1))
+                } else {
+                    let r = BitMapBackend::new(name.as_path(), readresultsize).into_drawing_area();
+                    (r, None)
+                };
+                let (mtop, mbottom) = if haplotypebool {
+                    let r = BitMapBackend::new(name.as_path(), mismatchsize)
+                        .into_drawing_area()
+                        .split_vertically(50);
+                    (r.0, Some(r.1))
+                } else {
+                    let r = BitMapBackend::new(name.as_path(), mismatchsize).into_drawing_area();
+                    (r, None)
+                };
+                DrawingImage {
+                    readresulttop: top,
+                    readresultbottom: bottom,
+                    mismatchtop: mtop,
+                    mismatchbottom: mbottom,
+                }
+            };
         };
         let mut lock = stdout().lock();
         //For each individual haplotype inside locus
@@ -1152,14 +1252,14 @@ fn main() -> ExitCode {
                 .collect();
             iterator.into_iter().for_each(|(i, p)| {
                 let default = HashMapinfo {
-                    locuspos: Position::new(true, i),
-                    position: Position::new(true, p),
+                    locuspos: Position::newfromzposition(i),
+                    position: Position::newfromzposition(p),
                     ..Default::default()
                 };
-                pos.insert(Position::new(true, p), default);
+                pos.insert(Position::newfromzposition(p), default);
             });
             let mut message = false;
-            println!("Region {} fetched, analyzing all reads.", loci.locus);
+            println!("Region {} fetched, analyzing all reads.", loci.getlocus());
             let mut count = 0;
             let time = Instant::now();
             let sep = if args.fullquality {
@@ -1227,63 +1327,149 @@ fn main() -> ExitCode {
                 );
             });
             println!("Making graphs");
-            match graphs.extract_if(|a, _| a == &loci.haplotype).next() {
-                Some(a) => a.1.into_iter().for_each(|(name, image)| {
-                    if name == "readresult" {
-                        let image = match image {
-                            ImageType::Png((path, size)) => {
-                                let root = if !haplotypebool {
+            {
+                /*
+                let imagepng = |path: &PathBuf, size: (u32, u32)| -> BitMapBackend<'a, _> {
+                    if !haplotypebool {
+                        let (a, b) = BitMapBackend::new(path.as_path(), size)
+                            .into_drawing_area()
+                            .split_vertically(50);
+                        if loci.gethaplotype().isprimary() { a } else { b }
+                    } else {
+                        let i = BitMapBackend::new(path.as_path(), size).into_drawing_area();
+                        i
+                    }
+                };
+                let imagesvg = |path: &PathBuf, size: (u32, u32)| {
+                    if !haplotypebool {
+                        let (a, b) = SVGBackend::new(path.as_path(), size)
+                            .into_drawing_area()
+                            .split_vertically(50);
+                        if loci.gethaplotype().isprimary() { a } else { b }
+                    } else {
+                        let i = SVGBackend::new(path.as_path(), size).into_drawing_area();
+                        i
+                    }
+                };
+                */
+                match graphs.extract_if(|a, _| a == loci.gethaplotype()).next() {
+                    Some(mut a) => {
+                        a.1.retain(|p| p.0 == "readresult" || p.0 == "mismatchgraph");
+                        let (readimage, mismatchimage) = match a.1 {
+                            a if a.len() == 2 => {
+                                let mut iter = a.into_iter();
+                                match (iter.next(), iter.next()) {
+                                    (Some(a), Some(b)) if a.0 == "readresult" => (a.1, b.1),
+                                    (Some(a), Some(b)) => (b.1, a.1),
+                                    _ => unreachable!("Graphs must be present"),
+                                }
+                            }
+                            _ => unreachable!("Graphs must be present"),
+                        };
+                        //Redundant because issue with borrow checker
+                        match (readimage, mismatchimage) {
+                            (ImageType::Png((path, size)), ImageType::Png((mpath, msize))) => {
+                                let read = if !haplotypebool {
                                     let (a, b) = BitMapBackend::new(path.as_path(), size)
                                         .into_drawing_area()
                                         .split_vertically(50);
-                                    if loci.haplotype.isprimary() { a } else { b }
+                                    if loci.gethaplotype().isprimary() {
+                                        readoldbackendpng = Some(b);
+                                        a
+                                    } else if let Some(b) = readoldbackendpng {
+                                        b
+                                    } else {
+                                        b
+                                    }
                                 } else {
                                     let i = BitMapBackend::new(path.as_path(), size)
                                         .into_drawing_area();
                                     i
                                 };
-                                if let Err(e) = readgraph(
-                                    &args.outdir,
-                                    loci,
-                                    &pos.iter().map(|a| a.1).collect_vec(),
-                                    &args,
-                                    &speciesblast,
-                                    root,
-                                    mean,
-                                ) {
-                                    eprintln!("Cannot print read graphs. Error is {}", e);
-                                }
-                            }
-                            ImageType::Svg((path, size)) => {
-                                let root = if !haplotypebool {
-                                    let (a, b) = BitMapBackend::new(path.as_path(), size)
+                                let mismatch = if !haplotypebool {
+                                    let (a, b) = BitMapBackend::new(mpath.as_path(), msize)
                                         .into_drawing_area()
                                         .split_vertically(50);
-                                    if loci.haplotype.isprimary() { a } else { b }
+                                    if loci.gethaplotype().isprimary() {
+                                        mismatcholdbackendpng = Some(b);
+                                        a
+                                    } else if let Some(b) = mismatcholdbackendpng {
+                                        b
+                                    } else {
+                                        b
+                                    }
                                 } else {
-                                    let i = BitMapBackend::new(path.as_path(), size)
+                                    let i = BitMapBackend::new(mpath.as_path(), msize)
                                         .into_drawing_area();
                                     i
                                 };
-                                if let Err(e) = readgraph(
-                                    &args.outdir,
-                                    loci,
-                                    &pos.iter().map(|a| a.1).collect_vec(),
+                                if let Err(e) = paintgraph(
+                                    &loci,
+                                    &pos,
                                     &args,
                                     &speciesblast,
-                                    root,
+                                    read,
+                                    mismatch,
                                     mean,
                                 ) {
-                                    eprintln!("Cannot print read graphs. Error is {}", e);
+                                    eprintln!("Cannot print graphs. Error is {}", e);
                                 }
                             }
+                            (ImageType::Svg((path, size)), ImageType::Svg((mpath, msize))) => {
+                                let read = if !haplotypebool {
+                                    let (a, b) = SVGBackend::new(path.as_path(), size)
+                                        .into_drawing_area()
+                                        .split_vertically(50);
+                                    if loci.gethaplotype().isprimary() {
+                                        readoldbackendsvg = Some(b);
+                                        a
+                                    } else if let Some(b) = readoldbackendsvg {
+                                        b
+                                    } else {
+                                        b
+                                    }
+                                } else {
+                                    let i =
+                                        SVGBackend::new(path.as_path(), size).into_drawing_area();
+                                    i
+                                };
+                                let mismatch = if !haplotypebool {
+                                    let (a, b) = SVGBackend::new(mpath.as_path(), msize)
+                                        .into_drawing_area()
+                                        .split_vertically(50);
+                                    if loci.gethaplotype().isprimary() {
+                                        mismatcholdbackendsvg = Some(b);
+                                        a
+                                    } else if let Some(b) = mismatcholdbackendsvg {
+                                        b
+                                    } else {
+                                        b
+                                    }
+                                } else {
+                                    let i =
+                                        SVGBackend::new(mpath.as_path(), msize).into_drawing_area();
+                                    i
+                                };
+                                if let Err(e) = paintgraph(
+                                    &loci,
+                                    &pos,
+                                    &args,
+                                    &speciesblast,
+                                    read,
+                                    mismatch,
+                                    mean,
+                                ) {
+                                    eprintln!("Cannot print graphs. Error is {}", e);
+                                }
+                            }
+                            _ => unreachable!("Schemas must be of same type."),
                         };
                     }
-                }),
-                _ => {
-                    eprintln!("Cannot print graphs");
-                    continue;
-                }
+                    _ => {
+                        eprintln!("Cannot print graphs");
+                        continue;
+                    }
+                };
             };
             println!("Graphs finished.");
             //Create CSV from HashMap
@@ -1299,7 +1485,9 @@ fn main() -> ExitCode {
             }
             println!(
                 "Locus {} ({}) is {}.",
-                loci.locus, loci.haplotype, loci.status
+                loci.getlocus(),
+                loci.gethaplotype(),
+                loci.status
             );
             //Create gene CSV
             if let Some(blast) = &blastcheck {
@@ -1342,7 +1530,7 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                     Ok(b) if b.is_empty() => {
-                        eprintln!("No gene list for locus {}. Skipped.", loci.locus);
+                        eprintln!("No gene list for locus {}. Skipped.", loci.getlocus());
                     }
                     Ok(b) => {
                         if args.assembly.as_ref().is_some() && !args.nosubmit && blastpresent {
@@ -1354,7 +1542,7 @@ fn main() -> ExitCode {
                                 &args,
                                 &releaseversion,
                                 &speciesblast,
-                                &loci.locus,
+                                &loci.getlocus(),
                             ) {
                                 Ok((blast, r)) => {
                                     if releaseversion.is_none() {
@@ -1397,7 +1585,8 @@ fn main() -> ExitCode {
                         Err(e) => {
                             eprintln!(
                                 "Gene list generation for locus {} has an error: {}.",
-                                loci.locus, e
+                                loci.getlocus(),
+                                e
                             );
                             continue;
                         }
@@ -1411,14 +1600,16 @@ fn main() -> ExitCode {
                         (Err(e), _) => {
                             eprintln!(
                                 "Gene list generation for locus {} has an error: {}.",
-                                loci.locus, e
+                                loci.getlocus(),
+                                e
                             );
                             continue;
                         }
                         (Ok(_a), Err(e)) => {
                             eprintln!(
                                 "Gene list generation for locus {} has an error: {}.",
-                                loci.locus, e
+                                loci.getlocus(),
+                                e
                             );
                             continue;
                         }
@@ -1443,7 +1634,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        println!("Locus {} is done!", &floci.locus);
+        println!("Locus {} is done!", &floci.getlocus());
     }
     let mergedloci: Vec<LocusInfos> = grouped.iter().flatten().cloned().collect();
     if let Some(light) = &args.outlightbam
@@ -1468,6 +1659,9 @@ fn main() -> ExitCode {
         )
     {
         eprintln!("Error setting alleles result: {e}");
+    }
+    if let Err(e) = generatesequence(&args, &args.outdir, &mergedloci) {
+        eprintln!("{e}");
     }
     if !args.nosubmit
     /* && locushashresult
@@ -1561,8 +1755,8 @@ where
             } else {
                 (
                     matches.sseqid.clone(),
-                    Position::new(false, matches.sstart.try_into().unwrap_or_default()),
-                    Position::new(false, matches.send.try_into().unwrap_or_default()),
+                    Position::newfromoposition(matches.sstart.try_into().unwrap_or_default()),
+                    Position::newfromoposition(matches.send.try_into().unwrap_or_default()),
                     matches.complement.clone(),
                 )
             };
@@ -1684,7 +1878,7 @@ fn extractgenelist(
         });
     }
     if genes.is_empty() {
-        println!("No gene identified for locus {}, skipped.", loci.locus);
+        println!("No gene identified for locus {}, skipped.", loci.getlocus());
         return Ok(Vec::new());
     }
     //At least one duplicate line
@@ -1714,9 +1908,9 @@ fn generategeneinfos(
         //Hash contains 1-based positions
         genegenericrange.for_each(|p| {
             hash.insert(
-                Position::new(true, p),
+                Position::newfromzposition(p),
                 //Default should not trigger as no error possible
-                Posread::new(0, 0, 0, 0f32, args)
+                Posread::new(0, 0, 0, 0, 0f32, args)
                     .unwrap_or_else(|_| unreachable!("Error on Posread")),
             );
         });
@@ -1730,20 +1924,38 @@ fn generategeneinfos(
     {
         empty = false;
         reads += 1;
-        if let Some(d) = hash.get_mut(&Position::new(true, record.reference_start()))
+        if let Some(d) = hash.get_mut(&Position::newfromzposition(record.reference_start()))
             && record.cigar().leading_softclips() > 0
         {
             d.softclips += 1f32
-        } else if let Some(d) = hash.get_mut(&Position::new(true, record.reference_end()))
+        } else if let Some(d) = hash.get_mut(&Position::newfromzposition(record.reference_end()))
             && record.cigar().trailing_softclips() > 0
         {
             d.softclips += 1f32
         }
         let range = record.reference_start()..record.reference_end();
         coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
+        let mut oldcigar = None;
+        'outer: for (_, refpos, cigar) in record.aligned_pairs_full() {
+            match (cigar, oldcigar) {
+                (Cigar::Ins(_), Some(old)) => {
+                    match hash.get_mut(&Position::newfromzposition(old)) {
+                        Some(d) => d.addinsertion(1),
+                        None => {
+                            if old > gene.end.getzbasedpos() {
+                                break 'outer;
+                            }
+                        } //Outside coverage of gene
+                    }
+                }
+                _ => {
+                    oldcigar = refpos;
+                }
+            }
+        }
         'outer: for [start, end] in record.aligned_blocks() {
             for p in start..end {
-                match hash.get_mut(&Position::new(true, p)) {
+                match hash.get_mut(&Position::newfromzposition(p)) {
                     Some(d) => d.addindel(1),
                     None => {
                         if start > gene.end.getzbasedpos() {
@@ -1756,7 +1968,7 @@ fn generategeneinfos(
         if !args.force {
             'outer: for [start, end] in iterblock(&record).unwrap_or_default() {
                 for p in start..end {
-                    match hash.get_mut(&Position::new(true, p)) {
+                    match hash.get_mut(&Position::newfromzposition(p)) {
                         Some(d) => d.addmatch(1),
                         None => {
                             if start > gene.end.getzbasedpos() {
@@ -1788,7 +2000,7 @@ fn generategeneinfos(
             reads100m += 1;
         }
         for p in range {
-            match hash.get_mut(&Position::new(true, p)) {
+            match hash.get_mut(&Position::newfromzposition(p)) {
                 Some(d) => d.addtotal(1),
                 None => {
                     if record.reference_start() > gene.end.getzbasedpos() {
@@ -1823,11 +2035,12 @@ fn generategeneinfos(
         //Merging data
         iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
             acc.push_str(&format!(
-                "{}({}={}X{}ID)-",
+                "{}({}={}X{}D{}I)-",
                 f.gettotal(),
                 f.getmatch(),
                 f.getmismatchcount(),
-                f.getindelcount()
+                f.getindelcount(),
+                f.getinsertion(),
             ));
             acc
         })
@@ -1865,9 +2078,9 @@ fn genelist(
     let outputdir = &args.outdir;
     let outputfile = outputdir.join(givename(
         species,
-        &loci.locus,
+        &loci.getlocus(),
         &loci.contig,
-        loci.haplotype.isprimary(),
+        loci.gethaplotype().isprimary(),
         "geneanalysis.csv",
         false,
     ));
@@ -1878,7 +2091,7 @@ fn genelist(
         let (elem, hash) = generategeneinfos(&args, &mut gene)?;
         let plots = outputdir.join(format!(
             "gene_{}",
-            loci.haplotype.to_string().as_str().to_lowercase()
+            loci.gethaplotype().to_string().as_str().to_lowercase()
         ));
         if !std::fs::exists(&plots)? {
             println!("Creating the folder {}", plots.display());
@@ -1951,9 +2164,9 @@ fn printbreaks(
 ) -> std::io::Result<()> {
     let mut breakfile = File::create(outputdir.join(givename(
         species,
-        &loci.locus,
+        &loci.getlocus(),
         &loci.contig,
-        loci.haplotype.isprimary(),
+        loci.gethaplotype().isprimary(),
         "break.txt",
         false,
     )))?;
@@ -2011,9 +2224,9 @@ fn printpossus(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         species,
-        &loci.locus,
+        &loci.getlocus(),
         &loci.contig,
-        loci.haplotype.isprimary(),
+        loci.gethaplotype().isprimary(),
         "allele_confidence.csv",
         false,
     ));
@@ -2073,7 +2286,9 @@ where
         .caption(
             format!(
                 "Reads coverage for {} ({}-{})",
-                genename, loci.haplotype, gene.strand
+                genename,
+                loci.gethaplotype(),
+                gene.strand
             ),
             ("sans-serif", 22, &colorgene),
         )
@@ -2108,6 +2323,21 @@ where
         .label("Sequence match")
         .legend(|(x, y)| {
             PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300.mix(0.8))
+        });
+    chart
+        .draw_series(LineSeries::new(
+            hash.iter()
+                .enumerate()
+                .map(|(pos, (_, val))| (pos + 1, val.getinsertion())),
+            full_palette::BLUEGREY_600.mix(0.7).stroke_width(3),
+        ))
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
+        .label("Insertion")
+        .legend(|(x, y)| {
+            PathElement::new(
+                vec![(x, y), (x + 15, y)],
+                full_palette::BLUEGREY_600.mix(0.8),
+            )
         });
     //Three levels if not forced
     if !args.force {
@@ -2319,9 +2549,9 @@ fn createcsv(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         species,
-        &loci.locus,
+        &loci.getlocus(),
         &loci.contig,
-        loci.haplotype.isprimary(),
+        loci.gethaplotype().isprimary(),
         "positionresult.csv",
         false,
     ));
@@ -2387,7 +2617,9 @@ where
         .caption(
             format!(
                 "Mismatches rate and quality on the locus {} ({}-{})",
-                loci.locus, loci.contig, loci.haplotype
+                loci.getlocus(),
+                loci.contig,
+                loci.gethaplotype()
             ),
             ("sans-serif", 28),
         )
@@ -2498,7 +2730,7 @@ where
             /*.caption(
                 format!(
                     "Break in coverage {} ({})",
-                    loci.locus, loci.contig
+                    loci.getlocus(), loci.contig
                 ),
                 ("sans-serif", 40),
             )  */
@@ -2720,7 +2952,9 @@ where
         .caption(
             format!(
                 "Reads mapping quality over the locus {} ({}-{})",
-                loci.locus, loci.contig, loci.haplotype
+                loci.getlocus(),
+                loci.contig,
+                loci.gethaplotype()
             ),
             ("sans-serif", 28, &colorgene),
         )
@@ -2945,7 +3179,7 @@ where
         /*.caption(
             format!(
                 "Break in coverage {} ({})",
-                loci.locus, loci.contig
+                loci.getlocus(), loci.contig
             ),
             ("sans-serif", 40),
         )  */

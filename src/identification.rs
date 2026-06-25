@@ -2,10 +2,10 @@ use bio::io::fasta;
 use indicatif::ProgressBar;
 use itertools::Itertools;
 use minimap2::Aligner;
-use reqwest::{StatusCode, Url, header};
+use reqwest::{StatusCode, header};
 
 use crate::{
-    BORNES, getassemblyreader, printpotentialbornes,
+    BORNES, TIMEOUT_IN_MN, getassemblyreader, printpotentialbornes,
     r#struct::{
         Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, Haplotype, Locus, LocusInfos,
         Name, Position, Species, Status, Strand,
@@ -23,8 +23,8 @@ use std::{
     io::{self, BufReader, Cursor, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::mpsc::channel,
-    thread,
+    sync::{Arc, mpsc::channel},
+    thread::{self, ScopedJoinHandle, sleep},
     time::Duration,
 };
 pub(crate) fn threadlaunch<T>(
@@ -48,9 +48,10 @@ where
             Ok(b)
         });
         let (sender, receiver) = channel();
+        let sender = Arc::new(sender);
         let bornes = bornespath.as_ref().map(|b| {
             s.spawn(move || {
-                match receiver.recv_timeout(Duration::from_mins(30)) {
+                match receiver.recv_timeout(Duration::from_mins(TIMEOUT_IN_MN)) {
                     Ok("kill") => {
                         eprintln!("aborted by main");
                         return None;
@@ -70,6 +71,13 @@ where
                 let read = fasta::Reader::from_file(b.getpath()).ok()?;
                 let mut aligns: Vec<Blastmatch> = Vec::new();
                 for seq in read.records().filter_map(Result::ok) {
+                    match receiver.try_recv() {
+                        Ok("kill") => {
+                            eprintln!("aborted by main");
+                            return None;
+                        }
+                        _ => (),
+                    };
                     if let Ok(a) = aligner
                         .map(
                             seq.seq(),
@@ -135,6 +143,23 @@ where
                 }
             })
         });
+        let threadtimeout = |bornessome: &ScopedJoinHandle<'_, Option<Vec<Blastmatch>>>| {
+            thread::scope(|f| {
+                let sender = Arc::clone(&sender);
+                f.spawn(move || {
+                    let mut time = 0;
+                    while time < TIMEOUT_IN_MN.saturating_mul(60) {
+                        if bornessome.is_finished() {
+                            return;
+                        }
+                        sleep(Duration::new(1, 0));
+                        time += 1;
+                    }
+                    let _ = sender.send("kill");
+                    return;
+                });
+            });
+        };
         println!("Waiting for blast and bornes to finish. It can take several minutes.");
         let blast = if args.lowmemory {
             println!("You have low memory, BLAST would be launched first.");
@@ -143,9 +168,15 @@ where
                 .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "Error with blast thread"))??;
             println!("Starting minimap2 now.");
             let _ = sender.send("start"); //No need to check, it will turn into Err on receiver and kill the process
+            if let Some(bornessome) = &bornes {
+                threadtimeout(bornessome);
+            }
             r
         } else {
             let _ = sender.send("start"); //No need to check, it will turn into Err on receiver and kill the process
+            if let Some(bornessome) = &bornes {
+                threadtimeout(bornessome);
+            }
             blast
                 .join()
                 .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "Error with blast thread"))??
@@ -290,7 +321,7 @@ pub(crate) fn locusallposition(
                     && let Ok(maxi) = max.try_into()
                     && a.end.getzbasedpos() > maxi
                 {
-                    a.end = Position::new(true, maxi);
+                    a.end = Position::newfromzposition(maxi);
                 }
             });
             Ok(b)
