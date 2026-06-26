@@ -9,6 +9,7 @@ use crate::{PHYLUMLIMIT, TIMEOUT_IN_MN, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::index::Type;
 use extended_htslib::bam::{self, Read};
+use flate2::GzBuilder;
 use flate2::{Compression, write::GzEncoder};
 use indicatif::ProgressBar;
 use itertools::Itertools;
@@ -19,7 +20,7 @@ use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io::IsTerminal;
+use std::io::{BufWriter, IsTerminal, Write};
 use std::str::FromStr;
 use std::thread::{self, available_parallelism, sleep};
 use std::{
@@ -1338,39 +1339,62 @@ pub(crate) fn generatesequence(
     dir: &Path,
     locus: &[LocusInfos],
 ) -> Result<PathBuf, String> {
-    let sequencefile = Filecrea::createfrompath(Path::join(&dir, "sequence.fasta"));
-    let mut fastawriter =
-        fasta::Writer::to_file(&sequencefile.getpath()).map_err(|f| format!("{f}"))?;
-    let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
-        None => return Err("No assembly provided.".to_string()),
-        Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
-        Some(Ok(b)) => b,
-    };
-    for list in locus.iter() {
-        let seq = list
-            .extractsequence(&mut assembly)
-            .unwrap_or("Sequence is unavailable".to_string());
-        fastawriter
-            .write(
-                &format!("{}:{}", list.getlocus(), list.contig),
-                Some(&format!(
-                    "{}:{}-{}/{}/{}",
-                    list.getlocus(),
-                    list.start.getobasedpos(),
-                    list.end.getobasedpos(),
-                    list.complement,
-                    list.gethaplotype()
-                )),
-                seq.as_bytes(),
-            )
-            .map_err(|f| {
-                format!(
-                    "Unable to write fasta sequence {}. Error is {f}",
-                    list.getlocus()
+    let sequencefile = Filecrea::createfrompath(Path::join(&dir, "sequence.fasta.gz"));
+    let mut cursor = io::Cursor::new(Vec::new());
+    {
+        //To free borrow of cursor
+        let bufwriter = BufWriter::new(&mut cursor);
+        let mut fastawriter = fasta::Writer::new(bufwriter);
+        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
+            None => return Err("No assembly provided.".to_string()),
+            Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
+            Some(Ok(b)) => b,
+        };
+        for list in locus.iter() {
+            let seq = list
+                .extractsequence(&mut assembly)
+                .unwrap_or("Sequence is unavailable".to_string());
+            fastawriter
+                .write(
+                    &format!("{}:{}", list.getlocus(), list.contig),
+                    Some(&format!(
+                        "{}:{}-{}/{}/{}",
+                        list.getlocus(),
+                        list.start.getobasedpos(),
+                        list.end.getobasedpos(),
+                        list.complement,
+                        list.gethaplotype()
+                    )),
+                    seq.as_bytes(),
                 )
-            })?;
+                .map_err(|f| {
+                    format!(
+                        "Unable to write fasta sequence {}. Error is {f}",
+                        list.getlocus()
+                    )
+                })?;
+        }
+        fastawriter.flush().map_err(|e| e.to_string())?;
     }
-    fastawriter.flush().map_err(|e| e.to_string())?;
+    todo!("Fix archive");
+    let elem = sequencefile
+        .getfile()
+        .map_err(|d| format!("Cannot create archive: {d}"))?;
+    let mut encoder = GzBuilder::default()
+        .filename("sequence.fasta")
+        .comment("Sequence")
+        .write(elem, Compression::default())
+        .finish()
+        .map_err(|e| format!("Error making fasta archive: {e}"))?;
+    let mut bytes = Vec::new();
+    cursor
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Error making fasta archive: {e}"))?;
+    encoder
+        .write_all(&bytes)
+        .map_err(|d| format!("Cannot write sequence. Error is {d}"))?;
+    bytes.clear();
+    bytes.shrink_to_fit();
     Ok(sequencefile.getpath().to_path_buf())
 }
 pub(crate) fn generatelightbam(

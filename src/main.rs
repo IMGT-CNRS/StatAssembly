@@ -1104,10 +1104,6 @@ fn main() -> ExitCode {
             eprintln!("Error with some locus, continuing");
             continue;
         };
-        println!(
-            "Haplotype {} and {} and {:?}",
-            haplotype, haplotypebool, readresultsize
-        );
         let readname = Path::join(
             &args.outdir,
             givename(
