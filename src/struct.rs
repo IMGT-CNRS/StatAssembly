@@ -1,7 +1,7 @@
 use bio::io::fasta;
 use indicatif::ProgressBar;
 use itertools::Itertools;
-use plotters::backend::{BitMapBackend, DrawingBackend, SVGBackend};
+use plotters::backend::{BitMapBackend, SVGBackend};
 use plotters::coord::Shift;
 use plotters::drawing::DrawingArea;
 use serde::ser::SerializeTupleStruct;
@@ -14,11 +14,12 @@ Available under EUPL license
 Made by: Guilhem Zeitoun
 */
 use crate::submissions::{
-    DELIMITERFASTA, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT,
+    NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT,
     getallelefromblast, getchromosomefromblast, getpositionfromblast, getspeciesfromncbi,
 };
 use crate::{
-    ALERTPERC, MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO, WARNINGPERC, locusisokay,
+    ALERTPERC, DELIMITERFASTA, MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO,
+    WARNINGPERC, locusisokay,
 };
 use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
@@ -179,6 +180,7 @@ impl<'a> Backend<'a> {
             _ => false,
         }
     }
+    #[allow(unused)]
     pub(crate) fn ispng(&self) -> bool {
         match self {
             Self::Png(_) => true,
@@ -228,6 +230,10 @@ impl Filecrea {
     pub(crate) fn getfile(&self) -> io::Result<File> {
         let a = self.getpath();
         File::open(a)
+    }
+    pub(crate) fn setfile(&self) -> io::Result<File> {
+        let a = self.getpath();
+        File::create(a)
     }
     #[allow(unused)]
     pub(crate) fn istemp(&self) -> bool {
@@ -299,7 +305,7 @@ impl<'a> Image<'a> {
     }
 }
  */
-pub(crate) enum ImageType {
+/* pub(crate) enum ImageType {
     Svg((PathBuf, (u32, u32))),
     Png((PathBuf, (u32, u32))),
 }
@@ -328,6 +334,7 @@ impl ImageType {
         }
     }
 }
+*/
 #[derive(Debug, Deserialize)]
 pub(crate) struct GitLabTag {
     pub(crate) name: String,
@@ -540,7 +547,7 @@ impl Species {
                     )));
                 }
                 Some(_) => {
-                    eprintln!("NCBI unavailable, your species won't be checked.");
+                    eprintln!("NCBI unavailable, your species won't be checked. Error is {e}");
                     (String::from("Species"), species.as_ref().to_string(), None)
                 }
                 None => {
@@ -1862,7 +1869,7 @@ impl GeneInfos {
         let mut cap = Vec::with_capacity(length.try_into().unwrap_or(0));
         fasta.read(&mut cap)?;
         let alphabet = bio::alphabets::dna::iupac_alphabet();
-        if !alphabet.is_word(&cap) {
+        if !cap.is_ascii() && !alphabet.is_word(&cap) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -1886,7 +1893,9 @@ impl GeneInfos {
         if self.strand.isrev() {
             cap = bio::alphabets::dna::revcomp(&cap);
         }
-        String::from_utf8(cap).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        String::from_utf8(cap)
+            .map(|a| a.to_ascii_lowercase())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
     pub(crate) fn getlength(&self) -> i64 {
         self.end.length(&self.start)

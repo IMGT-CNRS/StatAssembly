@@ -5,7 +5,7 @@ use crate::r#struct::{
     Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusInfos, Name,
     Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
 };
-use crate::{PHYLUMLIMIT, TIMEOUT_IN_MN, getassemblyreader, getreaderoffile};
+use crate::{EMAIL, NAME, PHYLUMLIMIT, TIMEOUT_IN_MN, VERSION, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
 use extended_htslib::bam::index::Type;
 use extended_htslib::bam::{self, Read};
@@ -20,7 +20,7 @@ use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::io::{BufWriter, IsTerminal, Write};
+use std::io::{BufWriter, IsTerminal, Seek, Write};
 use std::str::FromStr;
 use std::thread::{self, available_parallelism, sleep};
 use std::{
@@ -29,7 +29,7 @@ use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, ErrorKind, Read as _},
     ops::{Not, RangeInclusive},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -88,9 +88,6 @@ lazy_static! {
         obfstr::obfstring!("/submissions/")
     );
 }
-pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub(crate) const DELIMITERFASTA: char = '/';
-pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 
 pub(crate) fn readfromterminal(
     yes: &char,
@@ -888,17 +885,23 @@ where
     } else {
         let response = client
             .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?")
-            .query(&[("db", "taxonomy"), ("term", species), ("format", "xml")])
+            .query(&[
+                ("db", "taxonomy"),
+                ("term", species),
+                ("tool", NAME.as_str()),
+                ("email", EMAIL),
+                ("format", "xml"),
+            ])
             .send()?;
         if response.status().is_server_error() {
             return Err(Box::new(io::Error::new(
                 ErrorKind::HostUnreachable,
-                "Unsuccessful NCBI response",
+                "Unsuccessful NCBI response (server error)",
             )));
         } else if !response.status().is_success() {
             return Err(Box::new(io::Error::new(
                 ErrorKind::NotFound,
-                "Unsuccessful NCBI response",
+                format!("Unsuccessful NCBI response. Error is {}", response.status()),
             )));
         }
         let responsebody = match response.text() {
@@ -932,23 +935,30 @@ where
             }
         }
     };
+    sleep(Duration::from_millis(500)); //sleep for NCBI
     let response = client
         .get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?")
         .query(&[
             ("db", "taxonomy"),
             ("id", &format!("{id}")),
+            ("tool", NAME.as_str()),
+            ("email", EMAIL),
             ("format", "xml"),
         ])
         .send()?;
     if response.status().is_server_error() {
         return Err(Box::new(io::Error::new(
             ErrorKind::HostUnreachable,
-            "Unsuccessful NCBI response",
+            "Unsuccessful NCBI response (server error)",
         )));
     } else if !response.status().is_success() {
         return Err(Box::new(io::Error::new(
             ErrorKind::NotFound,
-            "Unsuccessful NCBI response",
+            format!(
+                "Unsuccessful NCBI response. Code is {}, text is {}",
+                response.status(),
+                response.text().unwrap_or_default()
+            ),
         )));
     }
     let responsebody = match response.text() {
@@ -1161,7 +1171,7 @@ pub(crate) fn submit(
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, None, locus)?;
     let sequencefile = generatesequence(args, dir, locus)?;
-    let mut motifs = matchmotif(&sequencefile, realspecies, &args, None)
+    let mut motifs = matchmotif(&sequencefile.getpath(), realspecies, &args, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
@@ -1338,13 +1348,14 @@ pub(crate) fn generatesequence(
     args: &Args,
     dir: &Path,
     locus: &[LocusInfos],
-) -> Result<PathBuf, String> {
+) -> Result<Filecrea, String> {
     let sequencefile = Filecrea::createfrompath(Path::join(&dir, "sequence.fasta.gz"));
     let mut cursor = io::Cursor::new(Vec::new());
     {
         //To free borrow of cursor
         let bufwriter = BufWriter::new(&mut cursor);
-        let mut fastawriter = fasta::Writer::new(bufwriter);
+        let mut fastawriter = fasta::Writer::from_bufwriter(bufwriter);
+        fastawriter.set_linewrap(Some(100));
         let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
             None => return Err("No assembly provided.".to_string()),
             Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
@@ -1358,12 +1369,11 @@ pub(crate) fn generatesequence(
                 .write(
                     &format!("{}:{}", list.getlocus(), list.contig),
                     Some(&format!(
-                        "{}:{}-{}/{}/{}",
-                        list.getlocus(),
+                        "{}:{}-{}/{}",
+                        list.getlocushaplo(),
                         list.start.getobasedpos(),
                         list.end.getobasedpos(),
-                        list.complement,
-                        list.gethaplotype()
+                        list.complement
                     )),
                     seq.as_bytes(),
                 )
@@ -1376,16 +1386,14 @@ pub(crate) fn generatesequence(
         }
         fastawriter.flush().map_err(|e| e.to_string())?;
     }
-    todo!("Fix archive");
+    cursor.rewind().map_err(|e| e.to_string())?;
     let elem = sequencefile
-        .getfile()
+        .setfile()
         .map_err(|d| format!("Cannot create archive: {d}"))?;
     let mut encoder = GzBuilder::default()
         .filename("sequence.fasta")
         .comment("Sequence")
-        .write(elem, Compression::default())
-        .finish()
-        .map_err(|e| format!("Error making fasta archive: {e}"))?;
+        .write(elem, Compression::fast());
     let mut bytes = Vec::new();
     cursor
         .read_to_end(&mut bytes)
@@ -1395,7 +1403,7 @@ pub(crate) fn generatesequence(
         .map_err(|d| format!("Cannot write sequence. Error is {d}"))?;
     bytes.clear();
     bytes.shrink_to_fit();
-    Ok(sequencefile.getpath().to_path_buf())
+    Ok(sequencefile)
 }
 pub(crate) fn generatelightbam(
     args: &Args,
@@ -1526,6 +1534,54 @@ pub(crate) fn preparesubmission(path: &Path, species: &Species, args: &Args) -> 
     );
     true
 }
+pub(crate) fn getprogressbarspin() -> io::Result<ProgressBar> {
+    let pb = ProgressBar::new(0);
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb.set_style(
+        indicatif::ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] {pos}")
+            .map_err(|b| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("issue with progress bar: {b}"),
+                )
+            })?
+            .progress_chars("#>-"),
+    );
+    Ok(pb)
+}
+pub(crate) fn getprogressbarclassic(total_size: u64) -> io::Result<ProgressBar> {
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) ({eta}) {msg}",
+            )
+            .map_err(|b| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("issue with progress bar: {b}"),
+                )
+            })?
+            .progress_chars("#>-"),
+    );
+    Ok(pb)
+}
+pub(crate) fn getprogressbar<R>(size: u64, reader: R) -> io::Result<ProgressReader<R>> {
+    let pb = ProgressBar::new(size);
+    pb.set_style(
+    indicatif::ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .map_err(|b| io::Error::new(ErrorKind::InvalidData,format!("issue with progress bar: {b}")))?
+        .progress_chars("#>-"),
+);
+
+    Ok(ProgressReader {
+        reader: reader,
+        progress_bar: pb,
+        total_bytes: size,
+    })
+}
 pub(crate) fn submission(token: &str, species: &Species, archive: Filecrea) -> io::Result<()> {
     /* let multipart = reqwest::blocking::multipart::Form::new()
     .file("genelist", "submission/genelist.csv")?
@@ -1534,19 +1590,7 @@ pub(crate) fn submission(token: &str, species: &Species, archive: Filecrea) -> i
     .text("type","submission")
     .file("locus", "submission/locus.bam")?; */
     let file_size = archive.getpath().metadata()?.len();
-    let pb = ProgressBar::new(file_size);
-    pb.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            .map_err(|b| io::Error::new(ErrorKind::InvalidData,format!("issue with progress bar: {b}")))?
-            .progress_chars("#>-"),
-    );
-
-    let progress_reader = ProgressReader {
-        reader: archive.getfile()?,
-        progress_bar: pb,
-        total_bytes: file_size,
-    };
+    let progress_reader = getprogressbar(file_size, archive.getfile()?)?;
     let zip = reqwest::blocking::multipart::Form::new()
         .part("file", multipart::Part::reader(progress_reader))
         .text("version", VERSION)

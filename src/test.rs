@@ -1,14 +1,19 @@
 #[cfg(test)]
 mod tests {
-    use std::{thread::sleep, time::Duration};
+    use std::{
+        io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
+        thread::sleep,
+        time::Duration,
+    };
 
     use crate::{
         extractgenelist, generategeneinfos,
         identification::{sendresult, sendresultcompressed},
         locusposparser,
-        r#struct::{Args, Species, SpeciesError},
+        r#struct::{Args, Filecrea, Species, SpeciesError},
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, generatelightbam,
+            generatesequence,
         },
     };
     use clap::Parser;
@@ -33,7 +38,50 @@ mod tests {
         );
     }
     #[test]
+    fn generatesequencetest() {
+        let testo = TempDir::new().unwrap();
+        let fake_args = vec![
+            "IMGT_StatAssembly",
+            "-f",
+            "example_files/CHM13v2.0.bam",
+            "-a",
+            "example_files/assembly.fasta",
+            "-l",
+            "example_files/CHM13v2.0loc.csv",
+            "-s",
+            "human",
+            "-g",
+            "example_files/CHM13v2.0geneloc.csv",
+            "-o",
+            testo.path().to_str().unwrap(),
+            "analyze",
+        ];
+        let human = Species::new("Homo sapiens").unwrap();
+        let args4 = Args::try_parse_from(fake_args)
+            .map_err(|f| f.to_string())
+            .unwrap();
+        let (mut locus, ..) = locusposparser(&args4, &human, false).unwrap();
+        locus.sort_unstable(); //Because sorted in mergedlocus function
+        let seq = generatesequence(&args4, testo.path(), &locus).unwrap();
+        let mut bufone =
+            BufReader::new(std::fs::File::open("example_files/results/sequence.fasta.gz").unwrap());
+        let mut buftwo = BufReader::new(std::fs::File::open(seq.getpath()).unwrap());
+        loop {
+            let mut buf1 = [0; 3000];
+            let mut buf2 = [0; 3000];
+            match (bufone.read_exact(&mut buf1), buftwo.read_exact(&mut buf2)) {
+                (Err(a), Err(b)) if b.kind() == UnexpectedEof && a.kind() == UnexpectedEof => break,
+                (Ok(_), Ok(_)) if buf1.eq(&buf2) => (),
+                (Ok(_), Ok(_)) => {
+                    panic!("Buffer does not have same value.");
+                }
+                _ => panic!("Fails with buffer"),
+            }
+        }
+    }
+    #[test]
     fn checkspecies() {
+        sleep(Duration::new(3, 0)); //Sleep for NCBI
         let human = Species::new("Homo sapiens").unwrap();
         assert_eq!(human.ischecked(), true, "Species could not be validated");
         assert_eq!(human.getid(), Some(9606), "Species taxon is invalid");
@@ -67,8 +115,8 @@ mod tests {
     #[test]
     fn testlocuspositiononlyandbam() {
         let testo = TempDir::new().unwrap();
-        let a = NamedTempFile::with_suffix("test.bam").unwrap();
-        let b = NamedTempFile::with_suffix("test.bam.csi").unwrap();
+        let a = Filecrea::createtemp(None, Some("test.bam")).unwrap();
+        let b = Filecrea::createtemp(None, Some("test.bam.csi")).unwrap();
         // Fake args as a Vec<&str>
         let fake_args = vec![
             "IMGT_StatAssembly",
@@ -85,7 +133,7 @@ mod tests {
             "-o",
             testo.path().to_str().unwrap(),
             "-z",
-            a.path().to_str().unwrap(),
+            a.getpath().to_str().unwrap(),
             "analyze",
         ];
         let args4 = Args::try_parse_from(fake_args)
@@ -96,12 +144,6 @@ mod tests {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
         };
-        eprintln!(
-            "Data is {:?}",
-            result
-                .iter()
-                .map(|a| (a.getlocus(), a.gethaplotype(), &a.status))
-        );
         assert!(
             result.iter().all(|f| f.status.status.isvalid()),
             "One locus is not valid"
@@ -109,7 +151,7 @@ mod tests {
         generatelightbam(
             &args4,
             args4.outlightbam.as_ref().unwrap(),
-            Some(b.path()),
+            Some(b.getpath()),
             &result,
         )
         .unwrap();

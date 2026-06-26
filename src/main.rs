@@ -17,7 +17,6 @@ use itertools::Itertools;
 use plotters::coord::Shift;
 use std::collections::HashMap;
 use std::io::ErrorKind::InvalidInput;
-use std::io::stdout;
 use std::num::NonZero;
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -30,7 +29,8 @@ use strum::IntoEnumIterator;
 use crate::r#struct::*;
 use crate::submissions::{
     GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, REQUESTCLIENT, askforsubmission,
-    checkifblastpresent, generatelightbam, generatesequence, genesblast, positionfiltering,
+    checkifblastpresent, generatelightbam, generatesequence, genesblast, getprogressbarclassic,
+    getprogressbarspin, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use extended_htslib::bam::record::{Cigar, CsValue};
@@ -58,6 +58,7 @@ mod submissions;
 mod test;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = "IMGT®";
+const EMAIL: &str = "guilhem.zeitoun@cnrs.fr";
 const GLOBALMISMATCHFLOATING: usize = 10_000;
 const ALERTLOCUSSIZE: i64 = 10_000_000;
 const MIN_READLENGTH: u64 = 1_000;
@@ -72,6 +73,8 @@ const BORNES: usize = 10_000;
 const WARNINGPERC: u8 = 80;
 const ALERTPERC: u8 = 60;
 const SOFTCLIPRATIO: f32 = 0.4;
+pub(crate) const DELIMITERFASTA: char = '/';
+pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
@@ -860,6 +863,7 @@ fn available_memory() -> Option<usize> {
     let available_mem: usize = size.parse().ok()?;
     Some(available_mem)
 }
+/*
 fn setgraphbitmap<'a>(
     haplotype: usize,
     haplotypebool: bool,
@@ -913,6 +917,7 @@ fn setgraphbitmap<'a>(
     }
     Ok(list)
 }
+*/
 fn main() -> ExitCode {
     let mut args = Args::parse();
     if checknewversion() {
@@ -1182,7 +1187,7 @@ fn main() -> ExitCode {
                 }
             }
         };
-        let mut lock = stdout().lock();
+        //let mut lock = stdout().lock();
         //For each individual haplotype inside locus
         for loci in locus.iter_mut() {
             let mut reader = match getreaderoffile(&args) {
@@ -1243,7 +1248,7 @@ fn main() -> ExitCode {
             let mut message = false;
             println!("Region {} fetched, analyzing all reads.", loci.getlocus());
             let mut count = 0;
-            let time = Instant::now();
+            //let time = Instant::now();
             let sep = if args.fullquality {
                 1
             } else {
@@ -1252,6 +1257,7 @@ fn main() -> ExitCode {
                     100,
                 ) //250 points for quality point or 100nt break
             };
+            let progress = getprogressbarspin();
             for p in reader
                 .rc_records()
                 .filter_map(Result::ok)
@@ -1259,13 +1265,16 @@ fn main() -> ExitCode {
             {
                 count += 1;
                 //Print every x reads done
-                if count % READGAPMESSAGE == 0 {
-                    let _ = writeln!(
+                if count % READGAPMESSAGE == 0
+                    && let Ok(a) = &progress
+                {
+                    a.set_position(count);
+                    /* let _ = writeln!(
                         lock,
                         "Processed {} reads in {:.3} s",
                         count.to_formatted_string(&Locale::en),
                         Instant::now().saturating_duration_since(time).as_secs_f32()
-                    );
+                    ); */
                 }
                 nocount = false;
                 match processcounting(&args, &mut pos, message, loci, &p, sep) {
@@ -1281,6 +1290,7 @@ fn main() -> ExitCode {
                 }
             }
             loci.setstatus(mean, &pos);
+            //let _ = progress.map(|d| d.finish());
             if nocount {
                 eprintln!(
                     "The region {}:{}-{} has no data, skipped.",
@@ -1990,7 +2000,8 @@ fn genelist(
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
-    for mut gene in genes {
+    let progressbar = getprogressbarclassic(genes.len().try_into().unwrap_or_default())?;
+    for (pos, mut gene) in genes.into_iter().enumerate() {
         let (elem, hash) = generategeneinfos(&args, &mut gene)?;
         let plots = outputdir.join(format!(
             "gene_{}",
@@ -2033,6 +2044,7 @@ fn genelist(
             )?;
         }
         finale.push(elem);
+        progressbar.set_position(pos.saturating_add(1).try_into().unwrap_or_default());
     }
     finale.sort_unstable(); //Sort the table
     let mut csv = csv::WriterBuilder::new()

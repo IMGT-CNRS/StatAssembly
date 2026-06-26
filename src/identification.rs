@@ -5,14 +5,14 @@ use minimap2::Aligner;
 use reqwest::{StatusCode, header};
 
 use crate::{
-    BORNES, TIMEOUT_IN_MN, getassemblyreader, printpotentialbornes,
+    BORNES, LOCUSSEPARATOR, TIMEOUT_IN_MN, getassemblyreader, printpotentialbornes,
     r#struct::{
         Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, Haplotype, Locus, LocusInfos,
         Name, Position, Species, Status, Strand,
     },
     submissions::{
-        BORNESLINK, LOCUSSEPARATOR, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK,
-        blastcommand, checkoverlap, fileincache, speciesandorphonfiltering,
+        BORNESLINK, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK, blastcommand, checkoverlap,
+        fileincache, getprogressbarclassic, speciesandorphonfiltering,
     },
 };
 use std::{
@@ -550,13 +550,7 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
                     (_, Some(Ok(Ok(b)))) => b,
                     _ => 0,
                 };
-                let pb = ProgressBar::new(total_size);
-                pb.set_style(
-                                indicatif::ProgressStyle::default_bar()
-                                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                                    .map_err(|b| format!("issue with progress bar: {b}"))?
-                                    .progress_chars("#>-")
-                            );
+                let pb = getprogressbarclassic(total_size).map_err(|e| e.to_string())?;
                 let stream = e.text().map_err(|e| e.to_string())?;
                 let mut downloaded = 0;
                 // Read the stream in chunks
