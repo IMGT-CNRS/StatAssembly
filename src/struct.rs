@@ -155,11 +155,68 @@ pub(crate) enum Filecrea {
     Temp(NamedTempFile),
     Plain(PathBuf),
 }
-pub(crate) struct DrawingImage<T: DrawingBackend> {
-    pub(crate) readresulttop: DrawingArea<T, Shift>,
-    pub(crate) readresultbottom: Option<DrawingArea<T, Shift>>,
-    pub(crate) mismatchtop: DrawingArea<T, Shift>,
-    pub(crate) mismatchbottom: Option<DrawingArea<T, Shift>>,
+//Drawingarea
+pub(crate) enum Backend<'a> {
+    Svg(DrawingArea<SVGBackend<'a>, Shift>),
+    Png(DrawingArea<BitMapBackend<'a>, Shift>),
+}
+impl<'a> Backend<'a> {
+    pub(crate) fn getsvg(self) -> Option<DrawingArea<SVGBackend<'a>, Shift>> {
+        match self {
+            Self::Svg(a) => Some(a),
+            _ => None,
+        }
+    }
+    pub(crate) fn getpng(self) -> Option<DrawingArea<BitMapBackend<'a>, Shift>> {
+        match self {
+            Self::Png(a) => Some(a),
+            _ => None,
+        }
+    }
+    pub(crate) fn issvg(&self) -> bool {
+        match self {
+            Self::Svg(_) => true,
+            _ => false,
+        }
+    }
+    pub(crate) fn ispng(&self) -> bool {
+        match self {
+            Self::Png(_) => true,
+            _ => false,
+        }
+    }
+}
+pub(crate) struct DrawingImage<'a> {
+    pub(crate) readresulttop: Option<Backend<'a>>,
+    pub(crate) readresultbottom: Option<Backend<'a>>,
+    pub(crate) mismatchtop: Option<Backend<'a>>,
+    pub(crate) mismatchbottom: Option<Backend<'a>>,
+}
+impl<'a> DrawingImage<'a> {
+    pub(crate) fn gettop(self) -> (Option<Backend<'a>>, Option<Backend<'a>>, DrawingImage<'a>) {
+        (
+            self.readresulttop,
+            self.mismatchtop,
+            DrawingImage {
+                readresulttop: None,
+                mismatchbottom: self.mismatchbottom,
+                readresultbottom: self.readresultbottom,
+                mismatchtop: None,
+            },
+        )
+    }
+    pub(crate) fn getbottom(self) -> (Option<Backend<'a>>, Option<Backend<'a>>, DrawingImage<'a>) {
+        (
+            self.readresultbottom,
+            self.mismatchbottom,
+            DrawingImage {
+                readresultbottom: None,
+                mismatchbottom: None,
+                readresulttop: self.readresulttop,
+                mismatchtop: self.mismatchtop,
+            },
+        )
+    }
 }
 impl Filecrea {
     pub(crate) fn getpath(&self) -> &Path {
@@ -2348,8 +2405,9 @@ impl Serialize for LocusInfos {
         if new.complement.isrev() {
             (new.start, new.end) = (self.end, self.start)
         };
-        let mut se = serializer.serialize_tuple_struct("LocusInfos", 5)?;
-        se.serialize_field(&new.locusinfo)?;
+        let mut se = serializer.serialize_tuple_struct("LocusInfos", 6)?;
+        se.serialize_field(&new.locusinfo.locus)?;
+        se.serialize_field(&new.locusinfo.haplo)?;
         se.serialize_field(&new.contig)?;
         se.serialize_field(&new.start)?;
         se.serialize_field(&new.end)?;

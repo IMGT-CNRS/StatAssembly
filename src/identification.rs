@@ -211,11 +211,13 @@ pub(crate) fn locusallposition(
     ) {
         (Some(a), Some((b, c))) => (Some(a), b?, c),
         (None, Some((b, c))) if args.nobornes => (None, b?, c),
-        (None, ..) if !args.nobornes => {
-            return Err(io::Error::new(
+        (None, Some((b, c))) if !args.nobornes => {
+            eprintln!("Bornes could not downloaded, skipped.");
+            (None, b?, c)
+            /* return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "Bornes from IMGT cannot be downloaded",
-            ));
+            )); */
         }
         _ => {
             return Err(io::Error::new(
@@ -234,13 +236,13 @@ pub(crate) fn locusallposition(
     let info = threadlaunch(referencepath, subject, &args, bornespath);
     let (mut blast, mut bornes) = match info {
         Ok((a, Some(Some(b)))) => (a, Some(b)),
-        Ok((a, Some(None))) => {
+        Ok((a, None)) => {
             if !args.nobornes {
                 eprintln!("No bornes found.");
             }
             (a, None)
         }
-        Ok((_, None)) => {
+        Ok((_, Some(None))) => {
             return Err(io::Error::new(
                 ErrorKind::BrokenPipe,
                 format!("Bornes could not be analyzed"),

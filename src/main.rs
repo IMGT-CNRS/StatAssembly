@@ -9,7 +9,6 @@ Made by: Guilhem Zeitoun
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
 use regex::Regex;
-use serde_with::NoneAsEmptyString;
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
 use crate::r#struct::AcceptedStatus::Rejected;
@@ -834,7 +833,7 @@ where
         args,
         mismatchgraphelem,
     )
-    .or_else(|_| {
+    .and_then(|_| {
         readgraph(
             &args.outdir,
             loci,
@@ -1091,20 +1090,6 @@ fn main() -> ExitCode {
             floci.getlocus(),
             if !haplotypebool { "diploid" } else { "haploid" }
         );
-        let mut graphs = match setgraphbitmap(
-            haplotype,
-            haplotypebool,
-            &args,
-            &outputdir,
-            &speciesblast,
-            floci,
-        ) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("Error setting graphs. Error is {e}. Exiting");
-                return ExitCode::FAILURE;
-            }
-        };
         let readresultsize = (
             1800,
             1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
@@ -1113,92 +1098,93 @@ fn main() -> ExitCode {
             1200,
             600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
         );
-        let structe = {
+        let loc = if let Some(a) = locus.first() {
+            a
+        } else {
+            eprintln!("Error with some locus, continuing");
+            continue;
+        };
+        println!(
+            "Haplotype {} and {} and {:?}",
+            haplotype, haplotypebool, readresultsize
+        );
+        let readname = Path::join(
+            &args.outdir,
+            givename(
+                &speciesblast,
+                loc.getlocus(),
+                &loc.contig,
+                haplotypebool,
+                &format!("readresult.{}", if args.svg { "svg" } else { "png" }),
+                true,
+            ),
+        );
+        let mismatchname = Path::join(
+            &args.outdir,
+            givename(
+                &speciesblast,
+                loc.getlocus(),
+                &loc.contig,
+                haplotypebool,
+                &format!("mismatchresult.{}", if args.svg { "svg" } else { "png" }),
+                true,
+            ),
+        );
+        let mut drawingmaps = {
             if args.svg {
-                let loc = if let Some(a) = locus.first() {
-                    a
-                } else {
-                    eprintln!("Error with some locus, continuing");
-                    continue;
-                };
-                let name = Path::join(
-                    &args.outdir,
-                    givename(
-                        &speciesblast,
-                        loc.getlocus(),
-                        &loc.contig,
-                        haplotypebool,
-                        "readresult.svg",
-                        true,
-                    ),
-                );
-                let (top, bottom) = if haplotypebool {
-                    let r = SVGBackend::new(name.as_path(), readresultsize)
+                let (top, bottom) = if !haplotypebool {
+                    let r = SVGBackend::new(readname.as_path(), readresultsize)
                         .into_drawing_area()
-                        .split_vertically(50);
+                        .split_vertically((50).percent_height());
                     (r.0, Some(r.1))
                 } else {
-                    let r = SVGBackend::new(name.as_path(), readresultsize).into_drawing_area();
+                    let r = SVGBackend::new(readname.as_path(), readresultsize).into_drawing_area();
                     (r, None)
                 };
-                let (mtop, mbottom) = if haplotypebool {
-                    let r = SVGBackend::new(name.as_path(), mismatchsize)
+                let (mtop, mbottom) = if !haplotypebool {
+                    let r = SVGBackend::new(mismatchname.as_path(), mismatchsize)
                         .into_drawing_area()
-                        .split_vertically(50);
+                        .split_vertically((50).percent_height());
                     (r.0, Some(r.1))
                 } else {
-                    let r = SVGBackend::new(name.as_path(), mismatchsize).into_drawing_area();
+                    let r =
+                        SVGBackend::new(mismatchname.as_path(), mismatchsize).into_drawing_area();
                     (r, None)
                 };
                 DrawingImage {
-                    readresulttop: top,
-                    readresultbottom: bottom,
-                    mismatchtop: mtop,
-                    mismatchbottom: mbottom,
+                    readresulttop: Some(Backend::Svg(top)),
+                    readresultbottom: bottom.map(|a| Backend::Svg(a)),
+                    mismatchtop: Some(Backend::Svg(mtop)),
+                    mismatchbottom: mbottom.map(|a| Backend::Svg(a)),
                 }
             } else {
-                let loc = if let Some(a) = locus.first() {
-                    a
-                } else {
-                    eprintln!("Error with some locus, continuing");
-                    continue;
-                };
-                let name = Path::join(
-                    &args.outdir,
-                    givename(
-                        &speciesblast,
-                        loc.getlocus(),
-                        &loc.contig,
-                        haplotypebool,
-                        "readresult.svg",
-                        true,
-                    ),
-                );
-                let (top, bottom) = if haplotypebool {
-                    let r = BitMapBackend::new(name.as_path(), readresultsize)
+                let (top, bottom) = if !haplotypebool {
+                    let r = BitMapBackend::new(readname.as_path(), readresultsize)
                         .into_drawing_area()
-                        .split_vertically(50);
+                        .split_vertically((50).percent_height());
                     (r.0, Some(r.1))
                 } else {
-                    let r = BitMapBackend::new(name.as_path(), readresultsize).into_drawing_area();
+                    let r =
+                        BitMapBackend::new(readname.as_path(), readresultsize).into_drawing_area();
                     (r, None)
                 };
-                let (mtop, mbottom) = if haplotypebool {
-                    let r = BitMapBackend::new(name.as_path(), mismatchsize)
+                let (mtop, mbottom) = if !haplotypebool {
+                    let r = BitMapBackend::new(mismatchname.as_path(), mismatchsize)
                         .into_drawing_area()
-                        .split_vertically(50);
+                        .split_vertically((50).percent_height());
                     (r.0, Some(r.1))
                 } else {
-                    let r = BitMapBackend::new(name.as_path(), mismatchsize).into_drawing_area();
+                    let r = BitMapBackend::new(mismatchname.as_path(), mismatchsize)
+                        .into_drawing_area();
                     (r, None)
                 };
                 DrawingImage {
-                    readresulttop: top,
-                    readresultbottom: bottom,
-                    mismatchtop: mtop,
-                    mismatchbottom: mbottom,
+                    readresulttop: Some(Backend::Png(top)),
+                    readresultbottom: bottom.map(|a| Backend::Png(a)),
+                    mismatchtop: Some(Backend::Png(mtop)),
+                    mismatchbottom: mbottom.map(|a| Backend::Png(a)),
                 }
-            };
+            }
         };
         let mut lock = stdout().lock();
         //For each individual haplotype inside locus
@@ -1352,125 +1338,46 @@ fn main() -> ExitCode {
                     }
                 };
                 */
-                match graphs.extract_if(|a, _| a == loci.gethaplotype()).next() {
-                    Some(mut a) => {
-                        a.1.retain(|p| p.0 == "readresult" || p.0 == "mismatchgraph");
-                        let (readimage, mismatchimage) = match a.1 {
-                            a if a.len() == 2 => {
-                                let mut iter = a.into_iter();
-                                match (iter.next(), iter.next()) {
-                                    (Some(a), Some(b)) if a.0 == "readresult" => (a.1, b.1),
-                                    (Some(a), Some(b)) => (b.1, a.1),
-                                    _ => unreachable!("Graphs must be present"),
+                let (readmap, mismatchmap, new) = if loci.gethaplotype().isprimary() {
+                    drawingmaps.gettop()
+                } else {
+                    drawingmaps.getbottom()
+                };
+                drawingmaps = new;
+                match (readmap, mismatchmap) {
+                    (Some(a), Some(b)) => {
+                        if a.issvg() {
+                            if let (Some(a), Some(b)) = (a.getsvg(), b.getsvg()) {
+                                if let Err(e) =
+                                    paintgraph(loci, &pos, &args, &speciesblast, a, b, mean)
+                                {
+                                    eprintln!("Error drawing graphs. Error is {e}");
+                                    continue;
                                 }
+                            } else {
+                                eprintln!("Error drawing graphs.");
+                                continue;
                             }
-                            _ => unreachable!("Graphs must be present"),
-                        };
-                        //Redundant because issue with borrow checker
-                        match (readimage, mismatchimage) {
-                            (ImageType::Png((path, size)), ImageType::Png((mpath, msize))) => {
-                                let read = if !haplotypebool {
-                                    let (a, b) = BitMapBackend::new(path.as_path(), size)
-                                        .into_drawing_area()
-                                        .split_vertically(50);
-                                    if loci.gethaplotype().isprimary() {
-                                        readoldbackendpng = Some(b);
-                                        a
-                                    } else if let Some(b) = readoldbackendpng {
-                                        b
-                                    } else {
-                                        b
-                                    }
-                                } else {
-                                    let i = BitMapBackend::new(path.as_path(), size)
-                                        .into_drawing_area();
-                                    i
-                                };
-                                let mismatch = if !haplotypebool {
-                                    let (a, b) = BitMapBackend::new(mpath.as_path(), msize)
-                                        .into_drawing_area()
-                                        .split_vertically(50);
-                                    if loci.gethaplotype().isprimary() {
-                                        mismatcholdbackendpng = Some(b);
-                                        a
-                                    } else if let Some(b) = mismatcholdbackendpng {
-                                        b
-                                    } else {
-                                        b
-                                    }
-                                } else {
-                                    let i = BitMapBackend::new(mpath.as_path(), msize)
-                                        .into_drawing_area();
-                                    i
-                                };
-                                if let Err(e) = paintgraph(
-                                    &loci,
-                                    &pos,
-                                    &args,
-                                    &speciesblast,
-                                    read,
-                                    mismatch,
-                                    mean,
-                                ) {
-                                    eprintln!("Cannot print graphs. Error is {}", e);
+                        } else {
+                            if let (Some(a), Some(b)) = (a.getpng(), b.getpng()) {
+                                if let Err(e) =
+                                    paintgraph(loci, &pos, &args, &speciesblast, a, b, mean)
+                                {
+                                    eprintln!("Error drawing graphs. Error is {e}");
+                                    continue;
                                 }
+                            } else {
+                                eprintln!("Error drawing graphs.");
+                                continue;
                             }
-                            (ImageType::Svg((path, size)), ImageType::Svg((mpath, msize))) => {
-                                let read = if !haplotypebool {
-                                    let (a, b) = SVGBackend::new(path.as_path(), size)
-                                        .into_drawing_area()
-                                        .split_vertically(50);
-                                    if loci.gethaplotype().isprimary() {
-                                        readoldbackendsvg = Some(b);
-                                        a
-                                    } else if let Some(b) = readoldbackendsvg {
-                                        b
-                                    } else {
-                                        b
-                                    }
-                                } else {
-                                    let i =
-                                        SVGBackend::new(path.as_path(), size).into_drawing_area();
-                                    i
-                                };
-                                let mismatch = if !haplotypebool {
-                                    let (a, b) = SVGBackend::new(mpath.as_path(), msize)
-                                        .into_drawing_area()
-                                        .split_vertically(50);
-                                    if loci.gethaplotype().isprimary() {
-                                        mismatcholdbackendsvg = Some(b);
-                                        a
-                                    } else if let Some(b) = mismatcholdbackendsvg {
-                                        b
-                                    } else {
-                                        b
-                                    }
-                                } else {
-                                    let i =
-                                        SVGBackend::new(mpath.as_path(), msize).into_drawing_area();
-                                    i
-                                };
-                                if let Err(e) = paintgraph(
-                                    &loci,
-                                    &pos,
-                                    &args,
-                                    &speciesblast,
-                                    read,
-                                    mismatch,
-                                    mean,
-                                ) {
-                                    eprintln!("Cannot print graphs. Error is {}", e);
-                                }
-                            }
-                            _ => unreachable!("Schemas must be of same type."),
-                        };
+                        }
                     }
                     _ => {
-                        eprintln!("Cannot print graphs");
+                        eprintln!("Error making graphs.");
                         continue;
                     }
-                };
-            };
+                }
+            }
             println!("Graphs finished.");
             //Create CSV from HashMap
             if let Err(e) = createcsv(
