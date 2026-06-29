@@ -1386,6 +1386,7 @@ pub(crate) fn generatesequence(
         }
         fastawriter.flush().map_err(|e| e.to_string())?;
     }
+    let count = cursor.position(); //Cursor is at the end
     cursor.rewind().map_err(|e| e.to_string())?;
     let elem = sequencefile
         .setfile()
@@ -1394,7 +1395,7 @@ pub(crate) fn generatesequence(
         .filename("sequence.fasta")
         .comment("Sequence")
         .write(elem, Compression::fast());
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(count.try_into().unwrap_or(usize::MAX));
     cursor
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Error making fasta archive: {e}"))?;
@@ -1571,7 +1572,7 @@ pub(crate) fn getprogressbar<R>(size: u64, reader: R) -> io::Result<ProgressRead
     let pb = ProgressBar::new(size);
     pb.set_style(
     indicatif::ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
         .map_err(|b| io::Error::new(ErrorKind::InvalidData,format!("issue with progress bar: {b}")))?
         .progress_chars("#>-"),
 );

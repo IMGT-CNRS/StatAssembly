@@ -8,7 +8,9 @@ Made by: Guilhem Zeitoun
 #![warn(clippy::expect_used)]
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
+use plotters::coord::ranged1d::SegmentValue;
 use regex::Regex;
+use tempfile::TempDir;
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
 use crate::r#struct::AcceptedStatus::Rejected;
@@ -18,7 +20,7 @@ use plotters::coord::Shift;
 use std::collections::HashMap;
 use std::io::ErrorKind::InvalidInput;
 use std::num::NonZero;
-use std::ops::RangeInclusive;
+use std::ops::{RangeInclusive, Sub};
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -28,9 +30,9 @@ use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, REQUESTCLIENT, askforsubmission,
-    checkifblastpresent, generatelightbam, generatesequence, genesblast, getprogressbarclassic,
-    getprogressbarspin, positionfiltering,
+    GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH,
+    SUSPICIOUSPOSITIONALERT, askforsubmission, checkifblastpresent, generatelightbam,
+    generatesequence, genesblast, getprogressbarclassic, getprogressbarspin, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use extended_htslib::bam::record::{Cigar, CsValue};
@@ -65,6 +67,7 @@ const MIN_READLENGTH: u64 = 1_000;
 const MIN_PHREDSCORE: u64 = 30;
 const TIMEOUT_IN_MN: u64 = 60;
 const READGAPMESSAGE: u64 = 200;
+const TELOMERESEP: u64 = 1_000; //Length when coverage is not taken into account.
 const MINIMUMCOVERAGE: usize = 10;
 const MAXCOVERAGERATIO: f32 = 2.0;
 const PHYLUMLIMIT: usize = 7776; //obfstr::obf!("Gnathostomata");
@@ -919,6 +922,84 @@ fn setgraphbitmap<'a>(
 }
 */
 fn main() -> ExitCode {
+    /*
+    let mainpa = env::current_dir().unwrap();
+    let testo = TempDir::new().unwrap();
+    let path = &Path::new(&mainpa).join("full_cs.bam").display().to_string();
+    let path2 = Path::new(&mainpa)
+        .join("assembly.fasta")
+        .display()
+        .to_string();
+    let path3 = Path::new(&mainpa).join("locus.txt").display().to_string();
+    let fake_args = vec![
+        "IMGT_StatAssembly",
+        "-f",
+        path,
+        "-a",
+        &path2,
+        "-l",
+        &path3,
+        "-s",
+        "human",
+        "-o",
+        testo.path().to_str().unwrap(),
+        "analyze",
+    ];
+    let human = Species::new("Homo sapiens").unwrap();
+    let mut args4 = Args::try_parse_from(fake_args)
+        .map_err(|f| f.to_string())
+        .unwrap();
+    let (locus, ..) = locusposparser(&args4, &human, false).unwrap();
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open("/home/gzeitoun/historic.txt")
+        .unwrap();
+    let string = locus.iter().fold(String::new(), |mut acc, loci| {
+        acc.push_str(&format!(
+            "{} - Locus {} is invalid at {}\n",
+            mainpa.display().to_string(),
+            loci.getlocushaplo(),
+            loci.contig
+        ));
+        acc
+    });
+    //let s = string.trim();
+    let _ = append.lock(); //Would fail on Windows if append so reject the error
+    append.write_all(string.as_bytes()).unwrap();
+    let _ = append.unlock();
+    let (hits, _) = generategenelist(
+        &None,
+        &human,
+        &locus,
+        args4.assembly.as_ref().unwrap(),
+        &args4,
+    )
+    .unwrap();
+    let listtokkep = printgenelist(&hits.unwrap(), &mut args4, true).unwrap(); //So the file is not dropped.
+    for loci in locus {
+        let mut genes = extractgenelist(&args4, &loci, true).unwrap();
+        let invalidgenes = genes
+            .iter_mut()
+            .map(|mut a| generategeneinfos(&args4, &mut a).unwrap())
+            .filter(|p| !p.0.getstatus().getstatus().isvalid());
+        let string = invalidgenes.fold(String::new(), |mut acc, (gene, _)| {
+            acc.push_str(&format!(
+                "{} - {} is invalid at {}:{}-{}\n",
+                mainpa.display().to_string(),
+                gene.getgene(),
+                gene.getchromosome(),
+                gene.getstart().getobasedpos(),
+                gene.getend().getobasedpos()
+            ));
+            acc
+        });
+        //let s = string.trim();
+        let _ = append.lock(); //Would fail on Windows if append so reject the error
+        append.write_all(string.as_bytes()).unwrap();
+        let _ = append.unlock();
+    }
+    return ExitCode::SUCCESS;
+        */
     let mut args = Args::parse();
     if checknewversion() {
         return ExitCode::FAILURE;
@@ -1289,8 +1370,9 @@ fn main() -> ExitCode {
                     }
                 }
             }
-            loci.setstatus(mean, &pos);
-            //let _ = progress.map(|d| d.finish());
+            if let Ok(a) = progress {
+                a.finish();
+            }
             if nocount {
                 eprintln!(
                     "The region {}:{}-{} has no data, skipped.",
@@ -1318,6 +1400,8 @@ fn main() -> ExitCode {
                     1,
                 );
             });
+            loci.setstatus(mean, &args, &pos);
+            //let _ = progress.map(|d| d.finish());
             println!("Making graphs");
             {
                 /*
@@ -2046,6 +2130,7 @@ fn genelist(
         finale.push(elem);
         progressbar.set_position(pos.saturating_add(1).try_into().unwrap_or_default());
     }
+    progressbar.finish();
     finale.sort_unstable(); //Sort the table
     let mut csv = csv::WriterBuilder::new()
         .has_headers(true)
@@ -2799,10 +2884,53 @@ pub(crate) fn checknewversion() -> bool {
         false
     }
 }
-pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
+pub(crate) fn geneisokay(reads100m: usize, hash: &BTreeMap<Position, Posread>) -> OkStatus {
+    if let Some(a) = hash
+        .iter()
+        .find(|(_, f)| !f.isvalid() || f.softclips >= SOFTCLIPRATIO)
+    {
+        match a {
+            (f, a) if !a.isvalid() => OkStatus::new(
+                AcceptedStatus::Rejected,
+                Some(format!(
+                    "{} at position {} ({})",
+                    *SUSPICIOUSPOSITIONALERT,
+                    f.getobasedpos(),
+                    if a.iswarning() {
+                        "warning"
+                    } else {
+                        "suspicious"
+                    }
+                )),
+            ),
+            (f, _) => OkStatus::new(
+                AcceptedStatus::Rejected,
+                Some(format!(
+                    "{} at position {}",
+                    *SOFTCLIPTOOMUCH,
+                    f.getobasedpos()
+                )),
+            ),
+        }
+    } else if reads100m < MATCHREADS.try_into().unwrap_or_default() {
+        OkStatus::new(
+            AcceptedStatus::Rejected,
+            Some(NOTENOUGHMATCHREADS.to_string()),
+        )
+    } else {
+        OkStatus::new(AcceptedStatus::Accepted, None)
+    }
+}
+pub(crate) fn telomereposition(p: &Position, lengthloci: &Position) -> bool {
+    lengthloci.getobasedpos().saturating_sub(p.getobasedpos())
+        > TELOMERESEP.try_into().unwrap_or(i64::MAX)
+        || p.getobasedpos() < TELOMERESEP.try_into().unwrap_or(i64::MAX)
+}
+pub(crate) fn locusisokay(mean: u64, lengthloci: &Position, graph: &[&HashMapinfo]) -> OkStatus {
     //Between a minimum and a maximum number of reads
     if let Some(a) = graph
         .iter()
+        .filter(|d| !telomereposition(&d.position, lengthloci))
         .find(|f| !coveragewindow(mean).contains(&f.overlaps))
     {
         match a {
@@ -2825,6 +2953,15 @@ pub(crate) fn locusisokay(mean: u64, graph: &[&HashMapinfo]) -> OkStatus {
                 )),
             ),
         }
+    } else if let Some(a) = graph.iter().find(|f| f.softclips > SOFTCLIPRATIO) {
+        OkStatus::new(
+            Rejected,
+            Some(format!(
+                "{} at position {}",
+                *SOFTCLIPTOOMUCH,
+                a.position.getobasedpos()
+            )),
+        )
     } else {
         OkStatus::new(AcceptedStatus::Accepted, None)
     }
@@ -2854,7 +2991,28 @@ where
     ) + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
-    let tenlines = loci.getlength() / 9;
+    let (start, end, tenlines) = if let Some(full) = loci.getfulllength(args)
+        && telomereposition(&loci.start, &full)
+    {
+        (
+            None,
+            Some(full),
+            loci.getlength().saturating_sub(full.length(&loci.end)) / 9,
+        )
+    } else if let Some(full) = loci.getfulllength(args)
+        && (telomereposition(&loci.start, &full) || telomereposition(&loci.start, &full))
+    {
+        (
+            Some(
+                TELOMERESEP
+                    .saturating_sub(loci.start.getobasedpos().try_into().unwrap_or_default()),
+            ),
+            Some(full),
+            loci.getlength().saturating_sub(full.length(&loci.end)) / 9,
+        )
+    } else {
+        (None, None, loci.getlength() / 9)
+    };
     let colorgene = if loci.status.getstatus().isvalid() {
         full_palette::GREEN
     } else {
@@ -3140,6 +3298,28 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Coverage break")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED));
+    if start.is_some() || end.is_some() {
+        chart
+            .draw_series(AreaSeries::new(
+                pos.iter().filter_map(|elem| {
+                    if telomereposition(
+                        &elem.position,
+                        &end.unwrap_or(Position::new(true, i64::MAX)),
+                    ) {
+                        Some((SegmentValue::CenterOf(elem.position.getobasedpos()), 100))
+                    } else {
+                        None
+                    }
+                }),
+                0,
+                full_palette::BLUEGREY_A200.mix(0.8).filled(),
+            ))
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
+            .label("Telomere region")
+            .legend(|(x, y)| {
+                PathElement::new(vec![(x, y), (x + 20, y)], full_palette::BLUEGREY_A200)
+            });
+    }
     chart
         .draw_series(
             Histogram::vertical(&chart)

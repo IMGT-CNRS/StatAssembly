@@ -14,12 +14,12 @@ Available under EUPL license
 Made by: Guilhem Zeitoun
 */
 use crate::submissions::{
-    NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT,
-    getallelefromblast, getchromosomefromblast, getpositionfromblast, getspeciesfromncbi,
+    REQUESTCLIENT, getallelefromblast, getchromosomefromblast, getpositionfromblast,
+    getspeciesfromncbi,
 };
 use crate::{
     ALERTPERC, DELIMITERFASTA, MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO,
-    WARNINGPERC, locusisokay,
+    WARNINGPERC, geneisokay, getassemblyreader, locusisokay,
 };
 use clap::{Parser, ValueEnum, crate_authors};
 use serde::{Deserialize, Serialize, de};
@@ -1941,8 +1941,31 @@ impl LocusInfos {
     pub(crate) fn getlocushaplo(&self) -> &LocusHaplo {
         &self.locusinfo
     }
-    pub(crate) fn setstatus(&mut self, mean: u64, pos: &BTreeMap<Position, HashMapinfo>) {
-        self.status = locusisokay(mean, &pos.values().collect_vec())
+    pub(crate) fn getfulllength(&self, args: &Args) -> Option<Position> {
+        let length = match getassemblyreader(args).map(|p| {
+            p.index
+                .sequences()
+                .into_iter()
+                .find(|p| p.name == self.contig)
+        }) {
+            Ok(Some(b)) => b.len.try_into().unwrap_or(i64::MAX),
+            _ => return None,
+        };
+        Some(Position::newfromoposition(length))
+    }
+    pub(crate) fn setstatus(
+        &mut self,
+        mean: u64,
+        args: &Args,
+        pos: &BTreeMap<Position, HashMapinfo>,
+    ) {
+        self.status = locusisokay(
+            mean,
+            &self
+                .getfulllength(&args)
+                .unwrap_or_else(|| Position::new(true, i64::MAX)),
+            &pos.values().collect_vec(),
+        )
     }
     //Get position for alignment
     pub(crate) fn fullposition(&self, record: &Blastmatch) -> Option<(Position, Position, Strand)> {
@@ -2149,43 +2172,7 @@ pub trait GenesList {
     fn getstatus(&self) -> &OkStatus;
     fn alterstatus(&mut self, status: OkStatus);
     fn setstatus(&mut self, reads100m: usize, hash: &BTreeMap<Position, Posread>) {
-        if let Some(a) = hash
-            .iter()
-            .find(|(_, f)| !f.isvalid() || f.softclips >= SOFTCLIPRATIO)
-        {
-            let info = match a {
-                (f, a) if !a.isvalid() => OkStatus::new(
-                    AcceptedStatus::Rejected,
-                    Some(format!(
-                        "{} at position {} ({})",
-                        *SUSPICIOUSPOSITIONALERT,
-                        f.getobasedpos(),
-                        if a.iswarning() {
-                            "warning"
-                        } else {
-                            "suspicious"
-                        }
-                    )),
-                ),
-                (f, _) => OkStatus::new(
-                    AcceptedStatus::Rejected,
-                    Some(format!(
-                        "{} at position {}",
-                        *SOFTCLIPTOOMUCH,
-                        f.getobasedpos()
-                    )),
-                ),
-            };
-            self.alterstatus(info);
-        } else if reads100m < MATCHREADS.try_into().unwrap_or_default() {
-            let m = OkStatus::new(
-                AcceptedStatus::Rejected,
-                Some(NOTENOUGHMATCHREADS.to_string()),
-            );
-            self.alterstatus(m);
-        } else {
-            self.alterstatus(OkStatus::new(AcceptedStatus::Accepted, None));
-        }
+        self.alterstatus(geneisokay(reads100m, hash));
     }
 }
 #[derive(Clone, Debug, Serialize)]

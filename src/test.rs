@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
+        io::{BufReader, ErrorKind::UnexpectedEof, Read as read2, Write},
         thread::sleep,
         time::Duration,
     };
@@ -10,10 +10,10 @@ mod tests {
         extractgenelist, generategeneinfos,
         identification::{sendresult, sendresultcompressed},
         locusposparser,
-        r#struct::{Args, Filecrea, Species, SpeciesError},
+        r#struct::{Args, Filecrea, GenesList, Species, SpeciesError},
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, generatelightbam,
-            generatesequence,
+            generatesequence, getprogressbarclassic,
         },
     };
     use clap::Parser;
@@ -36,6 +36,69 @@ mod tests {
             sendresultcompressed(&REQUESTCLIENT, &BORNESLINK).is_ok(),
             "Error with bornes link"
         );
+    }
+    #[test]
+    #[ignore]
+    fn validfolder() {
+        let testo = TempDir::new().unwrap();
+        let fake_args = vec![
+            "IMGT_StatAssembly",
+            "-f",
+            "full_cs.bam",
+            "-a",
+            "assembly.fasta",
+            "-l",
+            "locus.csv",
+            "-s",
+            "human",
+            "-g",
+            "geneloc.csv",
+            "-o",
+            testo.path().to_str().unwrap(),
+            "analyze",
+        ];
+        let human = Species::new("Homo sapiens").unwrap();
+        let args4 = Args::try_parse_from(fake_args)
+            .map_err(|f| f.to_string())
+            .unwrap();
+        let (locus, ..) = locusposparser(&args4, &human, false).unwrap();
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open("~guilhem/historic.txt")
+            .unwrap();
+        let string = locus.iter().fold(String::new(), |mut acc, loci| {
+            acc.push_str(&format!(
+                "Locus {} is invalid at {}\n",
+                loci.gethaplotype(),
+                loci.contig
+            ));
+            acc
+        });
+        let s = string.trim();
+        let _ = append.lock(); //Would fail on Windows if append so reject the error
+        append.write_all(s.as_bytes()).unwrap();
+        let _ = append.unlock();
+        for loci in locus {
+            let mut genes = extractgenelist(&args4, &loci, false).unwrap();
+            let invalidgenes = genes
+                .iter_mut()
+                .map(|mut a| generategeneinfos(&args4, &mut a).unwrap())
+                .filter(|p| !p.0.getstatus().getstatus().isvalid());
+            let string = invalidgenes.fold(String::new(), |mut acc, (gene, _)| {
+                acc.push_str(&format!(
+                    "{} is invalid at {}:{}-{}\n",
+                    gene.getgene(),
+                    gene.getchromosome(),
+                    gene.getstart().getobasedpos(),
+                    gene.getend().getobasedpos()
+                ));
+                acc
+            });
+            let s = string.trim();
+            let _ = append.lock(); //Would fail on Windows if append so reject the error
+            append.write_all(s.as_bytes()).unwrap();
+            let _ = append.unlock();
+        }
     }
     #[test]
     fn generatesequencetest() {
@@ -67,8 +130,8 @@ mod tests {
             BufReader::new(std::fs::File::open("example_files/results/sequence.fasta.gz").unwrap());
         let mut buftwo = BufReader::new(std::fs::File::open(seq.getpath()).unwrap());
         loop {
-            let mut buf1 = [0; 3000];
-            let mut buf2 = [0; 3000];
+            let mut buf1 = [0; 2048];
+            let mut buf2 = [0; 2048];
             match (bufone.read_exact(&mut buf1), buftwo.read_exact(&mut buf2)) {
                 (Err(a), Err(b)) if b.kind() == UnexpectedEof && a.kind() == UnexpectedEof => break,
                 (Ok(_), Ok(_)) if buf1.eq(&buf2) => (),
@@ -212,7 +275,7 @@ mod tests {
             result.iter().any(|f| !f.status.status.isvalid()),
             "One locus is not valid"
         );
-        let progress = ProgressBar::new(result.len().try_into().unwrap_or_default());
+        let progress = getprogressbarclassic(result.len().try_into().unwrap_or_default()).unwrap();
         let mut i = 0;
         for loci in result {
             let genelist = extractgenelist(&args4, &loci, false).unwrap();

@@ -1,7 +1,7 @@
 use bio::io::fasta;
 use indicatif::ProgressBar;
 use itertools::Itertools;
-use minimap2::Aligner;
+use rammap::{Aligner, MapOpts};
 use reqwest::{StatusCode, header};
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     },
     submissions::{
         BORNESLINK, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK, blastcommand, checkoverlap,
-        fileincache, getprogressbarclassic, speciesandorphonfiltering,
+        fileincache, getprogressbar, getprogressbarclassic, speciesandorphonfiltering,
     },
 };
 use std::{
@@ -20,7 +20,11 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fs::File,
-    io::{self, BufReader, Cursor, ErrorKind, Read, Write},
+    io::{
+        self, BufReader, Cursor,
+        ErrorKind::{self},
+        Read, Seek, Write,
+    },
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, mpsc::channel},
@@ -38,6 +42,7 @@ where
 {
     thread::scope(|s| {
         let subjectbis = subject.as_ref().to_path_buf();
+        let _ = File::open(subject.as_ref())?; //Check subject can be opened
         let blast = s.spawn(move || {
             let b = match blastcommand(referencepath, subjectbis.into(), Blastlevel::Normal) {
                 Ok(b) => b,
@@ -62,15 +67,20 @@ where
                         return None;
                     }
                 };
-                let aligner = Aligner::builder()
-                    .asm20()
-                    .with_cigar()
-                    .with_index_threads(args.threads)
-                    .with_index(subject.as_ref(), None)
-                    .ok()?;
+                let aligner = Aligner::from_fasta(
+                    &subject.as_ref().display().to_string().as_str(),
+                    rammap::Preset::Asm20,
+                )
+                .map_err(|d| {
+                    eprintln!("Unable to set aligner. Error is {d}");
+                })
+                .ok()?;
+                let mut options = MapOpts::default();
+                options.cs = Some(true);
                 let read = fasta::Reader::from_file(b.getpath()).ok()?;
                 let mut aligns: Vec<Blastmatch> = Vec::new();
                 for seq in read.records().filter_map(Result::ok) {
+                    let name = format!("NCBI|{}", seq.desc().unwrap_or_default());
                     match receiver.try_recv() {
                         Ok("kill") => {
                             eprintln!("aborted by main");
@@ -78,48 +88,38 @@ where
                         }
                         _ => (),
                     };
-                    if let Ok(a) = aligner
-                        .map(
+                    if let a = aligner
+                        .map_seq_with(
+                            name.as_str(),
                             seq.seq(),
-                            false,
-                            false,
-                            None,
-                            None,
-                            Some(format!("NCBI|{}", seq.desc().unwrap_or_default()).as_bytes()),
+                            options,
                         )
-                        .map(|mut f| {
-                            f.retain(|p| p.is_primary);
-                            f
-                        })
-                        && let Some(first) = a.first()
+                        .mappings
+                        .into_iter()
+                        .find(|f| f.is_primary) //Should be only one primary
+                        && let Some(first) = a
                         && let (
-                            Some(Ok(qseqid)),
-                            Some(sseqid),
+                            Ok(qseqid),
+                            sseqid,
                             sseq,
                             Ok(sstart),
                             Ok(send),
                             complement,
                             status,
-                            Some(Some(identity)),
+                            identity,
                         ) = (
-                            &first
-                                .query_name
-                                .as_ref()
-                                .map(|a| Name::from_str(a.as_str())),
+                            Name::from_str(&name),
                             &first.target_name,
                             String::new(),
                             TryInto::<usize>::try_into(first.target_start),
                             TryInto::<usize>::try_into(first.target_end),
-                            if first.strand == minimap2::Strand::Reverse {
+                            if first.strand == rammap::Strand::Reverse {
                                 Strand::Minus
                             } else {
                                 Strand::Plus
                             },
                             Status::New,
-                            first
-                                .alignment
-                                .as_ref()
-                                .map(|p| p.alignment_score.map(|d| d as f32)),
+                            first.score,
                         )
                     {
                         let matche = Blastmatch::new(
@@ -130,7 +130,7 @@ where
                             send,
                             complement,
                             status,
-                            identity,
+                            f32::from_str(&identity.to_string().as_str()).ok()?,
                         );
                         aligns.push(matche);
                     }
@@ -601,18 +601,12 @@ pub(crate) fn sendresultcompressed(
                     (.., c) if let Ok(s) = c.try_into() => s,
                     _ => 0,
                 };
-                let pb = ProgressBar::new(total_size);
-                pb.set_style(
-                                indicatif::ProgressStyle::default_bar()
-                                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                                    .map_err(|b| format!("issue with progress bar: {b}"))?
-                                    .progress_chars("#>-")
-                            );
                 let mut downloaded = 0;
                 // Read the stream in chunks
                 let d = Cursor::new(stream);
                 let mut reader = BufReader::new(d);
-                let mut buffer = vec![0; 1024]; // 1KB buffer
+                let pb = getprogressbarclassic(total_size).map_err(|e| e.to_string())?;
+                let mut buffer = vec![0; 2048]; // 2KB buffer
 
                 while let Ok(n) = reader.read(&mut buffer) {
                     if n == 0 {
@@ -621,10 +615,9 @@ pub(crate) fn sendresultcompressed(
                     buf.extend(&buffer[0..n]);
                     let new = min(downloaded + (n as u64), total_size);
                     downloaded = new;
-                    pb.set_position(new);
+                    pb.set_position(downloaded);
                 }
-                pb.finish_with_message(format!("Finished"));
-
+                pb.finish_with_message("Finished");
                 // Decode the buffer (assuming it's a gzip stream)
                 let mut decoder = flate2::read::GzDecoder::new(buf.as_slice());
                 let mut string = String::new();
