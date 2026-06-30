@@ -2189,6 +2189,8 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) readsfull: usize,
     pub(crate) reads100: usize,
     pub(crate) reads100m: usize,
+    pub(crate) realreads100m: f32,
+    pub(crate) phredscore: Vec<u8>,
     pub(crate) coveragex: usize,
     pub(crate) status: OkStatus,
 }
@@ -2270,7 +2272,9 @@ impl GeneInfosFinish {
         matchpos: Option<String>,
         reads100: usize,
         reads100m: usize,
+        realreads100m: f32,
         readscoverage: f32,
+        phredscore: Vec<u8>,
         coveragex: usize,
     ) -> Self {
         GeneInfosFinish {
@@ -2285,13 +2289,15 @@ impl GeneInfosFinish {
             readsfull,
             reads100,
             reads100m,
+            realreads100m,
+            phredscore,
             readscoverage,
             coveragex,
             status: gene.status,
         }
     }
     pub(crate) fn make_default(gene: GeneInfos) -> Self {
-        Self::new(gene, 0, 0, None, 0, 0, 0.0, 0)
+        Self::new(gene, 0, 0, None, 0, 0, 0f32, 0.0, Vec::new(), 0)
     }
 }
 impl Ord for GeneInfosFinish {

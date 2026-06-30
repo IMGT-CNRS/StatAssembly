@@ -9,6 +9,7 @@ Made by: Guilhem Zeitoun
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
 use plotters::coord::ranged1d::SegmentValue;
+use plotters::style::full_palette::BROWN_500;
 use regex::Regex;
 use tempfile::TempDir;
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
@@ -20,7 +21,7 @@ use plotters::coord::Shift;
 use std::collections::HashMap;
 use std::io::ErrorKind::InvalidInput;
 use std::num::NonZero;
-use std::ops::{RangeInclusive, Sub};
+use std::ops::{Add, Div, Mul, MulAssign, RangeInclusive, Sub};
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -1889,7 +1890,8 @@ fn generategeneinfos(
     let mut lock = io::stdout().lock();
     let mut reader =
         getreaderoffile(args).map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))?;
-    let (mut reads, mut readsfull, mut reads100, mut reads100m) = (0, 0, 0, 0);
+    let (mut reads, mut readsfull, mut reads100, mut reads100m, mut realreads100m, mut phredscore) =
+        (0, 0, 0, 0, 0f32, Vec::new());
     let (mut hash, records) = {
         //O position is exclusive
         let genegenericrange = gene.start.getzbasedpos()..gene.end.getobasedpos();
@@ -1994,6 +1996,37 @@ fn generategeneinfos(
             && iterblock(&record)
                 .is_some_and(|f| f.into_iter().any(|p| validrange(p, &gene.start, &gene.end)))
         {
+            let mut aligned = record.aligned_pairs();
+            let realstart = aligned.find(|p| p.last() == Some(&gene.start.getobasedpos()));
+            let realend = aligned.find(|p| p.last() == Some(&gene.end.getobasedpos()));
+            if let (Some(Some(start)), Some(Some(end))) = (
+                realstart.map(|p| p.get(0).copied()),
+                realend.map(|p| p.get(0).copied()),
+            ) {
+                phredscore = record
+                    .qual()
+                    .iter()
+                    .skip(start.try_into().unwrap_or_default())
+                    .take(
+                        end.saturating_sub(start)
+                            .saturating_sub(1)
+                            .try_into()
+                            .unwrap_or_default(),
+                    )
+                    .map(|f| *f)
+                    .collect::<Vec<u8>>();
+                let minscore = phredscore.iter().filter(|a| **a > 0u8).min();
+                //Ponderation based on lowest quality of a read at a gene position
+                let fscore = match minscore {
+                    Some(0..=10) | None => 0,
+                    Some(11..=20) => 1,
+                    Some(21..=30) => 3,
+                    Some(31..=40) => 7,
+                    Some(41..=50) => 9,
+                    Some(51..) => 10,
+                } as f32;
+                realreads100m = realreads100m.mul(10f32).add(fscore).div(10f32);
+            }
             reads100m += 1;
         }
         for p in range {
@@ -2057,7 +2090,9 @@ fn generategeneinfos(
         Some(text),
         reads100,
         reads100m,
+        realreads100m,
         coverageperc,
+        phredscore,
         coverage,
     );
     Ok((elem, hash))
@@ -2111,7 +2146,7 @@ fn genelist(
                 loci,
                 root,
                 &mut alertingpositions,
-                elem.reads100m,
+                &elem,
             )?;
         } else {
             output.set_extension("svg");
@@ -2124,7 +2159,7 @@ fn genelist(
                 loci,
                 root,
                 &mut alertingpositions,
-                elem.reads100m,
+                &elem,
             )?;
         }
         finale.push(elem);
@@ -2264,7 +2299,7 @@ fn genegraph<T>(
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
     alerting: &mut BTreeMap<GeneInfos, Vec<(bool, usize)>>,
-    reads100m: usize,
+    infos: &GeneInfosFinish,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     T: DrawingBackend,
@@ -2358,12 +2393,23 @@ where
             .draw_series(LineSeries::new(
                 hash.iter()
                     .enumerate()
-                    .map(|(pos, ..)| (pos + 1, reads100m)),
+                    .map(|(pos, ..)| (pos + 1, infos.reads100m)),
                 BLACK.mix(0.7).stroke_width(3),
             ))
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
             .label("Reads 100% match")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7)));
+        //Line of all full reads
+        chart
+            .draw_series(LineSeries::new(
+                hash.iter()
+                    .enumerate()
+                    .map(|(pos, _)| (pos + 1, infos.realreads100m.round() as usize)),
+                BROWN_500.mix(0.7).stroke_width(3),
+            ))
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
+            .label("Reads 100% match (recalculated)")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BROWN_500.mix(0.7)));
         chart
             .draw_series(
                 Histogram::vertical(&chart)
@@ -2466,16 +2512,32 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
     secondary
+        .draw_secondary_series(LineSeries::new(
+            hash.iter().enumerate().filter_map(|(index, _)| {
+                if let Some(b) = infos.phredscore.iter().nth(index) {
+                    Some((index + 1, min(100, (*b).into())))
+                } else {
+                    None
+                }
+            }),
+            full_palette::BLUEGREY.mix(0.4),
+        ))
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
+        .label("PHRED score")
+        .legend(|(x, y)| {
+            plotters::element::PathElement::new(
+                [(x, y), (x + 15, y)],
+                full_palette::BLUEGREY.mix(0.4),
+            )
+        });
+    secondary
         .draw_secondary_series(
             Histogram::vertical(&secondary)
                 .baseline(0)
                 .margin(3)
-                .data(hash.iter().filter_map(|(pos, p)| {
+                .data(hash.iter().enumerate().filter_map(|(index, (_, p))| {
                     if p.softclips.is_normal() {
-                        Some((
-                            usize::try_from(pos.getobasedpos()).unwrap_or(0),
-                            (p.softclips * 100f32) as usize,
-                        ))
+                        Some((index + 1, (p.softclips * 100f32) as usize))
                     } else {
                         None
                     }
@@ -2492,7 +2554,7 @@ where
         });
     secondary
         .configure_secondary_axes()
-        .y_desc("Average softclips")
+        .y_desc("Average softclips && PHRED score")
         .y_label_formatter(&|f| format!("{f}%"))
         .label_style(text_style.clone())
         //.disable_y_mesh()
