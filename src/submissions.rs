@@ -54,7 +54,7 @@ lazy_static! {
         WEBSERVER.as_str(),
         obfstr::obfstr!("/download/GENE-DB/RELEASE")
     );
-    pub static ref LIMITDATE: String = obfstr::obfstring!("2026-06-30T23:59:59Z");
+    pub static ref LIMITDATE: String = obfstr::obfstring!("2026-08-31T23:59:59Z");
     pub static ref MOTIFLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
