@@ -14,6 +14,7 @@ use regex::Regex;
 use tempfile::TempDir;
 //TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
+use crate::pdf::generatepdf;
 use crate::r#struct::AcceptedStatus::Rejected;
 use clap::Parser;
 use itertools::Itertools;
@@ -55,6 +56,8 @@ use std::{
     path::PathBuf,
 };
 mod identification;
+#[cfg(feature = "pdf")]
+mod pdf;
 mod r#struct;
 mod submissions;
 #[cfg(test)]
@@ -523,9 +526,8 @@ where
     }
     Ok((None, None))
 }
-fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>> {
-    let mut finish: Vec<GeneInfos> = data
-        .iter()
+fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
+    data.iter()
         .filter_map(|p| {
             let strand = if p.send < p.sstart {
                 Strand::Minus
@@ -547,7 +549,10 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
                 Position::newfromoposition(p.send.try_into().unwrap_or_default()),
             ))
         })
-        .collect();
+        .collect()
+}
+fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>> {
+    let mut finish: Vec<GeneInfos> = getgeneinfos(data);
     checkandcorrectgenelistduplicate(&mut finish);
     let genenamefile = if tmp {
         Filecrea::createtemp(None, Some("genelist_new.csv"))?
@@ -1661,6 +1666,9 @@ fn main() -> ExitCode {
     if let Err(e) = generatesequence(&args, &args.outdir, &mergedloci) {
         eprintln!("{e}");
     }
+    if let Err(e) = generatepdf(&mergedloci, &locushashresult, &args.outdir) {
+        eprintln!("{e}");
+    }
     if !args.nosubmit
     /* && locushashresult
     .iter()
@@ -2003,7 +2011,7 @@ fn generategeneinfos(
                 realstart.map(|p| p.get(0).copied()),
                 realend.map(|p| p.get(0).copied()),
             ) {
-                phredscore = record
+                let newphredscore = record
                     .qual()
                     .iter()
                     .skip(start.try_into().unwrap_or_default())
@@ -2015,7 +2023,10 @@ fn generategeneinfos(
                     )
                     .map(|f| *f)
                     .collect::<Vec<u8>>();
-                let minscore = phredscore.iter().filter(|a| **a > 0u8).min();
+                let minscore = newphredscore
+                    .iter()
+                    .filter(|a| **a > 0u8)
+                    .nth(newphredscore.len() / 2);
                 //Ponderation based on lowest quality of a read at a gene position
                 let fscore = match minscore {
                     Some(0..=10) | None => 0,
@@ -2025,6 +2036,7 @@ fn generategeneinfos(
                     Some(41..=50) => 9,
                     Some(51..) => 10,
                 } as f32;
+                phredscore.push(newphredscore);
                 realreads100m = realreads100m.mul(10f32).add(fscore).div(10f32);
             }
             reads100m += 1;
@@ -2514,8 +2526,14 @@ where
     secondary
         .draw_secondary_series(LineSeries::new(
             hash.iter().enumerate().filter_map(|(index, _)| {
-                if let Some(b) = infos.phredscore.iter().nth(index) {
-                    Some((index + 1, min(100, (*b).into())))
+                let infos: Vec<&u8> = infos
+                    .phredscore
+                    .iter()
+                    .map(|b| b.get(index))
+                    .filter_map(|b| b)
+                    .collect();
+                if let Some(b) = infos.get(infos.len() / 2) {
+                    Some((index + 1, min(100, (**b).into())))
                 } else {
                     None
                 }

@@ -2190,7 +2190,8 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100: usize,
     pub(crate) reads100m: usize,
     pub(crate) realreads100m: f32,
-    pub(crate) phredscore: Vec<u8>,
+    #[serde(skip_serializing)]
+    pub(crate) phredscore: Vec<Vec<u8>>,
     pub(crate) coveragex: usize,
     pub(crate) status: OkStatus,
 }
@@ -2274,7 +2275,7 @@ impl GeneInfosFinish {
         reads100m: usize,
         realreads100m: f32,
         readscoverage: f32,
-        phredscore: Vec<u8>,
+        phredscore: Vec<Vec<u8>>,
         coveragex: usize,
     ) -> Self {
         GeneInfosFinish {
