@@ -2175,6 +2175,23 @@ pub trait GenesList {
         self.alterstatus(geneisokay(reads100m, hash));
     }
 }
+#[derive(Clone, Debug)]
+pub(crate) struct Phred(Vec<Vec<u8>>);
+impl Phred {
+    pub(crate) fn new(score: Vec<Vec<u8>>) -> Self {
+        Phred(score)
+    }
+    pub(crate) fn getscore(&self) -> Vec<&[u8]> {
+        self.0.iter().map(Vec::as_slice).collect()
+    }
+}
+impl IntoIterator for Phred {
+    type IntoIter = std::vec::IntoIter<Vec<u8>>;
+    type Item = Vec<u8>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct GeneInfosFinish {
     pub(crate) gene: Genename,
@@ -2191,7 +2208,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100m: usize,
     pub(crate) realreads100m: f32,
     #[serde(skip_serializing)]
-    pub(crate) phredscore: Vec<Vec<u8>>,
+    pub(crate) phredscore: Phred,
     pub(crate) coveragex: usize,
     pub(crate) status: OkStatus,
 }
@@ -2291,7 +2308,7 @@ impl GeneInfosFinish {
             reads100,
             reads100m,
             realreads100m,
-            phredscore,
+            phredscore: Phred::new(phredscore),
             readscoverage,
             coveragex,
             status: gene.status,
@@ -2370,12 +2387,22 @@ impl FakeLocusinfo {
             complement: complement.unwrap_or_default(),
         }
     }
+    pub(crate) fn checkauto(&self) -> bool {
+        self.contig
+            .as_ref()
+            .is_some_and(|p| p.eq_ignore_ascii_case("auto"))
+    }
+    pub(crate) fn checkandresetifauto(&mut self) {
+        if self.checkauto() {
+            self.contig = None;
+        }
+    }
     pub(crate) fn intoloc(self) -> io::Result<LocusInfos> {
-        match (self.contig, self.start, self.end) {
-            (Some(a), Some(b), Some(c)) if a.to_lowercase() != "auto" => Ok(LocusInfos::new(
+        match (&self.contig, self.start, self.end) {
+            (Some(a), Some(b), Some(c)) if !self.checkauto() => Ok(LocusInfos::new(
                 self.locus,
                 self.haplotype.unwrap_or_default(),
-                a,
+                a.clone(),
                 b,
                 c,
                 self.complement,

@@ -1546,8 +1546,8 @@ pub(crate) fn getprogressbarspin() -> io::Result<ProgressBar> {
                     ErrorKind::InvalidData,
                     format!("issue with progress bar: {b}"),
                 )
-            })?
-            .progress_chars("#>-"),
+            })?,
+        //.progress_chars("#>-"),
     );
     Ok(pb)
 }
@@ -1564,7 +1564,7 @@ pub(crate) fn getprogressbarclassic(total_size: u64) -> io::Result<ProgressBar> 
                     format!("issue with progress bar: {b}"),
                 )
             })?
-            .progress_chars("#>-"),
+        //.progress_chars("#>-"),
     );
     Ok(pb)
 }
@@ -1574,7 +1574,7 @@ pub(crate) fn getprogressbar<R>(size: u64, reader: R) -> io::Result<ProgressRead
     indicatif::ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
         .map_err(|b| io::Error::new(ErrorKind::InvalidData,format!("issue with progress bar: {b}")))?
-        .progress_chars("#>-"),
+    //.progress_chars("#>-"),
 );
 
     Ok(ProgressReader {

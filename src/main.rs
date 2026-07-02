@@ -6,23 +6,22 @@ Made by: Guilhem Zeitoun
 */
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
-use bio::io::fasta;
-use bio_types::sequence::SequenceRead;
-use plotters::coord::ranged1d::SegmentValue;
-use plotters::style::full_palette::BROWN_500;
-use regex::Regex;
-use tempfile::TempDir;
-//TODO: Soft clips dans nouveau tableau et vérifier les valeurs.
 use crate::identification::{downloadref, locusallposition};
+#[cfg(feature = "pdf")]
 use crate::pdf::generatepdf;
 use crate::r#struct::AcceptedStatus::Rejected;
+use bio::io::fasta;
+use bio_types::sequence::SequenceRead;
 use clap::Parser;
 use itertools::Itertools;
 use plotters::coord::Shift;
+use plotters::coord::ranged1d::SegmentValue;
+use plotters::style::full_palette::{BROWN_500, GREY_400};
+use regex::Regex;
 use std::collections::HashMap;
 use std::io::ErrorKind::InvalidInput;
 use std::num::NonZero;
-use std::ops::{Add, Div, Mul, MulAssign, RangeInclusive, Sub};
+use std::ops::{Add, Div, Mul, RangeInclusive};
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -354,7 +353,10 @@ fn locusposparser(
         };
         for record in csv.deserialize::<FakeLocusinfo>() {
             let recorda = match record {
-                Ok(r) => r,
+                Ok(mut r) => {
+                    r.checkandresetifauto();
+                    r
+                }
                 Err(e) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -541,9 +543,13 @@ fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
                     return None;
                 }
             };
+            let subject = match Name::from_str(&p.getsubject()) {
+                Ok(a) => a.numacc.unwrap_or_default(),
+                Err(_) => p.getsubject().to_string(),
+            };
             Some(GeneInfos::new(
                 gene,
-                p.getsubject().to_string(),
+                subject,
                 strand,
                 Position::newfromoposition(p.sstart.try_into().unwrap_or_default()),
                 Position::newfromoposition(p.send.try_into().unwrap_or_default()),
@@ -1377,7 +1383,7 @@ fn main() -> ExitCode {
                 }
             }
             if let Ok(a) = progress {
-                a.finish();
+                a.finish_and_clear();
             }
             if nocount {
                 eprintln!(
@@ -1666,6 +1672,7 @@ fn main() -> ExitCode {
     if let Err(e) = generatesequence(&args, &args.outdir, &mergedloci) {
         eprintln!("{e}");
     }
+    #[cfg(feature = "pdf")]
     if let Err(e) = generatepdf(&mergedloci, &locushashresult, &args.outdir) {
         eprintln!("{e}");
     }
@@ -1997,7 +2004,7 @@ fn generategeneinfos(
         {
             reads100 += 1;
         }
-        if range.contains(&gene.start.getzbasedpos()) && range.contains(&gene.end.getzbasedpos()) {
+        if validrange([range.start, range.end], &gene.start, &gene.end) {
             readsfull += 1;
         }
         if !args.force
@@ -2147,32 +2154,17 @@ fn genelist(
                 .replace_all(&gene.gene.to_string(), "_")
                 .to_uppercase(),
         );
+        let size = (700, 700);
         if !args.svg {
             output.set_extension("png");
-            let root = BitMapBackend::new(&output, (700, 400)).into_drawing_area();
+            let root = BitMapBackend::new(&output, size).into_drawing_area();
             //Gene graph
-            genegraph(
-                args,
-                &hash,
-                &gene,
-                loci,
-                root,
-                &mut alertingpositions,
-                &elem,
-            )?;
+            genegraph(args, &hash, loci, root, &mut alertingpositions, &elem)?;
         } else {
             output.set_extension("svg");
-            let root = SVGBackend::new(&output, (700, 400)).into_drawing_area();
+            let root = SVGBackend::new(&output, size).into_drawing_area();
             //Gene graph
-            genegraph(
-                args,
-                &hash,
-                &gene,
-                loci,
-                root,
-                &mut alertingpositions,
-                &elem,
-            )?;
+            genegraph(args, &hash, loci, root, &mut alertingpositions, &elem)?;
         }
         finale.push(elem);
         progressbar.set_position(pos.saturating_add(1).try_into().unwrap_or_default());
@@ -2307,11 +2299,10 @@ fn printpossus(
 fn genegraph<T>(
     args: &Args,
     hash: &BTreeMap<Position, Posread>,
-    gene: &GeneInfos,
     loci: &LocusInfos,
     root: DrawingArea<T, Shift>,
     alerting: &mut BTreeMap<GeneInfos, Vec<(bool, usize)>>,
-    infos: &GeneInfosFinish,
+    gene: &GeneInfosFinish,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     T: DrawingBackend,
@@ -2325,8 +2316,8 @@ where
     } else {
         full_palette::RED
     };
-
-    let mut chart = ChartBuilder::on(&root)
+    let (top, bottom) = root.split_vertically((70).percent_height());
+    let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 40)
         .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
@@ -2405,7 +2396,7 @@ where
             .draw_series(LineSeries::new(
                 hash.iter()
                     .enumerate()
-                    .map(|(pos, ..)| (pos + 1, infos.reads100m)),
+                    .map(|(pos, ..)| (pos + 1, gene.reads100m)),
                 BLACK.mix(0.7).stroke_width(3),
             ))
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
@@ -2416,7 +2407,7 @@ where
             .draw_series(LineSeries::new(
                 hash.iter()
                     .enumerate()
-                    .map(|(pos, _)| (pos + 1, infos.realreads100m.round() as usize)),
+                    .map(|(pos, _)| (pos + 1, gene.realreads100m.round() as usize)),
                 BROWN_500.mix(0.7).stroke_width(3),
             ))
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
@@ -2429,10 +2420,11 @@ where
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
                         let pos1 = pos + 1;
                         if val.iswarning() {
-                            match alerting.get_mut(gene) {
+                            match alerting.get_mut(&GeneInfos::from(gene.clone())) {
                                 Some(d) => d.push((false, pos1)),
                                 None => {
-                                    alerting.insert(gene.clone(), vec![(false, pos1)]);
+                                    alerting
+                                        .insert(GeneInfos::from(gene.clone()), vec![(false, pos1)]);
                                 }
                             };
                             Some((pos1, max))
@@ -2457,10 +2449,11 @@ where
                     .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
                         let pos1 = pos + 1;
                         if val.issuspicious() {
-                            match alerting.get_mut(gene) {
+                            match alerting.get_mut(&GeneInfos::from(gene.clone())) {
                                 Some(d) => d.push((true, pos1)),
                                 None => {
-                                    alerting.insert(gene.clone(), vec![(true, pos1)]);
+                                    alerting
+                                        .insert(GeneInfos::from(gene.clone()), vec![(true, pos1)]);
                                 }
                             };
                             Some((pos1, max))
@@ -2524,31 +2517,6 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
     secondary
-        .draw_secondary_series(LineSeries::new(
-            hash.iter().enumerate().filter_map(|(index, _)| {
-                let infos: Vec<&u8> = infos
-                    .phredscore
-                    .iter()
-                    .map(|b| b.get(index))
-                    .filter_map(|b| b)
-                    .collect();
-                if let Some(b) = infos.get(infos.len() / 2) {
-                    Some((index + 1, min(100, (**b).into())))
-                } else {
-                    None
-                }
-            }),
-            full_palette::BLUEGREY.mix(0.4),
-        ))
-        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
-        .label("PHRED score")
-        .legend(|(x, y)| {
-            plotters::element::PathElement::new(
-                [(x, y), (x + 15, y)],
-                full_palette::BLUEGREY.mix(0.4),
-            )
-        });
-    secondary
         .draw_secondary_series(
             Histogram::vertical(&secondary)
                 .baseline(0)
@@ -2572,7 +2540,7 @@ where
         });
     secondary
         .configure_secondary_axes()
-        .y_desc("Average softclips && PHRED score")
+        .y_desc("Average softclips")
         .y_label_formatter(&|f| format!("{f}%"))
         .label_style(text_style.clone())
         //.disable_y_mesh()
@@ -2588,9 +2556,63 @@ where
             .draw()
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
+    let mut chart = ChartBuilder::on(&bottom)
+        .set_label_area_size(LabelAreaPosition::Left, 40)
+        .right_y_label_area_size(60)
+        .set_label_area_size(LabelAreaPosition::Bottom, 40)
+        .caption(
+            format!("Average PHRED score for matching reads"),
+            ("sans-serif", 18),
+        )
+        .build_cartesian_2d(1..hash.len(), 0..100)
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
+    chart
+        .draw_series(LineSeries::new(
+            hash.iter().enumerate().filter_map(|(index, _)| {
+                let iter = gene.phredscore.getscore();
+                let infos: Vec<&u8> = iter
+                    .iter()
+                    .map(|b| b.get(index))
+                    .filter_map(|b| b)
+                    .collect();
+                if let Some(b) = infos.get(infos.len() / 2) {
+                    Some((index + 1, min(100, (**b).into())))
+                } else {
+                    None
+                }
+            }),
+            full_palette::BLUEGREY.mix(0.4),
+        ))
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
+        .label("PHRED score")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7)));
+    chart
+        .configure_mesh()
+        //.x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
+        //.x_desc("Position in sequence (bp)")
+        .y_desc("PHRED score")
+        .disable_x_mesh()
+        .label_style(text_style.clone())
+        .light_line_style(GREY_400.mix(0.6))
+        .x_max_light_lines(5)
+        .y_max_light_lines(2)
+        //.disable_y_mesh()
+        .draw()
+        .unwrap();
+    if !args.nolegend {
+        chart
+            .configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::LowerRight)
+            .background_style(WHITE.mix(0.6))
+            .label_font(text_style.clone())
+            .border_style(BLACK.mix(0.8))
+            .draw()
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
+    }
     // To avoid the IO failure being ignored silently, we manually call the present function
-    drawnoticetext(&root)?;
-    root.present().map_err(|_e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
+    drawnoticetext(&bottom)?;
+    bottom.present().map_err(|_e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
+    top.present().map_err(|_e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())
 }
 fn givename(
@@ -3003,7 +3025,7 @@ pub(crate) fn geneisokay(reads100m: usize, hash: &BTreeMap<Position, Posread>) -
 }
 pub(crate) fn telomereposition(p: &Position, lengthloci: &Position) -> bool {
     lengthloci.getobasedpos().saturating_sub(p.getobasedpos())
-        > TELOMERESEP.try_into().unwrap_or(i64::MAX)
+        < TELOMERESEP.try_into().unwrap_or(i64::MAX)
         || p.getobasedpos() < TELOMERESEP.try_into().unwrap_or(i64::MAX)
 }
 pub(crate) fn locusisokay(mean: u64, lengthloci: &Position, graph: &[&HashMapinfo]) -> OkStatus {
@@ -3080,7 +3102,7 @@ where
             loci.getlength().saturating_sub(full.length(&loci.end)) / 9,
         )
     } else if let Some(full) = loci.getfulllength(args)
-        && (telomereposition(&loci.start, &full) || telomereposition(&loci.start, &full))
+        && (telomereposition(&loci.end, &full))
     {
         (
             Some(

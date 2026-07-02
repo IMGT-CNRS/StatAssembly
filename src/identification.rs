@@ -1,5 +1,4 @@
 use bio::io::fasta;
-use indicatif::ProgressBar;
 use itertools::Itertools;
 use rammap::{Aligner, MapOpts};
 use reqwest::{StatusCode, header};
@@ -12,7 +11,7 @@ use crate::{
     },
     submissions::{
         BORNESLINK, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK, blastcommand, checkoverlap,
-        fileincache, getprogressbar, getprogressbarclassic, speciesandorphonfiltering,
+        fileincache, getprogressbarclassic, speciesandorphonfiltering,
     },
 };
 use std::{
@@ -23,7 +22,7 @@ use std::{
     io::{
         self, BufReader, Cursor,
         ErrorKind::{self},
-        Read, Seek, Write,
+        Read, Write,
     },
     path::{Path, PathBuf},
     str::FromStr,

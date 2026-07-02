@@ -1,46 +1,19 @@
 use std::io;
+use std::io::ErrorKind::InvalidInput;
 // main.rs
 use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, fs::File};
 
 use itertools::Itertools;
-use pdfrs::security::PdfPermissions;
-use pdfrs::{elements, pdf_generator};
+use num_format::{Locale, ToFormattedString};
+use oxidize_pdf::document::DocumentEncryption;
+use oxidize_pdf::encryption::{OwnerPassword, UserPassword};
+use oxidize_pdf::{Color, Document, Font, Image, Page, PageTables, TableOptions, encryption};
 use serde::Serialize;
 
 use crate::r#struct::{Blastmatch, Filecrea, GeneInfos, LocusInfos};
-use crate::{NAME, VERSION, getgeneinfos};
-
-/// Convertit un Vec<Vec<String>> en tableau Markdown
-fn vec_to_markdown_table(data: &[Vec<String>]) -> String {
-    if data.is_empty() {
-        return String::new();
-    }
-
-    let mut table = String::new();
-
-    // Ligne d'en-tête
-    table.push_str("| ");
-    table.push_str(&data[0].join(" | "));
-    table.push_str(" |\n");
-
-    // Séparateur (|---|---|...)
-    table.push_str("|");
-    for _ in 0..data[0].len() {
-        table.push_str("---|");
-    }
-    table.push_str("\n");
-
-    // Lignes de données
-    for row in &data[1..] {
-        table.push_str("| ");
-        table.push_str(&row.join(" | "));
-        table.push_str(" |\n");
-    }
-
-    table
-}
+use crate::{AUTHOR, NAME, VERSION, getgeneinfos};
 
 pub(crate) fn generatepdf(
     infos: &[LocusInfos],
@@ -53,8 +26,8 @@ pub(crate) fn generatepdf(
             let mut b = Vec::new();
             b.push(a.locusinfo.to_string());
             b.push(a.contig.to_string());
-            b.push(a.start.getobasedpos().to_string());
-            b.push(a.end.getobasedpos().to_string());
+            b.push(a.start.getobasedpos().to_formatted_string(&Locale::en));
+            b.push(a.end.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.complement.to_string());
             b.push(a.status.to_string());
             b
@@ -71,31 +44,83 @@ pub(crate) fn generatepdf(
             let mut b = Vec::new();
             b.push(a.gene.to_string());
             b.push(a.chromosome.to_string());
-            b.push(a.start.getobasedpos().to_string());
-            b.push(a.end.getobasedpos().to_string());
+            b.push(a.start.getobasedpos().to_formatted_string(&Locale::en));
+            b.push(a.end.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.strand.to_string());
             b.push(a.status.to_string());
             b
         })
         .collect();
-    let layout = format!(
-        "# {} version {}\n![Logo software](images/logo_imgt.png)\n## List of locus {} ## List of validated alleles {}",
-        NAME.as_str(),
-        VERSION,
-        vec_to_markdown_table(&locusdata),
-        vec_to_markdown_table(&elem)
-    );
-    let elements = elements::parse_markdown(&layout);
-    let layout = pdf_generator::PageLayout::portrait();
-    let file = Filecrea::createfrompath(Path::join(&outdir, "summary.pdf"));
-    pdf_generator::create_pdf_from_elements_with_layout(
-        &file.getpath().display().to_string().as_str(),
-        &elements,
-        "Helvetica",
-        12.0,
-        layout,
+    // Create a new document
+    let mut doc = Document::new();
+    doc.set_title("IMGT/StatAssembly summary");
+
+    // Create a page
+    let mut page = Page::a4();
+    let black = Color::black();
+    // Add text
+    page.text()
+        .set_font(Font::Helvetica, 24.0)
+        .set_fill_color(black)
+        .at(20.0, 700.0)
+        .write(&format!("{} version {}", NAME.as_str(), VERSION))
+        .map_err(|d| io::Error::new(InvalidInput, d))?;
+
+    // Add graphics
+    let softwareimage = Image::from_file("images/logo_software.png")
+        .map_err(|d| io::Error::new(InvalidInput, d))?;
+    page.add_image("Software logo", softwareimage);
+    let image =
+        Image::from_file("images/logo_imgt.png").map_err(|d| io::Error::new(InvalidInput, d))?;
+    page.add_image("IMGT logo", image);
+    page.text()
+        .set_font(Font::Helvetica, 20.0)
+        .set_fill_color(black)
+        .at(20.0, 600.0)
+        .write("Locus found")
+        .map_err(|d| io::Error::new(InvalidInput, d))?;
+    let tableoptions = TableOptions::default();
+    page.add_quick_table(
+        locusdata,
+        5.0,
+        400.0,
+        page.content_width() - 10.0,
+        Some(tableoptions),
     )
-    .map_err(|d| io::Error::new(io::ErrorKind::InvalidInput, d))?;
-    let permissions = PdfPermissions::read_only();
+    .map_err(|d| io::Error::new(InvalidInput, d))?;
+    doc.add_page(page);
+    // Create a page
+    let mut page = Page::a4();
+    page.text()
+        .set_font(Font::Helvetica, 20.0)
+        .set_fill_color(black)
+        .at(2.0, 700.0)
+        .write("Validated alleles")
+        .map_err(|d| io::Error::new(InvalidInput, d))?;
+    let tableoptions = TableOptions::default();
+    page.add_quick_table(
+        elem,
+        5.0,
+        620.0,
+        page.content_width() - 10.0,
+        Some(tableoptions),
+    )
+    .map_err(|d| io::Error::new(InvalidInput, d))?;
+    // Save the document
+    doc.add_page(page);
+    doc.set_producer(AUTHOR);
+    doc.set_author(NAME.as_str());
+    /* let mut permissions = encryption::Permissions::new();
+    permissions.set_copy(true).set_print_high_quality(true);
+    doc.set_encryption(DocumentEncryption {
+        user_password: UserPassword(String::new()),
+        owner_password: OwnerPassword(String::new()),
+        permissions: permissions,
+        strength: oxidize_pdf::document::EncryptionStrength::Aes256,
+    }); */
+
+    let file = Filecrea::createfrompath(Path::join(&outdir, "summary.pdf"));
+    doc.save(file.getpath())
+        .map_err(|d| io::Error::new(InvalidInput, d))?;
     Ok(file)
 }

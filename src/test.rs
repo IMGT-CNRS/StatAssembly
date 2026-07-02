@@ -18,7 +18,6 @@ mod tests {
     };
     use clap::Parser;
     use extended_htslib::bam::{self, Read};
-    use indicatif::ProgressBar;
     use itertools::Itertools;
     use tempfile::{NamedTempFile, TempDir};
     #[test]
