@@ -34,7 +34,7 @@ to access the help and all parameters.
 ### Source code
 
 - [ ] Install [rust](https://www.rust-lang.org/fr/learn/get-started) if not installed.
-- [ ] Check Rust version `rustc -V`, should be >= 1.85.
+- [ ] Check Rust version `rustc -V`, should be >= 1.93.
 - [ ] Do a `git clone` of the repo and then `cargo build --release` to compile the software or run to run.
 
 Those commands can be put as:
@@ -55,13 +55,13 @@ binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -a
 
 The list of arguments used in the example (more available in software help):
 
-* -f is the BAM file with its index (in the same folder) (see [BAM file generation](##generation-of-a-bam-file))
-* -s is the species
+* ```-f``` is the BAM file with its index (in the same folder) (see [BAM file generation](##generation-of-a-bam-file))
+* ```-s``` is the species
 * --totalread to get read mismatch rate
-* -l is the locus file (see [input file section](#script-input-files-and-data))
-* --extractedlength is the length of the extracted assembly from the BAM file
-* -g (OPTIONAL) is the gene list file (see [input file section](#script-input-files-and-data))
-* -o is the path of the folder to put results (would be created if not existing and overwritten if existing)
+* ```-l``` is the locus file (see [input file section](#script-input-files-and-data))
+* ```--extractedlength``` is the length of the extracted assembly from the BAM file if it is partial/truncated, else it is automatically calculated.
+* ```-g``` is the gene list file (see [input file section](#script-input-files-and-data))
+* ```-o``` is the path of the folder to put results (would be created if not existing and overwritten if existing)
 
 The script should last around 30 seconds.
 
@@ -91,6 +91,14 @@ By giving the assembly, you can generate the gene list and the locus position. T
 
 ```bash
 binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -a example_files/assembly.fna -s human -o results/ find
+```
+
+#### Generation of assembly index
+
+The script will fail if the assembly is not indexed. To index it, use samtools:
+
+```console
+samtools faidx assembly.fasta
 ```
 
 ### Analyze 
@@ -205,6 +213,8 @@ The expected output from execution with test files is present in `example_files/
 
 For each assembly (in the graph named readresult.png) and for each allele (if applicable), the color of the graph would give information in the assembly and/or allele validates [IMGT criterias](#results-analysis).
 
+> [!TIP]
+> The images provided can also be created as svg file with ```--svg``` argument.
 <details>
 <summary>Description</summary>
 
@@ -220,30 +230,38 @@ For each assembly (in the graph named readresult.png) and for each allele (if ap
     - Suspicious positions (`rgb(239, 83, 80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: percentalerting default 0.6).
   - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0, 0, 0)` (black) curve.
   - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with deletions (D) or insertions (I). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
+  - *newloc.csv* contains locus information with status (Accepted/Rejected).
+  - *sequence.fasta.gz* contains extracted sequence of all identified loci (compressed).
+  - *validatedalleles.fasta* contains the list of all alleles (with their closest IMGT match) that are validated, as well as their locus.
+  - **genelist_new.csv* gives a gene list on all the loci (if not provided) based on closest IMGT match. It does not provide gene status which is in ```gene_analysis.csv```.
 </details>
 
 ### Results analysis
 
 For a better overview of IMGT rules based on this analysis, check [IMGT assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
 
-For readresult.png and each allele graph, the color of the graph would indicate if the locus and/or gene meets IMGT criterias (green for validation and red for rejection).
-* For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2).
+For readresult.png and each allele graph, the color of the graph would indicate if the locus and/or gene meets IMGT criterias ![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Green for validation and ![#f03c15](https://placehold.co/15x15/f03c15/f03c15.png) red for rejection).
+* For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
 * For gene: At least 10 matching reads and no suspicious or warning positions.
 
 ## How to cite
 
 More informations on this software can be found in the article.
 
-If you use IMGT/StatAssembly in your work, please cite the article related to the software:
+If you use IMGT/StatAssembly in your work, please cite the article related to the software and the version you used:
 
 > IMGT® at scale: FAIR, Dynamic and Automated Tools for Immune Locus Analysis
 >
 > Gaoussou Sanou, Guilhem Zeitoun, Taciana Manso, Milad Eidi, François Grand, Anjana Kushwaha, Myriam Croze, Chahrazed Debbagh, Axel Vaillant, Maria Georga, Ariadni Papadaki, Ifigeneia Sideri, Shamsa Batool, Turkan Samadova, Joumana Jabado-Michaloud, Géraldine Folch, Véronique Giudicelli, Patrice Duroux, Sofia Kossida
 > *Nucleic Acids Research;*, gkaf1024, [https://doi.org/10.1093/nar/gkaf1024](https://doi.org/10.1093/nar/gkaf1024)
 
+### Versioning
+
+Version will follow SemVer [Semantic Versioning 2.0.0](https://semver.org/).
+
 ### Thanks
 
-Thanks to Christophe Klopp from Sigenae - an INRAE bioinformatic platform, who give us some ideas to improve the software.
+Thanks to [Christophe Klopp](https://www.researchgate.net/profile/Christophe-Klopp) from Sigenae - an INRAE bioinformatic platform, who give us some ideas to improve the software.
 
 ## License
 
@@ -255,7 +273,11 @@ The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https:/
 
 ## Memory consumption
 
-The script uses hundreds of Mo up to some Gb for a several Mo locus. Some Gb of memory should be reserved depending on the BAM file.
+The script tries to use as less memory as possible. However the memory consumption depends on the use of rmmap and BLAST and if locus and gene position were provided. Here is a memory graph for example file when locus and genes are provided, it does not count BLAST memory consumption:
+![Memory consumption](/images/memory_example.png)
+And when there are not provided (arg ```--lowmemory``` set):
 ![Memory consumption](/images/memory.png)
+
+
 
 [^1]: TRD is inside TRA locus and so both loci are analyzed together.

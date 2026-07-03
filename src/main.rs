@@ -225,7 +225,7 @@ fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
         Ok(d) => Ok(d),
         Err(e) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Assembly error, maybe index is missing (create it with samtools): {e}"),
+            format!("Assembly error, maybe index is missing (create it with samtools faidx): {e}"),
         )),
     }?;
     Ok(elem)
