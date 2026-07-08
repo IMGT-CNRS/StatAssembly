@@ -936,7 +936,7 @@ fn setgraphbitmap<'a>(
 fn main() -> ExitCode {
     /*
     let mainpa = env::current_dir().unwrap();
-    let testo = TempDir::new().unwrap();
+    let testo = tempfile::TempDir::new().unwrap();
     let path = &Path::new(&mainpa).join("full_cs.bam").display().to_string();
     let path2 = Path::new(&mainpa)
         .join("assembly.fasta")
@@ -1011,7 +1011,7 @@ fn main() -> ExitCode {
         let _ = append.unlock();
     }
     return ExitCode::SUCCESS;
-        */
+     */
     let mut args = Args::parse();
     if checknewversion() {
         return ExitCode::FAILURE;

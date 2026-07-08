@@ -242,7 +242,9 @@ For a better overview of IMGT rules based on this analysis, check [IMGT assembly
 
 For readresult.png and each allele graph, the color of the graph would indicate if the locus and/or gene meets IMGT criterias ![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Green for validation and ![#f03c15](https://placehold.co/15x15/f03c15/f03c15.png) red for rejection).
 * For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
-* For gene: At least 10 matching reads and no suspicious or warning positions.
+* For genes: At least 10 matching reads and no suspicious or warning positions.
+
+*The threshold can be changed for the graphs but not for the validation (and therefore the color title and csv files).*
 
 ## How to cite
 
