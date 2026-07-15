@@ -1,6 +1,6 @@
 use bio::io::fasta;
 use itertools::Itertools;
-use rammap::{Aligner, MapOpts};
+use rammap::Aligner;
 use reqwest::{StatusCode, header};
 
 use crate::{
@@ -30,6 +30,7 @@ use std::{
     thread::{self, ScopedJoinHandle, sleep},
     time::Duration,
 };
+#[allow(clippy::type_complexity)]
 pub(crate) fn threadlaunch<T>(
     referencepath: Filecrea,
     subject: T,
@@ -67,25 +68,24 @@ where
                     }
                 };
                 let aligner = Aligner::from_fasta(
-                    &subject.as_ref().display().to_string().as_str(),
+                    subject.as_ref().display().to_string().as_str(),
                     rammap::Preset::Asm20,
                 )
                 .map_err(|d| {
                     eprintln!("Unable to set aligner. Error is {d}");
                 })
                 .ok()?;
-                let mut options = MapOpts::default();
-                options.cs = Some(true);
+                let options = rammap::MapOpts {
+                    cs: Some(true),
+                    ..Default::default()
+                };
                 let read = fasta::Reader::from_file(b.getpath()).ok()?;
                 let mut aligns: Vec<Blastmatch> = Vec::new();
                 for seq in read.records().filter_map(Result::ok) {
                     let name = format!("NCBI|{}", seq.desc().unwrap_or_default());
-                    match receiver.try_recv() {
-                        Ok("kill") => {
-                            eprintln!("aborted by main");
-                            return None;
-                        }
-                        _ => (),
+                    if let Ok("kill") = receiver.try_recv() {
+                        eprintln!("aborted by main");
+                        return None;
                     };
                     if let a = aligner
                         .map_seq_with(
@@ -129,7 +129,7 @@ where
                             send,
                             complement,
                             status,
-                            f32::from_str(&identity.to_string().as_str()).ok()?,
+                            f32::from_str(identity.to_string().as_str()).ok()?,
                         );
                         aligns.push(matche);
                     }
@@ -155,7 +155,6 @@ where
                         time += 1;
                     }
                     let _ = sender.send("kill");
-                    return;
                 });
             });
         };
@@ -197,7 +196,7 @@ pub(crate) fn locusallposition(
     let infos = if args.nobornes {
         None
     } else {
-        downloadbornes(&args)
+        downloadbornes(args)
     };
     let (bornespath, referencepath, releaseversion) = match (
         infos,
@@ -232,7 +231,7 @@ pub(crate) fn locusallposition(
     merge.write_all(read.as_bytes())?;
     merge.write_all(read2.as_bytes())?;
     println!("Blasting to get position of loci."); */
-    let info = threadlaunch(referencepath, subject, &args, bornespath);
+    let info = threadlaunch(referencepath, subject, args, bornespath);
     let (mut blast, mut bornes) = match info {
         Ok((a, Some(Some(b)))) => (a, Some(b)),
         Ok((a, None)) => {
@@ -244,7 +243,7 @@ pub(crate) fn locusallposition(
         Ok((_, Some(None))) => {
             return Err(io::Error::new(
                 ErrorKind::BrokenPipe,
-                format!("Bornes could not be analyzed"),
+                "Bornes could not be analyzed".to_string(),
             ));
         }
         Err(a) => {
@@ -461,7 +460,7 @@ pub(crate) fn find_global_best_range(
     }
     if let Some(borneblast) = &bornes {
         'borne: for borneblast in borneblast {
-            for (_, values) in locus.iter_mut() {
+            for values in locus.values_mut() {
                 for val in values.iter() {
                     let a = borneblast;
                     let b = val;
@@ -540,9 +539,9 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
                     e.content_length(),
                     e.headers().get(header::CONTENT_LENGTH).map(|a| {
                         a.to_str()
-                            .map_err(|_| format!("Error reading headers"))
+                            .map_err(|_| "Error reading headers".to_string())
                             .map(|a| a.parse::<u64>())
-                            .map_err(|_| format!("Error reading headers"))
+                            .map_err(|_| "Error reading headers".to_string())
                     }),
                 ) {
                     (Some(a), _) => a,
@@ -565,7 +564,7 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
                     downloaded = new;
                     pb.set_position(new);
                 }
-                pb.finish_with_message(format!("Finished"));
+                pb.finish_with_message("Finished".to_string());
                 Ok(stream)
             } else {
                 Err(format!("Error getting URL. Code is {}", e.status()))
@@ -583,15 +582,15 @@ pub(crate) fn sendresultcompressed(
         Ok(e) => {
             if e.status() == StatusCode::OK {
                 let mut buf = Vec::new();
-                let (contentlength, headers) = (e.content_length().clone(), e.headers().clone());
+                let (contentlength, headers) = (e.content_length(), e.headers().clone());
                 let stream = e.bytes().map_err(|e| e.to_string())?;
                 let total_size = match (
                     contentlength,
                     headers.get(header::CONTENT_LENGTH).map(|a| {
                         a.to_str()
-                            .map_err(|_| format!("Error reading headers"))
+                            .map_err(|_| "Error reading headers".to_string())
                             .map(|a| a.parse::<u64>())
-                            .map_err(|_| format!("Error reading headers"))
+                            .map_err(|_| "Error reading headers".to_string())
                     }),
                     stream.len(),
                 ) {
@@ -667,7 +666,7 @@ pub(crate) fn downloadref(
         );
         match sendresult(&REQUESTCLIENT, VQUESTLINK.as_str()) {
             Ok(e) => {
-                match File::create(&tempfile.getpath()).map(|mut f| f.write_all(e.as_bytes())) {
+                match File::create(tempfile.getpath()).map(|mut f| f.write_all(e.as_bytes())) {
                     Ok(Ok(_)) => (),
                     _ => {
                         eprintln!("Cannot write refseq in sequence.");

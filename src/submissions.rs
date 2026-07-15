@@ -566,7 +566,7 @@ pub(crate) fn matchmotif(
     args: &Args,
     locus: Option<&Locus>,
 ) -> io::Result<Vec<Blastmatch>> {
-    let reference = match downloadmotifs(&args).map(|mut a| {
+    let reference = match downloadmotifs(args).map(|mut a| {
         speciesandorphonfiltering(&mut a, locus, "motifs".to_string(), species, false, false)
     }) {
         Some(a) => a?,
@@ -612,7 +612,7 @@ pub(crate) fn genesblast(
     locus: &Locus,
 ) -> io::Result<(Vec<Blastmatch>, Option<String>)> {
     let name = Filecrea::createtemp(None, Some("genes_blast.txt"))?;
-    let mut fastawriter = fasta::Writer::to_file(&name.getpath())?;
+    let mut fastawriter = fasta::Writer::to_file(name.getpath())?;
     let mut reader = getassemblyreader(args)?;
     let count = subject
         .iter()
@@ -635,7 +635,7 @@ pub(crate) fn genesblast(
         })
         .collect::<Result<Vec<_>, _>>()?;
     fastawriter.flush()?;
-    if count.len() == 0 {
+    if count.is_empty() {
         eprintln!("No genes found for this locus, skipped.");
         return Ok((Vec::new(), None));
     }
@@ -728,7 +728,7 @@ fn checknospaceinheaderandvalidseq(
     }); //One sequence has a space because it has a description
     if haspaces {
         let refnew = Filecrea::createtemp(None::<&Path>, None::<&Path>)?;
-        let mut writer = fasta::Writer::to_file(&refnew.getpath())?;
+        let mut writer = fasta::Writer::to_file(refnew.getpath())?;
         let refreader = fasta::Reader::from_file(reference.getpath())
             .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
         for seq in refreader.records().filter_map(Result::ok) {
@@ -810,7 +810,7 @@ where
         let mut time = 0;
         while time < TIMEOUT_IN_MN.saturating_mul(60) {
             if !command.try_wait().is_ok_and(|f| f.is_none()) {
-                return command.wait_with_output().map(|a| Some(a));
+                return command.wait_with_output().map(Some);
             }
             sleep(Duration::new(1, 0));
             time += 1;
@@ -831,7 +831,7 @@ where
             Ok(None) => {
                 return Err(io::Error::new(
                     ErrorKind::ConnectionAborted,
-                    format!("BLAST has timeout. Please retry later."),
+                    "BLAST has timeout. Please retry later.".to_string(),
                 ));
             }
             Ok(Some(b)) if !b.status.success() => {
@@ -1171,7 +1171,7 @@ pub(crate) fn submit(
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, None, locus)?;
     let sequencefile = generatesequence(args, dir, locus)?;
-    let mut motifs = matchmotif(&sequencefile.getpath(), realspecies, &args, None)
+    let mut motifs = matchmotif(sequencefile.getpath(), realspecies, args, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
@@ -1336,7 +1336,7 @@ pub(crate) fn askforsubmission(
             }
         }
         let mut blastmatch: Vec<Blastmatch> = Vec::new();
-        for (_, data) in infos.iter() {
+        for data in infos.values() {
             blastmatch.append(&mut data.clone());
         }
         submit(args, locus, &blastmatch, realspecies)
@@ -1349,7 +1349,7 @@ pub(crate) fn generatesequence(
     dir: &Path,
     locus: &[LocusInfos],
 ) -> Result<Filecrea, String> {
-    let sequencefile = Filecrea::createfrompath(Path::join(&dir, "sequence.fasta.gz"));
+    let sequencefile = Filecrea::createfrompath(Path::join(dir, "sequence.fasta.gz"));
     let mut cursor = io::Cursor::new(Vec::new());
     {
         //To free borrow of cursor
@@ -1464,7 +1464,7 @@ pub(crate) fn generatelightbam(
             .try_into()
             .unwrap_or(1),
     )
-    .map_err(|e| return format!("Cannot build index. Error is {}", e))?;
+    .map_err(|e| format!("Cannot build index. Error is {}", e))?;
     Ok(())
 }
 pub(crate) fn browseropening() -> io::Result<()> {
@@ -1483,7 +1483,7 @@ pub(crate) fn browseropening() -> io::Result<()> {
 }
 pub(crate) fn createarchive(args: &Args, dir: &Path) -> io::Result<Filecrea> {
     let temp = Filecrea::createtemp(Some(dir), Some(Path::new("submission.tar.gz")))?;
-    let file = File::create(&temp.getpath())?;
+    let file = File::create(temp.getpath())?;
     let archive = GzEncoder::new(file, Compression::best());
     let mut tar = tar::Builder::new(archive);
     tar.follow_symlinks(false);
@@ -1578,7 +1578,7 @@ pub(crate) fn getprogressbar<R>(size: u64, reader: R) -> io::Result<ProgressRead
 );
 
     Ok(ProgressReader {
-        reader: reader,
+        reader,
         progress_bar: pb,
         total_bytes: size,
     })

@@ -193,7 +193,7 @@ fn filterread(args: &Args, record: &bam::Record) -> bool {
     if args.forward && record.is_reverse() {
         return false;
     }
-    if !args.allreads && (record.is_supplementary() || record.is_secondary()) {
+    if !args.allreads && !record.is_primary() {
         return false;
     }
     true
@@ -423,7 +423,7 @@ fn locusposparser(
     for elem in records.iter().filter(|p| p.contig.is_none()) {
         eprintln!(
             "Locus {} for {} could not be identified and would be skipped",
-            &elem.locus,
+            elem.locus,
             elem.haplotype.as_ref().unwrap_or(&Haplotype::default())
         );
     }
@@ -481,8 +481,7 @@ fn locusposparser(
                 big.getlocus(),
                 ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
                 big.getlength().to_formatted_string(&Locale::en),
-                &args
-                    .locuspos
+                args.locuspos
                     .as_ref()
                     .map(|f| format!("{}", f.display()))
                     .unwrap_or("no loc given".to_string())
@@ -543,7 +542,7 @@ fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
                     return None;
                 }
             };
-            let subject = match Name::from_str(&p.getsubject()) {
+            let subject = match Name::from_str(p.getsubject()) {
                 Ok(a) => a.numacc.unwrap_or_default(),
                 Err(_) => p.getsubject().to_string(),
             };
@@ -622,7 +621,7 @@ fn checklocusandoutput(args: &Args) -> std::io::Result<&PathBuf> {
         true => {
             eprintln!(
                 "Output folder exists: {}. Will be overwritten.",
-                &args.outdir.display()
+                args.outdir.display()
             );
             &args.outdir
         }
@@ -675,7 +674,7 @@ fn processcounting(
         }
     };
     for (i, targeting) in pos.range_mut(newrange) {
-        if record.is_secondary() || record.is_supplementary() {
+        if !record.is_primary() {
             if record.is_secondary() {
                 targeting.secondary += 1;
             } else {
@@ -757,7 +756,7 @@ fn getmeancoveragelengthandphred(args: &Args) -> io::Result<Params> {
         .filter_map(Result::ok)
         .filter_map(|f| {
             //Remove reads with 0 as MAPQ
-            if f.mapq() != 0 && !f.is_unmapped() && !f.is_secondary() && !f.is_supplementary() {
+            if f.mapq() != 0 && !f.is_unmapped() && f.is_primary() {
                 readlength += f.len();
                 count += 1;
                 phred += f
@@ -855,7 +854,7 @@ where
         readgraph(
             &args.outdir,
             loci,
-            &pos.into_iter().map(|a| a.1).collect_vec(),
+            &pos.iter().map(|a| a.1).collect_vec(),
             args,
             species,
             readgraphelem,
@@ -1027,7 +1026,7 @@ fn main() -> ExitCode {
     let speciesblast = match Species::new(&args.species) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("Species {} has failed: {e}", &args.species);
+            eprintln!("Species {} has failed: {e}", args.species);
             return ExitCode::FAILURE;
         }
     };
@@ -1247,9 +1246,9 @@ fn main() -> ExitCode {
                 };
                 DrawingImage {
                     readresulttop: Some(Backend::Svg(top)),
-                    readresultbottom: bottom.map(|a| Backend::Svg(a)),
+                    readresultbottom: bottom.map(Backend::Svg),
                     mismatchtop: Some(Backend::Svg(mtop)),
-                    mismatchbottom: mbottom.map(|a| Backend::Svg(a)),
+                    mismatchbottom: mbottom.map(Backend::Svg),
                 }
             } else {
                 let (top, bottom) = if !haplotypebool {
@@ -1274,9 +1273,9 @@ fn main() -> ExitCode {
                 };
                 DrawingImage {
                     readresulttop: Some(Backend::Png(top)),
-                    readresultbottom: bottom.map(|a| Backend::Png(a)),
+                    readresultbottom: bottom.map(Backend::Png),
                     mismatchtop: Some(Backend::Png(mtop)),
-                    mismatchbottom: mbottom.map(|a| Backend::Png(a)),
+                    mismatchbottom: mbottom.map(Backend::Png),
                 }
             }
         };
@@ -1551,7 +1550,7 @@ fn main() -> ExitCode {
                                 &args,
                                 &releaseversion,
                                 &speciesblast,
-                                &loci.getlocus(),
+                                loci.getlocus(),
                             ) {
                                 Ok((blast, r)) => {
                                     if releaseversion.is_none() {
@@ -1643,7 +1642,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        println!("Locus {} is done!", &floci.getlocus());
+        println!("Locus {} is done!", floci.getlocus());
     }
     let mergedloci: Vec<LocusInfos> = grouped.iter().flatten().cloned().collect();
     if let Some(light) = &args.outlightbam
@@ -1762,7 +1761,7 @@ where
         for matches in elem {
             let name = matches.getallelename();
             let (subject, start, end, strand) = if let Ok(r) = Name::from_str(&matches.sseqid) //Check if it is a full composite or not
-                && let Some(a) = r.numacc && let Some((start,end,strand)) = locus.fullposition(&matches)
+                && let Some(a) = r.numacc && let Some((start,end,strand)) = locus.fullposition(matches)
             {
                 (a, start, end, strand)
             } else {
@@ -2015,8 +2014,8 @@ fn generategeneinfos(
             let realstart = aligned.find(|p| p.last() == Some(&gene.start.getobasedpos()));
             let realend = aligned.find(|p| p.last() == Some(&gene.end.getobasedpos()));
             if let (Some(Some(start)), Some(Some(end))) = (
-                realstart.map(|p| p.get(0).copied()),
-                realend.map(|p| p.get(0).copied()),
+                realstart.map(|p| p.first().copied()),
+                realend.map(|p| p.first().copied()),
             ) {
                 let newphredscore = record
                     .qual()
@@ -2028,7 +2027,7 @@ fn generategeneinfos(
                             .try_into()
                             .unwrap_or_default(),
                     )
-                    .map(|f| *f)
+                    .copied()
                     .collect::<Vec<u8>>();
                 let minscore = newphredscore
                     .iter()
@@ -2129,7 +2128,7 @@ fn genelist(
     let outputdir = &args.outdir;
     let outputfile = outputdir.join(givename(
         species,
-        &loci.getlocus(),
+        loci.getlocus(),
         &loci.contig,
         loci.gethaplotype().isprimary(),
         "geneanalysis.csv",
@@ -2140,7 +2139,7 @@ fn genelist(
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
     let progressbar = getprogressbarclassic(genes.len().try_into().unwrap_or_default())?;
     for (pos, mut gene) in genes.into_iter().enumerate() {
-        let (elem, hash) = generategeneinfos(&args, &mut gene)?;
+        let (elem, hash) = generategeneinfos(args, &mut gene)?;
         let plots = outputdir.join(format!(
             "gene_{}",
             loci.gethaplotype().to_string().as_str().to_lowercase()
@@ -2203,7 +2202,7 @@ fn printbreaks(
 ) -> std::io::Result<()> {
     let mut breakfile = File::create(outputdir.join(givename(
         species,
-        &loci.getlocus(),
+        loci.getlocus(),
         &loci.contig,
         loci.gethaplotype().isprimary(),
         "break.txt",
@@ -2263,7 +2262,7 @@ fn printpossus(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         species,
-        &loci.getlocus(),
+        loci.getlocus(),
         &loci.contig,
         loci.gethaplotype().isprimary(),
         "allele_confidence.csv",
@@ -2560,26 +2559,17 @@ where
         .set_label_area_size(LabelAreaPosition::Left, 40)
         .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
-        .caption(
-            format!("Average PHRED score for matching reads"),
-            ("sans-serif", 18),
-        )
+        .caption("Average PHRED score for matching reads", ("sans-serif", 18))
         .build_cartesian_2d(1..hash.len(), 0..100)
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     chart
         .draw_series(LineSeries::new(
             hash.iter().enumerate().filter_map(|(index, _)| {
                 let iter = gene.phredscore.getscore();
-                let infos: Vec<&u8> = iter
-                    .iter()
-                    .map(|b| b.get(index))
-                    .filter_map(|b| b)
-                    .collect();
-                if let Some(b) = infos.get(infos.len() / 2) {
-                    Some((index + 1, min(100, (**b).into())))
-                } else {
-                    None
-                }
+                let infos: Vec<&u8> = iter.iter().filter_map(|b| b.get(index)).collect();
+                infos
+                    .get(infos.len() / 2)
+                    .map(|b| (index + 1, min(100, (**b).into())))
             }),
             full_palette::BLUEGREY.mix(0.4),
         ))
@@ -2598,7 +2588,7 @@ where
         .y_max_light_lines(2)
         //.disable_y_mesh()
         .draw()
-        .unwrap();
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     if !args.nolegend {
         chart
             .configure_series_labels()
@@ -2651,7 +2641,7 @@ fn createcsv(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let outputfile = outputdir.join(givename(
         species,
-        &loci.getlocus(),
+        loci.getlocus(),
         &loci.contig,
         loci.gethaplotype().isprimary(),
         "positionresult.csv",

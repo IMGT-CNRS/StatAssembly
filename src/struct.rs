@@ -153,6 +153,7 @@ pub(crate) struct Args {
 }
 // Allow to manipulate tempfile and plain files and ensure remove of temp file when dropped.
 pub(crate) enum Filecrea {
+    /// Should not rely on the path, that will be deleted on drop
     Temp(NamedTempFile),
     Plain(PathBuf),
 }
@@ -175,17 +176,11 @@ impl<'a> Backend<'a> {
         }
     }
     pub(crate) fn issvg(&self) -> bool {
-        match self {
-            Self::Svg(_) => true,
-            _ => false,
-        }
+        matches!(self, Self::Svg(_))
     }
     #[allow(unused)]
     pub(crate) fn ispng(&self) -> bool {
-        match self {
-            Self::Png(_) => true,
-            _ => false,
-        }
+        matches!(self, Self::Png(_))
     }
 }
 pub(crate) struct DrawingImage<'a> {
@@ -280,9 +275,9 @@ impl Drop for Filecrea {
         }
     }
 }
-impl Into<PathBuf> for Filecrea {
-    fn into(self) -> PathBuf {
-        self.getpath().to_path_buf()
+impl From<Filecrea> for PathBuf {
+    fn from(value: Filecrea) -> Self {
+        value.getpath().to_path_buf()
     }
 }
 /*
@@ -375,7 +370,7 @@ pub(crate) struct LocusHaplo {
 }
 impl PartialOrd for LocusHaplo {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(&other))
+        Some(self.cmp(other))
     }
 }
 impl Ord for LocusHaplo {
@@ -1372,7 +1367,7 @@ pub trait Blastcalc {
     }
     #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
-        Locus::from_str(&self.getallelename().split_at(3).0.to_string()).ok()
+        Locus::from_str(self.getallelename().split_at(3).0).ok()
     }
     fn getidentity(&self) -> f32;
 }
@@ -1962,7 +1957,7 @@ impl LocusInfos {
         self.status = locusisokay(
             mean,
             &self
-                .getfulllength(&args)
+                .getfulllength(args)
                 .unwrap_or_else(|| Position::new(true, i64::MAX)),
             &pos.values().collect_vec(),
         )

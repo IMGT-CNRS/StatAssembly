@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
         io::{BufReader, ErrorKind::UnexpectedEof, Read as read2, Write},
@@ -81,7 +82,7 @@ mod tests {
             let mut genes = extractgenelist(&args4, &loci, false).unwrap();
             let invalidgenes = genes
                 .iter_mut()
-                .map(|mut a| generategeneinfos(&args4, &mut a).unwrap())
+                .map(|a| generategeneinfos(&args4, a).unwrap())
                 .filter(|p| !p.0.getstatus().getstatus().isvalid());
             let string = invalidgenes.fold(String::new(), |mut acc, (gene, _)| {
                 acc.push_str(&format!(
@@ -145,7 +146,7 @@ mod tests {
     fn checkspecies() {
         sleep(Duration::new(3, 0)); //Sleep for NCBI
         let human = Species::new("Homo sapiens").unwrap();
-        assert_eq!(human.ischecked(), true, "Species could not be validated");
+        assert!(human.ischecked(), "Species could not be validated");
         assert_eq!(human.getid(), Some(9606), "Species taxon is invalid");
         assert!(
             human.getrank().eq_ignore_ascii_case("species"),
@@ -157,7 +158,7 @@ mod tests {
         );
         sleep(Duration::new(3, 0)); //Sleep for NCBI
         let dog = Species::new("dog").unwrap();
-        assert_eq!(dog.ischecked(), true, "Species could not be validated");
+        assert!(dog.ischecked(), "Species could not be validated");
         assert_eq!(dog.getid(), Some(9615), "Species taxon is invalid");
         assert!(
             dog.getrank().eq_ignore_ascii_case("subspecies"),
@@ -218,7 +219,7 @@ mod tests {
         )
         .unwrap();
         let mut br = bam::Reader::from_path(args4.file.unwrap()).unwrap();
-        let mut cr = bam::Reader::from_path(&args4.outlightbam.unwrap().as_path()).unwrap();
+        let mut cr = bam::Reader::from_path(args4.outlightbam.unwrap().as_path()).unwrap();
         let mut activ = false;
         for (record, record2) in br
             .records()
