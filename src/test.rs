@@ -2,19 +2,21 @@
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
-        io::{BufReader, ErrorKind::UnexpectedEof, Read as read2, Write},
+        fs::File,
+        io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
+        path::PathBuf,
         thread::sleep,
         time::Duration,
     };
 
     use crate::{
-        extractgenelist, generategeneinfos,
+        extractgenelist, generategeneinfos, getorsetparams,
         identification::{sendresult, sendresultcompressed},
-        locusposparser,
-        r#struct::{Args, Filecrea, GenesList, Species, SpeciesError},
+        locusposparser, posread,
+        r#struct::{Args, Filecrea, HashMapinfo, Locus, Species, SpeciesError},
         submissions::{
-            BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, generatelightbam,
-            generatesequence, getprogressbarclassic,
+            BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
+            generatelightbam, generatesequence, getprogressbarclassic,
         },
     };
     use clap::Parser;
@@ -36,69 +38,6 @@ mod tests {
             sendresultcompressed(&REQUESTCLIENT, &BORNESLINK).is_ok(),
             "Error with bornes link"
         );
-    }
-    #[test]
-    #[ignore]
-    fn validfolder() {
-        let testo = TempDir::new().unwrap();
-        let fake_args = vec![
-            "IMGT_StatAssembly",
-            "-f",
-            "full_cs.bam",
-            "-a",
-            "assembly.fasta",
-            "-l",
-            "locus.csv",
-            "-s",
-            "human",
-            "-g",
-            "geneloc.csv",
-            "-o",
-            testo.path().to_str().unwrap(),
-            "analyze",
-        ];
-        let human = Species::new("Homo sapiens").unwrap();
-        let args4 = Args::try_parse_from(fake_args)
-            .map_err(|f| f.to_string())
-            .unwrap();
-        let (locus, ..) = locusposparser(&args4, &human, false).unwrap();
-        let mut append = std::fs::OpenOptions::new()
-            .append(true)
-            .open("~guilhem/historic.txt")
-            .unwrap();
-        let string = locus.iter().fold(String::new(), |mut acc, loci| {
-            acc.push_str(&format!(
-                "Locus {} is invalid at {}\n",
-                loci.gethaplotype(),
-                loci.contig
-            ));
-            acc
-        });
-        let s = string.trim();
-        let _ = append.lock(); //Would fail on Windows if append so reject the error
-        append.write_all(s.as_bytes()).unwrap();
-        let _ = append.unlock();
-        for loci in locus {
-            let mut genes = extractgenelist(&args4, &loci, false).unwrap();
-            let invalidgenes = genes
-                .iter_mut()
-                .map(|a| generategeneinfos(&args4, a).unwrap())
-                .filter(|p| !p.0.getstatus().getstatus().isvalid());
-            let string = invalidgenes.fold(String::new(), |mut acc, (gene, _)| {
-                acc.push_str(&format!(
-                    "{} is invalid at {}:{}-{}\n",
-                    gene.getgene(),
-                    gene.getchromosome(),
-                    gene.getstart().getobasedpos(),
-                    gene.getend().getobasedpos()
-                ));
-                acc
-            });
-            let s = string.trim();
-            let _ = append.lock(); //Would fail on Windows if append so reject the error
-            append.write_all(s.as_bytes()).unwrap();
-            let _ = append.unlock();
-        }
     }
     #[test]
     fn generatesequencetest() {
@@ -125,10 +64,10 @@ mod tests {
             .unwrap();
         let (mut locus, ..) = locusposparser(&args4, &human, false).unwrap();
         locus.sort_unstable(); //Because sorted in mergedlocus function
-        let seq = generatesequence(&args4, testo.path(), &locus).unwrap();
+        let seq = generatesequence(&args4, testo.path(), true, &locus).unwrap();
         let mut bufone =
             BufReader::new(std::fs::File::open("example_files/results/sequence.fasta.gz").unwrap());
-        let mut buftwo = BufReader::new(std::fs::File::open(seq.getpath()).unwrap());
+        let mut buftwo = BufReader::new(seq.getfile().unwrap());
         loop {
             let mut buf1 = [0; 2048];
             let mut buf2 = [0; 2048];
@@ -176,6 +115,28 @@ mod tests {
         );
     }
     #[test]
+    fn testlocusparsing() {
+        let mut val = csv::ReaderBuilder::new()
+            .comment(Some(b'#'))
+            .has_headers(true)
+            .delimiter(b'\t')
+            .from_path(
+                "example_files/results/Homo_sapiens_IGH_NC_060938.1-primary_positionresult.csv",
+            )
+            .unwrap();
+        let mut data: Vec<HashMapinfo> = Vec::with_capacity(5000);
+        let mut count = 0;
+        for line in val.deserialize() {
+            count += 1;
+            data.push(line.unwrap());
+            if count >= 5000 {
+                break;
+            }
+        }
+        assert_eq!(data.iter().nth(3069).unwrap().qual, Some(80), "Issue");
+        assert!(data.iter().nth(1022).unwrap().qual.is_none(), "Issue");
+    }
+    #[test]
     fn testlocuspositiononlyandbam() {
         let testo = TempDir::new().unwrap();
         let a = Filecrea::createtemp(None, Some("test.bam")).unwrap();
@@ -203,18 +164,25 @@ mod tests {
             .map_err(|f| f.to_string())
             .unwrap();
         let spec = Species::new(&args4.species).unwrap();
-        let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
+        let (mut result, _blast, _release) = match locusposparser(&args4, &spec, true) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
         };
+        let meanpath = PathBuf::from("example_files/results").join(".mean");
+        assert!(meanpath.exists(), "No .mean in example_files");
+        let mean = getorsetparams(&meanpath, &args4).unwrap();
+        result.iter_mut().for_each(|p| {
+            let pos = posread(&args4, &p).unwrap();
+            p.setstatus(mean.mean, &args4, &pos);
+        });
         assert!(
-            result.iter().all(|f| f.status.status.isvalid()),
+            result.iter().all(|f| f.status.getstatus().isvalid()),
             "One locus is not valid"
         );
         generatelightbam(
             &args4,
             args4.outlightbam.as_ref().unwrap(),
-            Some(b.getpath()),
+            Some(&b.getpath().to_path_buf()),
             &result,
         )
         .unwrap();
@@ -236,6 +204,51 @@ mod tests {
         }
         if !activ {
             panic!("No records found");
+        }
+    }
+    #[test]
+    fn compressanddecompress() {
+        let testo = TempDir::new().unwrap();
+        let fake_args = vec![
+            "IMGT_StatAssembly",
+            "-f",
+            "example_files/CHM13v2.0.bam",
+            "-a",
+            "example_files/assembly.fasta",
+            "-l",
+            "example_files/CHM13v2.0loc.csv",
+            "-s",
+            "human",
+            "-g",
+            "example_files/CHM13v2.0geneloc.csv",
+            "-o",
+            testo.path().to_str().unwrap(),
+            "analyze",
+        ];
+        let args4 = Args::try_parse_from(fake_args)
+            .map_err(|f| f.to_string())
+            .unwrap();
+        let spec = Species::new(&args4.species).unwrap();
+        let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
+            Err(e) => panic!("Error is {e}"),
+            Ok(a) => a,
+        };
+        let test = Filecrea::createtemp(None::<PathBuf>, None).unwrap();
+        let compress = generatesequence(&args4, test.getpath(), true, &result).unwrap();
+        let decompress = decompressseq(&compress).unwrap();
+        let mut bufone = BufReader::new(File::open(&args4.assembly.unwrap()).unwrap());
+        let mut buftwo = BufReader::new(decompress.getfile().unwrap());
+        loop {
+            let mut buf1 = [0; 2048];
+            let mut buf2 = [0; 2048];
+            match (bufone.read_exact(&mut buf1), buftwo.read_exact(&mut buf2)) {
+                (Err(a), Err(b)) if b.kind() == UnexpectedEof && a.kind() == UnexpectedEof => break,
+                (Ok(_), Ok(_)) if buf1.eq(&buf2) => (),
+                (Ok(_), Ok(_)) => {
+                    panic!("Buffer does not have same value.");
+                }
+                _ => panic!("Fails with buffer"),
+            }
         }
     }
     #[ignore]

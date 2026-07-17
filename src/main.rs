@@ -9,6 +9,8 @@ Made by: Guilhem Zeitoun
 use crate::identification::{downloadref, locusallposition};
 #[cfg(feature = "pdf")]
 use crate::pdf::generatepdf;
+#[cfg(feature = "bam")]
+use crate::pilebam::pileup;
 use crate::r#struct::AcceptedStatus::Rejected;
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
@@ -19,7 +21,7 @@ use plotters::coord::ranged1d::SegmentValue;
 use plotters::style::full_palette::{BROWN_500, GREY_400};
 use regex::Regex;
 use std::collections::HashMap;
-use std::io::ErrorKind::InvalidInput;
+use std::io::ErrorKind::{InvalidData, InvalidInput};
 use std::num::NonZero;
 use std::ops::{Add, Div, Mul, RangeInclusive};
 use std::path::Path;
@@ -33,7 +35,8 @@ use crate::r#struct::*;
 use crate::submissions::{
     GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH,
     SUSPICIOUSPOSITIONALERT, askforsubmission, checkifblastpresent, generatelightbam,
-    generatesequence, genesblast, getprogressbarclassic, getprogressbarspin, positionfiltering,
+    generatesequence, genesblast, getindexforbam, getprogressbarclassic, getprogressbarspin,
+    matchmotif, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use extended_htslib::bam::record::{Cigar, CsValue};
@@ -57,6 +60,8 @@ use std::{
 mod identification;
 #[cfg(feature = "pdf")]
 mod pdf;
+#[cfg(feature = "bam")]
+mod pilebam;
 mod r#struct;
 mod submissions;
 #[cfg(test)]
@@ -84,7 +89,7 @@ pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
-        ("sans-serif", args.fontlegendsize, &BLACK)
+        ("sans-serif", args.fontlegendsize.get(), &BLACK)
     };
     static ref NAME: String = env!("CARGO_PKG_NAME").replacen('_', "/", 1);
     #[allow(clippy::unwrap_used)]
@@ -709,7 +714,10 @@ fn processcounting(
             //Get quality of reads depending on genomic position
             if let Some(d) = record.aligned_pairs().find(|p| p[1] == *i) {
                 let index = d[0] as usize;
-                targeting.qual += record.qual().get(index).map_or(0, |f| (*f).into());
+                targeting.qual = Some(
+                    targeting.qual.unwrap_or_default()
+                        + record.qual().get(index).map_or(0, |f| (*f).into()),
+                );
             }
         }
         //If not a match, add to mismatches or misalign (if none is found)
@@ -791,7 +799,7 @@ fn getmeancoveragelengthandphred(args: &Args) -> io::Result<Params> {
     let mean = values / total_mapped;
     let readavg = readvalues / count;
     let phred = phred / count;
-    println!("Calculated in {} s", time.elapsed().as_secs());
+    println!("Calculated in {:.1} s", time.elapsed().as_secs());
     Ok(Params::new(readavg, mean, phred))
 }
 fn getorsetparams(meanpath: &Path, args: &Args) -> io::Result<Params> {
@@ -932,6 +940,136 @@ fn setgraphbitmap<'a>(
     Ok(list)
 }
 */
+fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, HashMapinfo>> {
+    let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
+    let mut reader = match getreaderoffile(&args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(io::Error::new(
+                InvalidData,
+                format!("Cannot read bam file. Error is {e}. Exiting"),
+            ));
+        }
+    };
+    //0-based except end because end is exclusive
+    if loci.fetch(&mut reader).is_err() {
+        eprintln!(
+            "The region {}:{}-{} cannot be found, skipped.",
+            loci.contig,
+            loci.start.getobasedpos(),
+            loci.end.getobasedpos()
+        );
+        return Ok(pos);
+        //return ExitCode::FAILURE;
+    }
+    let mut nocount = true;
+    //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
+    //let file = File::create(&filename).unwrap();
+    //let mut writer = BufWriter::new(file);
+    let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
+    //Populate all B-Tree position, 0-based, invert if locus complement
+    let iterator: Vec<(usize, i64)> = if loci.complement.isrev() {
+        locusrange.rev().enumerate().collect()
+    } else {
+        locusrange.enumerate().collect()
+    };
+    let iterator: Vec<(i64, i64)> = iterator
+        .into_iter()
+        .filter_map(|(a, b)| match i64::try_from(a) {
+            Ok(d) => Some((d, b)),
+            Err(_) => {
+                eprintln!("Position {a} is too big and is not currently supported");
+                None
+            }
+        })
+        .collect();
+    iterator.into_iter().for_each(|(i, p)| {
+        let default = HashMapinfo {
+            locuspos: Position::newfromzposition(i),
+            position: Position::newfromzposition(p),
+            qual: None,
+            ..Default::default()
+        };
+        pos.insert(Position::newfromzposition(p), default);
+    });
+    let mut message = false;
+    println!("Region {} fetched, analyzing all reads.", loci.getlocus());
+    let mut count = 0;
+    //let time = Instant::now();
+    let sep = if args.fullquality {
+        1
+    } else {
+        max(
+            (loci.end.getobasedpos() - loci.start.getobasedpos() + 1) / 250,
+            100,
+        ) //250 points for quality point or 100nt break
+    };
+    let progress = getprogressbarspin();
+    for p in reader
+        .rc_records()
+        .filter_map(Result::ok)
+        .filter(|p| !(args.forward && p.is_reverse()))
+    {
+        count += 1;
+        //Print every x reads done
+        if count % READGAPMESSAGE == 0
+            && let Ok(a) = &progress
+        {
+            a.set_position(count);
+            /* let _ = writeln!(
+                lock,
+                "Processed {} reads in {:.3} s",
+                count.to_formatted_string(&Locale::en),
+                Instant::now().saturating_duration_since(time).as_secs_f32()
+            ); */
+        }
+        nocount = false;
+        match processcounting(&args, &mut pos, message, loci, &p, sep) {
+            Err(e) => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+            }
+            Ok(b) => {
+                if !message && b {
+                    message = b;
+                }
+            }
+        }
+    }
+    if let Ok(a) = progress {
+        a.finish_and_clear();
+    }
+    if nocount {
+        eprintln!(
+            "The region {}:{}-{} has no data, skipped.",
+            loci.contig,
+            loci.start.getobasedpos(),
+            loci.end.getobasedpos()
+        );
+        return Ok(pos);
+        //return ExitCode::FAILURE;
+    }
+    //Quality and mismatch is the sum of reads so dividing to get real results
+    pos.iter_mut().for_each(|(_, p)| {
+        if let Some(q) = p.qual
+            && q > 0
+        {
+            p.qual = Some(
+                q / max(
+                    std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
+                    1,
+                ),
+            )
+        }
+        if p.softclips.is_normal() {
+            p.softclips = (p.softclips * 100f32 / max(p.gettotalmap(), 1) as f32).round() / 100f32
+        }
+        p.globalmismatch /= max(
+            std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
+            1,
+        );
+    });
+    Ok(pos)
+}
 fn main() -> ExitCode {
     /*
     let mainpa = env::current_dir().unwrap();
@@ -1282,135 +1420,14 @@ fn main() -> ExitCode {
         //let mut lock = stdout().lock();
         //For each individual haplotype inside locus
         for loci in locus.iter_mut() {
-            let mut reader = match getreaderoffile(&args) {
-                Ok(r) => r,
+            let pos = match posread(&args, loci) {
+                Ok(b) if b.is_empty() => continue,
+                Ok(a) => a,
                 Err(e) => {
-                    eprintln!("Cannot read bam file. Error is {e}. Exiting");
+                    eprintln!("Error setting counts: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            //0-based except end because end is exclusive
-            if reader
-                .fetch((
-                    &loci.contig,
-                    loci.start.getzbasedpos(),
-                    loci.end.getobasedpos(),
-                ))
-                .is_err()
-            {
-                eprintln!(
-                    "The region {}:{}-{} cannot be found, skipped.",
-                    loci.contig,
-                    loci.start.getobasedpos(),
-                    loci.end.getobasedpos()
-                );
-                continue;
-                //return ExitCode::FAILURE;
-            };
-            let mut nocount = true;
-            //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
-            //let file = File::create(&filename).unwrap();
-            //let mut writer = BufWriter::new(file);
-            let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
-            let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
-            //Populate all B-Tree position, 0-based, invert if locus complement
-            let iterator: Vec<(usize, i64)> = if loci.complement.isrev() {
-                locusrange.rev().enumerate().collect()
-            } else {
-                locusrange.enumerate().collect()
-            };
-            let iterator: Vec<(i64, i64)> = iterator
-                .into_iter()
-                .filter_map(|(a, b)| match i64::try_from(a) {
-                    Ok(d) => Some((d, b)),
-                    Err(_) => {
-                        eprintln!("Position {a} is too big and is not currently supported");
-                        None
-                    }
-                })
-                .collect();
-            iterator.into_iter().for_each(|(i, p)| {
-                let default = HashMapinfo {
-                    locuspos: Position::newfromzposition(i),
-                    position: Position::newfromzposition(p),
-                    ..Default::default()
-                };
-                pos.insert(Position::newfromzposition(p), default);
-            });
-            let mut message = false;
-            println!("Region {} fetched, analyzing all reads.", loci.getlocus());
-            let mut count = 0;
-            //let time = Instant::now();
-            let sep = if args.fullquality {
-                1
-            } else {
-                max(
-                    (loci.end.getobasedpos() - loci.start.getobasedpos() + 1) / 250,
-                    100,
-                ) //250 points for quality point or 100nt break
-            };
-            let progress = getprogressbarspin();
-            for p in reader
-                .rc_records()
-                .filter_map(Result::ok)
-                .filter(|p| !(args.forward && p.is_reverse()))
-            {
-                count += 1;
-                //Print every x reads done
-                if count % READGAPMESSAGE == 0
-                    && let Ok(a) = &progress
-                {
-                    a.set_position(count);
-                    /* let _ = writeln!(
-                        lock,
-                        "Processed {} reads in {:.3} s",
-                        count.to_formatted_string(&Locale::en),
-                        Instant::now().saturating_duration_since(time).as_secs_f32()
-                    ); */
-                }
-                nocount = false;
-                match processcounting(&args, &mut pos, message, loci, &p, sep) {
-                    Err(e) => {
-                        eprintln!("Error is {e}");
-                        return ExitCode::FAILURE;
-                    }
-                    Ok(b) => {
-                        if !message && b {
-                            message = b;
-                        }
-                    }
-                }
-            }
-            if let Ok(a) = progress {
-                a.finish_and_clear();
-            }
-            if nocount {
-                eprintln!(
-                    "The region {}:{}-{} has no data, skipped.",
-                    loci.contig,
-                    loci.start.getobasedpos(),
-                    loci.end.getobasedpos()
-                );
-                continue;
-                //return ExitCode::FAILURE;
-            }
-            //Quality and mismatch is the sum of reads so dividing to get real results
-            pos.iter_mut().for_each(|(_, p)| {
-                if p.qual > 0 {
-                    p.qual /= max(
-                        std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
-                        1,
-                    )
-                }
-                if p.softclips.is_normal() {
-                    p.softclips =
-                        (p.softclips * 100f32 / max(p.gettotalmap(), 1) as f32).round() / 100f32
-                }
-                p.globalmismatch /= max(
-                    std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
-                    1,
-                );
-            });
             loci.setstatus(mean, &args, &pos);
             //let _ = progress.map(|d| d.finish());
             println!("Making graphs");
@@ -1641,12 +1658,16 @@ fn main() -> ExitCode {
                     eprintln!("No assembly to check gene list.");
                 }
             }
+            #[cfg(feature = "bam")]
+            if let Err(e) = pileup(loci, &args) {
+                eprintln!("Cannot make pileup. Error is {e}");
+            }
         }
         println!("Locus {} is done!", floci.getlocus());
     }
     let mergedloci: Vec<LocusInfos> = grouped.iter().flatten().cloned().collect();
     if let Some(light) = &args.outlightbam
-        && let Err(e) = generatelightbam(&args, light, None, &mergedloci)
+        && let Err(e) = generatelightbam(&args, light, getindexforbam(&light).as_ref(), &mergedloci)
     {
         eprintln!("{e}");
         return ExitCode::FAILURE;
@@ -1662,13 +1683,13 @@ fn main() -> ExitCode {
     if !locushashresult.is_empty()
         && let Err(e) = printvalidatedalleles(
             &args,
-            downloadref(false, &releaseversion).map(|(_, release)| release),
+            downloadref(false, args.cacheerase, &releaseversion).map(|(_, release)| release),
             &locushashresult,
         )
     {
         eprintln!("Error setting alleles result: {e}");
     }
-    if let Err(e) = generatesequence(&args, &args.outdir, &mergedloci) {
+    if let Err(e) = generatesequence(&args, &args.outdir, false, &mergedloci) {
         eprintln!("{e}");
     }
     #[cfg(feature = "pdf")]
@@ -2072,7 +2093,7 @@ fn generategeneinfos(
     //Coverage calculus
     let coverage = hash
         .iter()
-        .filter(|(_, p)| p.gettotal() >= args.coverage.try_into().unwrap_or(usize::MAX))
+        .filter(|(_, p)| p.gettotal() >= args.coverage.get().try_into().unwrap_or(usize::MAX))
         .count();
     //Reverse if complement
     let text = {
@@ -2501,7 +2522,7 @@ where
     let mut secondary = chart.set_secondary_coord(
         usize::try_from(loci.start.getobasedpos()).unwrap_or(0)
             ..usize::try_from(loci.end.getobasedpos()).unwrap_or(0),
-        0..100usize,
+        0..max,
     );
     secondary
         .configure_mesh()
@@ -2548,19 +2569,20 @@ where
     if !args.nolegend {
         secondary
             .configure_series_labels()
-            .position(plotters::chart::SeriesLabelPosition::UpperRight)
+            .position(plotters::chart::SeriesLabelPosition::LowerLeft)
             .background_style(WHITE.mix(0.6))
             .label_font(text_style.clone())
             .border_style(BLACK.mix(0.8))
             .draw()
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     }
+    let max = 100;
     let mut chart = ChartBuilder::on(&bottom)
         .set_label_area_size(LabelAreaPosition::Left, 40)
         .right_y_label_area_size(60)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption("Average PHRED score for matching reads", ("sans-serif", 18))
-        .build_cartesian_2d(1..hash.len(), 0..100)
+        .build_cartesian_2d(1..hash.len(), 0..max)
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     chart
         .draw_series(LineSeries::new(
@@ -2576,6 +2598,36 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("PHRED score")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7)));
+    chart
+        .draw_series(
+            Histogram::vertical(&secondary)
+                .style(full_palette::ORANGE_300.mix(0.3).filled())
+                .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
+                    let pos1 = pos + 1;
+                    if val.iswarning() {
+                        Some((pos1, max))
+                    } else {
+                        None
+                    }
+                }))
+                .margin(0),
+        )
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
+    chart
+        .draw_series(
+            Histogram::vertical(&secondary)
+                .style(full_palette::ORANGE_300.mix(0.3).filled())
+                .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
+                    let pos1 = pos + 1;
+                    if val.issuspicious() {
+                        Some((pos1, max))
+                    } else {
+                        None
+                    }
+                }))
+                .margin(0),
+        )
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     chart
         .configure_mesh()
         //.x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
@@ -2652,7 +2704,7 @@ fn createcsv(
         .comment(Some(b'#'))
         .has_headers(true)
         .delimiter(b'\t')
-        .flexible(true)
+        .flexible(false)
         .from_path(outputfile)?;
     for record in pos {
         csv.serialize(record)?;
@@ -2780,8 +2832,10 @@ where
     secondary
         .draw_secondary_series(LineSeries::new(
             pos.iter().filter_map(|p| {
-                if p.qual > 0 {
-                    Some((p.position.getobasedpos(), p.qual))
+                if let Some(a) = p.qual
+                    && a > 0
+                {
+                    Some((p.position.getobasedpos(), a))
                 } else {
                     None
                 }

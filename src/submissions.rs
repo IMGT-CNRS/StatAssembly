@@ -10,6 +10,7 @@ use bio::io::fasta;
 use extended_htslib::bam::index::Type;
 use extended_htslib::bam::{self, Read};
 use flate2::GzBuilder;
+use flate2::write::GzDecoder;
 use flate2::{Compression, write::GzEncoder};
 use indicatif::ProgressBar;
 use itertools::Itertools;
@@ -21,6 +22,7 @@ use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{BufWriter, IsTerminal, Seek, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread::{self, available_parallelism, sleep};
 use std::{
@@ -639,27 +641,28 @@ pub(crate) fn genesblast(
         eprintln!("No genes found for this locus, skipped.");
         return Ok((Vec::new(), None));
     }
-    let (reference, version) = match downloadref(true, releaseversion).map(|(mut a, b)| {
-        (
-            speciesandorphonfiltering(
-                &mut a,
-                Some(locus),
-                b.clone(),
-                species,
-                false,
-                args.cacheerase,
-            ),
-            b,
-        )
-    }) {
-        Some((a, b)) => (a?, b),
-        None => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "Reference from IMGT cannot be downloaded",
-            ));
-        }
-    };
+    let (reference, version) =
+        match downloadref(true, args.cacheerase, releaseversion).map(|(mut a, b)| {
+            (
+                speciesandorphonfiltering(
+                    &mut a,
+                    Some(locus),
+                    b.clone(),
+                    species,
+                    false,
+                    args.cacheerase,
+                ),
+                b,
+            )
+        }) {
+            Some((a, b)) => (a?, b),
+            None => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "Reference from IMGT cannot be downloaded",
+                ));
+            }
+        };
     let mut blast = match blastcommand(reference, name, Blastlevel::default()) {
         Ok(b) => b,
         Err(e) => {
@@ -719,7 +722,7 @@ where
 //if there is space, BLAST would cut the header and parsing would fail, we therefore regenerate a file for reference without this issue
 fn checknospaceinheaderandvalidseq(
     reference: &mut Filecrea,
-    _subject: &mut Filecrea,
+    _subject: &Filecrea,
 ) -> io::Result<()> {
     let refreader = fasta::Reader::from_file(reference.getpath())
         .map_err(|b| io::Error::new(ErrorKind::NotFound, b.to_string()))?;
@@ -759,8 +762,8 @@ pub(crate) fn blastcommand<T>(
 where
     T: Into<Filecrea>,
 {
-    let (mut reference, mut subject) = (reference.into(), subject.into());
-    checknospaceinheaderandvalidseq(&mut reference, &mut subject)?;
+    let (mut reference, subject) = (reference.into(), subject.into());
+    checknospaceinheaderandvalidseq(&mut reference, &subject)?;
     let (refpath, subpath) = (reference.getpath(), subject.getpath());
     if !refpath.try_exists().unwrap_or(false) {
         return Err(io::Error::new(
@@ -1170,8 +1173,9 @@ pub(crate) fn submit(
         .map_err(|p| format!("Error serializing locus position: {p}"))?; */
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, None, locus)?;
-    let sequencefile = generatesequence(args, dir, locus)?;
-    let mut motifs = matchmotif(sequencefile.getpath(), realspecies, args, None)
+    let sequencefile = generatesequence(args, dir, false, locus)?;
+    let sequencefiledecr = decompressseq(&sequencefile).map_err(|d| d.to_string())?;
+    let mut motifs = matchmotif(sequencefiledecr.getpath(), realspecies, args, None)
         .map_err(|f| format!("Error matching motifs: {f}").to_string())?;
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
@@ -1344,12 +1348,42 @@ pub(crate) fn askforsubmission(
     }
     Ok(())
 }
+/// Take a compressed GzFile and give a GzFile decompressed
+pub(crate) fn decompressseq(infos: &Filecrea) -> io::Result<Filecrea> {
+    let mut reader = BufReader::new(infos.getfile()?);
+    let new = Filecrea::createtemp(None, Some("sequence.fasta"))?;
+    let mut encoder = GzDecoder::new(new.setfile()?);
+    let mut count = false;
+    loop {
+        let mut buf = [0u8; 2048];
+        //Read from fasta
+        let n = match reader.read(&mut buf)? {
+            0 => break,
+            n => {
+                count = true;
+                n
+            }
+        };
+        let newbuf = buf.split_at(n).0;
+        encoder.write_all(&newbuf)?;
+    }
+    if !count {
+        return Err(io::Error::new(ErrorKind::InvalidData, "Invalid data"));
+    }
+    encoder.flush()?;
+    Ok(new)
+}
 pub(crate) fn generatesequence(
     args: &Args,
     dir: &Path,
+    tmp: bool,
     locus: &[LocusInfos],
 ) -> Result<Filecrea, String> {
-    let sequencefile = Filecrea::createfrompath(Path::join(dir, "sequence.fasta.gz"));
+    let sequencefile = if tmp {
+        Filecrea::createtemp(None, Some("sequence.fasta.gz")).map_err(|d| d.to_string())?
+    } else {
+        Filecrea::createfrompath(Path::join(dir, "sequence.fasta.gz"))
+    };
     let mut cursor = io::Cursor::new(Vec::new());
     {
         //To free borrow of cursor
@@ -1386,7 +1420,6 @@ pub(crate) fn generatesequence(
         }
         fastawriter.flush().map_err(|e| e.to_string())?;
     }
-    let count = cursor.position(); //Cursor is at the end
     cursor.rewind().map_err(|e| e.to_string())?;
     let elem = sequencefile
         .setfile()
@@ -1395,23 +1428,40 @@ pub(crate) fn generatesequence(
         .filename("sequence.fasta")
         .comment("Sequence")
         .write(elem, Compression::fast());
-    let mut bytes = Vec::with_capacity(count.try_into().unwrap_or(usize::MAX));
-    cursor
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Error making fasta archive: {e}"))?;
-    encoder
-        .write_all(&bytes)
-        .map_err(|d| format!("Cannot write sequence. Error is {d}"))?;
-    bytes.clear();
-    bytes.shrink_to_fit();
+    loop {
+        let mut buf = [0u8; 2048];
+        let n = match cursor
+            .read(&mut buf)
+            .map_err(|e| format!("Error making fasta archive: {e}"))?
+        {
+            0 => break,
+            n => n,
+        };
+        let newbuf = buf.split_at(n).0;
+        encoder
+            .write_all(&newbuf)
+            .map_err(|d| format!("Cannot write sequence. Error is {d}"))?;
+    }
+    encoder.flush().map_err(|_| format!("Error flushing"))?;
     Ok(sequencefile)
 }
-pub(crate) fn generatelightbam(
+pub(crate) fn getindexforbam(outpath: &Path) -> Option<PathBuf> {
+    let mut f = outpath.to_path_buf();
+    if f.add_extension("csi") {
+        Some(f)
+    } else {
+        None
+    }
+}
+pub(crate) fn generatelightbam<T>(
     args: &Args,
-    light: &Path,
-    lightindex: Option<&Path>,
+    light: T,
+    lightindex: Option<T>,
     locus: &[LocusInfos],
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    T: AsRef<Path>,
+{
     println!("Generating small BAM for submission");
     let bam = if let Ok(r) = getreaderoffile(args) {
         r
@@ -1420,13 +1470,13 @@ pub(crate) fn generatelightbam(
     };
     {
         let mut writer = if let Ok(files) = bam::Writer::from_path(
-            light,
+            light.as_ref(),
             &bam::Header::from_template(bam.header()),
             bam::Format::Bam,
         ) {
             files
         } else {
-            let file = light.display();
+            let file = light.as_ref().display();
             return Err(format!("Cannot create file {file} for light bam."));
         };
         for f in locus.iter() {
@@ -1455,8 +1505,8 @@ pub(crate) fn generatelightbam(
     //Drop writer else there is an issue when making index
     println!("Building index");
     bam::index::build(
-        light,
-        lightindex,
+        light.as_ref(),
+        lightindex.as_ref().map(|a| a.as_ref()),
         Type::Csi(2_u32.pow(14)),
         available_parallelism()
             .map(|a| a.get())

@@ -11,7 +11,7 @@ use crate::{
     },
     submissions::{
         BORNESLINK, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK, blastcommand, checkoverlap,
-        fileincache, getprogressbarclassic, speciesandorphonfiltering,
+        fileincache, getprogressbar, speciesandorphonfiltering,
     },
 };
 use std::{
@@ -200,7 +200,7 @@ pub(crate) fn locusallposition(
     };
     let (bornespath, referencepath, releaseversion) = match (
         infos,
-        downloadref(true, &None).map(|(mut a, b)| {
+        downloadref(true, args.cacheerase, &None).map(|(mut a, b)| {
             (
                 speciesandorphonfiltering(&mut a, None, b.clone(), species, true, args.cacheerase),
                 b,
@@ -389,12 +389,13 @@ pub(crate) fn downloadbornes(args: &Args) -> Option<Filecrea> {
 pub(crate) fn downloadmotifs(args: &Args) -> Option<Filecrea> {
     println!("Downloading motifs sequence from IMGT");
     let tempfile = Path::join(&env::temp_dir(), "motifs.fasta");
+    let file = Filecrea::createfrompath(&tempfile);
     if args.cacheerase || !fileincache(&tempfile) {
         println!("Downloading IMGT motifs, please wait...");
         match sendresultcompressed(&REQUESTCLIENT, MOTIFLINK.as_str()) {
             Ok(e) => {
-                match File::create(&tempfile).map(|mut f| f.write_all(e.as_bytes())) {
-                    Ok(Ok(_)) => (),
+                match file.setfile().and_then(|mut f| f.write_all(e.as_bytes())) {
+                    Ok(_) => (),
                     _ => {
                         eprintln!("Cannot write refseq in sequence.");
                         return None;
@@ -410,7 +411,7 @@ pub(crate) fn downloadmotifs(args: &Args) -> Option<Filecrea> {
     } else {
         println!("IMGT motifs were already downloaded, retrieving...");
     };
-    Some(Filecrea::createfrompath(tempfile))
+    Some(file)
 }
 pub(crate) fn find_global_best_range(
     blastcheck: &[Blastmatch],
@@ -548,23 +549,21 @@ pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Resu
                     (_, Some(Ok(Ok(b)))) => b,
                     _ => 0,
                 };
-                let pb = getprogressbarclassic(total_size).map_err(|e| e.to_string())?;
                 let stream = e.text().map_err(|e| e.to_string())?;
                 let mut downloaded = 0;
                 // Read the stream in chunks
                 let d = Cursor::new(&stream);
-                let mut reader = BufReader::new(d);
+                let reader = BufReader::new(d);
                 let mut buffer = vec![0; 1024]; // 1KB buffer
-
-                while let Ok(n) = reader.read(&mut buffer) {
+                let mut pb = getprogressbar(total_size, reader).map_err(|e| e.to_string())?;
+                while let Ok(n) = pb.read(&mut buffer) {
                     if n == 0 {
                         break;
                     } // End of stream
                     let new = min(downloaded + (n as u64), total_size);
                     downloaded = new;
-                    pb.set_position(new);
                 }
-                pb.finish_with_message("Finished".to_string());
+                pb.progress_bar.finish_with_message("Finished");
                 Ok(stream)
             } else {
                 Err(format!("Error getting URL. Code is {}", e.status()))
@@ -602,20 +601,17 @@ pub(crate) fn sendresultcompressed(
                 let mut downloaded = 0;
                 // Read the stream in chunks
                 let d = Cursor::new(stream);
-                let mut reader = BufReader::new(d);
-                let pb = getprogressbarclassic(total_size).map_err(|e| e.to_string())?;
+                let reader = BufReader::new(d);
+                let mut pb = getprogressbar(total_size, reader).map_err(|e| e.to_string())?;
                 let mut buffer = vec![0; 2048]; // 2KB buffer
-
-                while let Ok(n) = reader.read(&mut buffer) {
+                while let Ok(n) = pb.read(&mut buffer) {
                     if n == 0 {
                         break;
                     } // End of stream
                     buf.extend(&buffer[0..n]);
                     let new = min(downloaded + (n as u64), total_size);
                     downloaded = new;
-                    pb.set_position(downloaded);
                 }
-                pb.finish_with_message("Finished");
                 // Decode the buffer (assuming it's a gzip stream)
                 let mut decoder = flate2::read::GzDecoder::new(buf.as_slice());
                 let mut string = String::new();
@@ -626,6 +622,7 @@ pub(crate) fn sendresultcompressed(
                 if string.trim().is_empty() {
                     return Err("Cannot decrypt motifs, empty data.".to_string());
                 }
+                pb.progress_bar.finish_with_message("Finished");
                 string.shrink_to_fit();
                 Ok(string)
             } else {
@@ -638,6 +635,7 @@ pub(crate) fn sendresultcompressed(
 }
 pub(crate) fn downloadref(
     allowdownload: bool,
+    force: bool,
     releaseversion: &Option<String>,
 ) -> Option<(Filecrea, String)> {
     let releaseversion = if let Some(r) = releaseversion {
@@ -653,13 +651,16 @@ pub(crate) fn downloadref(
         }
     };
     if !allowdownload {
-        return Some((Filecrea::Plain(PathBuf::new()), releaseversion));
+        return Some((
+            Filecrea::createtemp(None::<PathBuf>, None).ok()?,
+            releaseversion,
+        ));
     };
-    let tempfile = Filecrea::Plain(Path::join(
+    let tempfile = Filecrea::createfrompath(Path::join(
         &env::temp_dir(),
         format!("refseq{}.fasta", releaseversion),
     ));
-    if !tempfile.getpath().is_file() {
+    if !tempfile.getpath().is_file() || force {
         println!(
             "Downloading IMGT/GENE-DB release {}, please wait...",
             releaseversion

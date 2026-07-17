@@ -1,4 +1,5 @@
 use bio::io::fasta;
+use extended_htslib::bam::IndexedReader;
 use indicatif::ProgressBar;
 use itertools::Itertools;
 use plotters::backend::{BitMapBackend, SVGBackend};
@@ -26,6 +27,7 @@ use serde::{Deserialize, Serialize, de};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::ErrorKind::{self, InvalidInput};
+use std::num::NonZero;
 use std::ops::{Add, Not, RangeInclusive, Sub};
 use std::path::Path;
 use std::str::FromStr;
@@ -64,9 +66,9 @@ pub(crate) struct Args {
     #[arg(short, long, default_value_t = 3)]
     pub(crate) breaks: u32,
     /// Coverage to calculate on CSV
-    #[arg(short, long, default_value_t = 10, value_parser=greater_than_0)]
-    pub(crate) coverage: u32,
-    /// Minimum number of match reads (included) for warning positions
+    #[arg(short, long, default_value_t = NonZero::new(10).unwrap())]
+    pub(crate) coverage: NonZero<u32>,
+    /// Minimum number of match reads (included) for a valid position (else warning)
     #[arg(long, default_value_t = MATCHREADS)]
     pub(crate) minreads: u32,
     /// Percent warning position for mismatch reads (included)
@@ -105,9 +107,9 @@ pub(crate) struct Args {
     /// Calculate total reads mismatch
     #[arg(long, short = 't')]
     pub(crate) totalread: bool,
-    /// Size of legend axis (default 16)
-    #[arg(long, default_value_t = 16, value_parser=greater_than_0)]
-    pub(crate) fontlegendsize: u32,
+    /// Size of legend axis (default 13)
+    #[arg(long, default_value_t = NonZero::new(13).unwrap())]
+    pub(crate) fontlegendsize: NonZero<u32>,
     /// No legend on graphs
     #[arg(long)]
     pub(crate) nolegend: bool,
@@ -152,7 +154,11 @@ pub(crate) struct Args {
     pub(crate) lowmemory: bool,
 }
 // Allow to manipulate tempfile and plain files and ensure remove of temp file when dropped.
-pub(crate) enum Filecrea {
+pub(crate) struct Filecrea {
+    file: Filechoice,
+    delete: bool,
+}
+enum Filechoice {
     /// Should not rely on the path, that will be deleted on drop
     Temp(NamedTempFile),
     Plain(PathBuf),
@@ -217,22 +223,32 @@ impl<'a> DrawingImage<'a> {
 }
 impl Filecrea {
     pub(crate) fn getpath(&self) -> &Path {
-        match self {
-            Self::Temp(a) => a.path(),
-            Self::Plain(b) => b.as_path(),
+        match &self.file {
+            Filechoice::Temp(a) => a.path(),
+            Filechoice::Plain(b) => b.as_path(),
         }
     }
+    /// Open the file (fails if does not exist)
     pub(crate) fn getfile(&self) -> io::Result<File> {
         let a = self.getpath();
         File::open(a)
     }
+    ///Truncate or write the file
     pub(crate) fn setfile(&self) -> io::Result<File> {
         let a = self.getpath();
         File::create(a)
     }
+    pub(crate) fn flagtodelete(&mut self) {
+        self.delete = true;
+    }
+    #[allow(unused)]
+    /// Does not work for temp files
+    pub(crate) fn keep(&mut self) {
+        self.delete = false;
+    }
     #[allow(unused)]
     pub(crate) fn istemp(&self) -> bool {
-        matches!(self, Self::Temp(_))
+        matches!(self.file, Filechoice::Temp(_))
     }
     // Origin or/and suffix
     pub(crate) fn createtemp<T>(origin: Option<T>, suffix: Option<T>) -> io::Result<Self>
@@ -245,31 +261,47 @@ impl Filecrea {
             (None, Some(s)) => NamedTempFile::with_suffix(s.as_ref()),
             (None, None) => NamedTempFile::new(),
         }?;
-        Ok(Self::Temp(file))
+        Ok(Self {
+            file: Filechoice::Temp(file),
+            delete: true,
+        })
     }
     pub(crate) fn createfrompath<T>(path: T) -> Self
     where
         T: Into<PathBuf>,
     {
-        Self::Plain(path.into())
+        Self {
+            file: Filechoice::Plain(path.into()),
+            delete: false,
+        }
     }
 }
 impl From<PathBuf> for Filecrea {
     fn from(value: PathBuf) -> Self {
-        Self::Plain(value)
+        Self {
+            file: Filechoice::Plain(value),
+            delete: false,
+        }
     }
 }
 impl From<NamedTempFile<File>> for Filecrea {
     fn from(value: NamedTempFile<File>) -> Self {
-        Self::Temp(value)
+        Self {
+            file: Filechoice::Temp(value),
+            delete: true,
+        }
     }
 }
 impl Drop for Filecrea {
     fn drop(&mut self) {
         //Remove file if not already deleted on drop
-        match self {
-            Filecrea::Plain(_) => (),
-            Filecrea::Temp(e) => {
+        match (&self.file, self.delete) {
+            (Filechoice::Plain(_), false) => (),
+            (Filechoice::Temp(e), _) => {
+                let _ = fs::remove_file(e);
+                //let _ = e.close();
+            }
+            (Filechoice::Plain(e), true) => {
                 let _ = fs::remove_file(e);
             }
         }
@@ -354,12 +386,6 @@ pub(crate) fn checktoken(s: &str) -> Result<String, String> {
 pub(crate) fn less_than_100(s: &str) -> Result<u8, String> {
     match s.parse::<u8>() {
         Ok(s) if (0..=100).contains(&s) => Ok(s),
-        _ => Err(String::from("Bad number, must be greater than 0.")),
-    }
-}
-pub(crate) fn greater_than_0(s: &str) -> Result<u32, String> {
-    match s.parse::<u32>() {
-        Ok(s) if s != u32::MIN => Ok(s),
         _ => Err(String::from("Bad number, must be greater than 0.")),
     }
 }
@@ -787,6 +813,11 @@ pub(crate) struct OkStatus {
     pub(crate) status: AcceptedStatus,
     pub(crate) motif: Option<String>,
 }
+impl From<OkStatus> for AcceptedStatus {
+    fn from(value: OkStatus) -> Self {
+        value.status
+    }
+}
 impl OkStatus {
     pub(crate) fn new(status: AcceptedStatus, motif: Option<String>) -> Self {
         let (status, motif) = match (status, motif) {
@@ -950,11 +981,11 @@ pub(crate) trait Alerting {
 }
 impl Alertpos {
     fn new(record: &Posread) -> Self {
-        let percent = if record.total > 0 {
-            record
-                .r#match
+        let matches = record.getmatch().saturating_sub(record.getinsertion());
+        let percent = if record.gettotal() > 0 {
+            matches
                 .saturating_mul(100)
-                .saturating_div(record.total)
+                .saturating_div(record.gettotal())
         } else {
             0
         };
@@ -963,29 +994,27 @@ impl Alertpos {
             record.percentwarning,
             record.minreads,
         ) {
-            (d, ..) if percent <= d.into() => Alertpos::Suspicious,
-            (_, d, e)
-                if record.r#match <= e.try_into().unwrap_or(usize::MAX) || percent <= d.into() =>
-            {
-                Alertpos::Warning
+            (d, ..) if percent <= d.into() => Self::Suspicious,
+            (_, d, e) if matches < e.try_into().unwrap_or(usize::MAX) || percent <= d.into() => {
+                Self::Warning
             }
-            _ => Alertpos::Valid,
+            _ => Self::Valid,
         }
     }
 }
 impl Alerting for Alertpos {
     ///Is a warning position
     fn iswarning(&self) -> bool {
-        matches!(self, Alertpos::Warning)
+        matches!(self, Self::Warning)
     }
     ///Is a suspicious position
     fn issuspicious(&self) -> bool {
-        matches!(self, Alertpos::Suspicious)
+        matches!(self, Self::Suspicious)
     }
     /// Is a non-suspicious nor warning position
     #[allow(dead_code)]
     fn isvalid(&self) -> bool {
-        matches!(self, Alertpos::Valid)
+        matches!(self, Self::Valid)
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -1929,6 +1958,16 @@ impl LocusInfos {
     pub(crate) fn getlocus(&self) -> &Locus {
         &self.locusinfo.locus
     }
+    pub(crate) fn fetch(
+        &self,
+        reader: &mut IndexedReader,
+    ) -> Result<(), extended_htslib::errors::Error> {
+        reader.fetch((
+            &self.contig,
+            self.start.getzbasedpos(),
+            self.end.getobasedpos(),
+        ))
+    }
     pub(crate) fn gethaplotype(&self) -> &Haplotype {
         &self.locusinfo.haplo
     }
@@ -2476,17 +2515,45 @@ pub(crate) struct HashMapinfo {
     pub(crate) map60: i64,
     pub(crate) map1: i64,
     pub(crate) map0: i64,
-    #[serde(serialize_with = "globalmismatch")]
+    #[serde(
+        serialize_with = "globalmismatch",
+        deserialize_with = "globaldemismatch"
+    )]
     pub(crate) globalmismatch: usize,
     pub(crate) overlaps: i64,
     pub(crate) secondary: i64,
     pub(crate) supplementary: i64,
     pub(crate) mismatches: i64,
     pub(crate) misalign: i64,
-    #[serde(skip_serializing_if = "iszero")]
-    pub(crate) qual: usize,
+    #[serde(serialize_with = "qualcheck", deserialize_with = "qualdecheck")]
+    pub(crate) qual: Option<usize>,
     #[serde(rename = "percent-softclips")]
     pub(crate) softclips: f32,
+}
+fn qualcheck<S>(num: &Option<usize>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match num {
+        Some(d) => s.serialize_i64((*d).try_into().unwrap_or_default()),
+        _ => s.serialize_str("NC"),
+    }
+}
+fn qualdecheck<'a, S>(s: S) -> Result<Option<usize>, S::Error>
+where
+    S: serde::Deserializer<'a>,
+{
+    let f: &str = serde::Deserialize::deserialize(s)?;
+    match f.parse::<usize>() {
+        Ok(a) => Ok(Some(a)),
+        Err(_) if f.trim().eq_ignore_ascii_case("NC") || f.trim().eq_ignore_ascii_case("N/A") => {
+            Ok(None)
+        }
+        Err(_) => Err(serde::de::Error::invalid_value(
+            de::Unexpected::Option,
+            &"Option<usize>",
+        )),
+    }
 }
 impl PartialEq for HashMapinfo {
     fn eq(&self, other: &Self) -> bool {
@@ -2539,7 +2606,7 @@ impl HashMapinfo {
         overlaps: i64,
         mismatches: i64,
         misalign: i64,
-        qual: usize,
+        qual: Option<usize>,
         softclips: f32,
     ) -> Self {
         HashMapinfo {
@@ -2559,13 +2626,26 @@ impl HashMapinfo {
         }
     }
 }
-pub(crate) fn iszero(num: &usize) -> bool {
-    *num == 0
-}
 pub(crate) fn globalmismatch<S>(num: &usize, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     let val = *num as f32 / crate::GLOBALMISMATCHFLOATING as f32;
     s.collect_str(&format!("{val}"))
+}
+fn globaldemismatch<'a, S>(s: S) -> Result<usize, S::Error>
+where
+    S: serde::Deserializer<'a>,
+{
+    let f: &str = serde::Deserialize::deserialize(s)?;
+    match f.parse::<f32>() {
+        Ok(a) => {
+            let val = a * (crate::GLOBALMISMATCHFLOATING as f32);
+            Ok(val.round() as usize)
+        }
+        Err(_) => Err(serde::de::Error::invalid_value(
+            de::Unexpected::Option,
+            &"Option<usize>",
+        )),
+    }
 }
