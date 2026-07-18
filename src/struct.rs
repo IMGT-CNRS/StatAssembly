@@ -2234,15 +2234,19 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) start: Position,
     pub(crate) end: Position,
     pub(crate) length: u64,
+    #[serde(rename = "ratio average reads length / gene length")]
     pub(crate) readscoverage: f32,
     pub(crate) reads: usize,
     pub(crate) matchpos: String,
+    #[serde(rename = "reads full length")]
     pub(crate) readsfull: usize,
     pub(crate) reads100: usize,
+    #[serde(rename = "reads perfect match")]
     pub(crate) reads100m: usize,
     pub(crate) realreads100m: f32,
     #[serde(skip_serializing)]
     pub(crate) phredscore: Phred,
+    #[serde(rename = "coverageatleastX")]
     pub(crate) coveragex: usize,
     pub(crate) status: OkStatus,
 }

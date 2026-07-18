@@ -21,6 +21,7 @@ use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::io::ErrorKind::InvalidData;
 use std::io::{BufWriter, IsTerminal, Seek, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -65,7 +66,7 @@ lazy_static! {
     pub static ref INVALIDCOVERAGE: String = obfstr::obfstring!("Coverage is out of the window");
     pub static ref NOTENOUGHMATCHREADS: String = obfstr::obfstring!("Not enough matching reads");
     pub static ref SOFTCLIPTOOMUCH: String = obfstr::obfstring!("Too much softclips");
-    pub static ref SUSPICIOUSPOSITIONALERT: String = obfstr::obfstring!("A warning or suspicious position");
+    pub static ref SUSPICIOUSPOSITIONALERT: String = obfstr::obfstring!("The position");
     /* pub static ref MOTIFLINK: String =
         obfstr::obfstring!("http://localhost:8910/submissions/newmotif_fusionne.fasta.gz");
     pub static ref BORNESLINK: String =
@@ -1371,7 +1372,44 @@ pub(crate) fn decompressseq(infos: &Filecrea) -> io::Result<Filecrea> {
         return Err(io::Error::new(ErrorKind::InvalidData, "Invalid data"));
     }
     encoder.flush()?;
+    let _ = encoder.finish()?;
     Ok(new)
+}
+pub(crate) fn generatesequenceraw(
+    args: &Args,
+    locus: &[LocusInfos],
+) -> io::Result<io::Cursor<Vec<u8>>> {
+    let mut cursor = io::Cursor::new(Vec::new());
+    {
+        //To free borrow of cursor
+        let bufwriter = BufWriter::new(&mut cursor);
+        let mut fastawriter = fasta::Writer::from_bufwriter(bufwriter);
+        fastawriter.set_linewrap(Some(100));
+        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
+            None => return Err(io::Error::new(InvalidData, "No assembly provided.")),
+            Some(Err(e)) => return Err(e),
+            Some(Ok(b)) => b,
+        };
+        for list in locus.iter() {
+            let seq = list
+                .extractsequence(&mut assembly)
+                .unwrap_or("Sequence is unavailable".to_string());
+            fastawriter.write(
+                &format!("{}:{}", list.getlocus(), list.contig),
+                Some(&format!(
+                    "{}:{}-{}/{}",
+                    list.getlocushaplo(),
+                    list.start.getobasedpos(),
+                    list.end.getobasedpos(),
+                    list.complement
+                )),
+                seq.as_bytes(),
+            )?;
+        }
+        fastawriter.flush()?;
+    }
+    cursor.rewind()?;
+    Ok(cursor)
 }
 pub(crate) fn generatesequence(
     args: &Args,
@@ -1384,43 +1422,7 @@ pub(crate) fn generatesequence(
     } else {
         Filecrea::createfrompath(Path::join(dir, "sequence.fasta.gz"))
     };
-    let mut cursor = io::Cursor::new(Vec::new());
-    {
-        //To free borrow of cursor
-        let bufwriter = BufWriter::new(&mut cursor);
-        let mut fastawriter = fasta::Writer::from_bufwriter(bufwriter);
-        fastawriter.set_linewrap(Some(100));
-        let mut assembly = match args.assembly.as_ref().map(|_| getassemblyreader(args)) {
-            None => return Err("No assembly provided.".to_string()),
-            Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
-            Some(Ok(b)) => b,
-        };
-        for list in locus.iter() {
-            let seq = list
-                .extractsequence(&mut assembly)
-                .unwrap_or("Sequence is unavailable".to_string());
-            fastawriter
-                .write(
-                    &format!("{}:{}", list.getlocus(), list.contig),
-                    Some(&format!(
-                        "{}:{}-{}/{}",
-                        list.getlocushaplo(),
-                        list.start.getobasedpos(),
-                        list.end.getobasedpos(),
-                        list.complement
-                    )),
-                    seq.as_bytes(),
-                )
-                .map_err(|f| {
-                    format!(
-                        "Unable to write fasta sequence {}. Error is {f}",
-                        list.getlocus()
-                    )
-                })?;
-        }
-        fastawriter.flush().map_err(|e| e.to_string())?;
-    }
-    cursor.rewind().map_err(|e| e.to_string())?;
+    let mut cursor = generatesequenceraw(args, locus).map_err(|d| d.to_string())?;
     let elem = sequencefile
         .setfile()
         .map_err(|d| format!("Cannot create archive: {d}"))?;
@@ -1443,6 +1445,7 @@ pub(crate) fn generatesequence(
             .map_err(|d| format!("Cannot write sequence. Error is {d}"))?;
     }
     encoder.flush().map_err(|_| format!("Error flushing"))?;
+    encoder.finish().map_err(|_| format!("Error gzip"))?;
     Ok(sequencefile)
 }
 pub(crate) fn getindexforbam(outpath: &Path) -> Option<PathBuf> {

@@ -2104,12 +2104,13 @@ fn generategeneinfos(
         //Merging data
         iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
             acc.push_str(&format!(
-                "{}({}={}X{}D{}I)-",
+                "{}({}={}X{}D{}I{}S)-",
                 f.gettotal(),
                 f.getmatch(),
                 f.getmismatchcount(),
                 f.getindelcount(),
                 f.getinsertion(),
+                f.softclips
             ));
             acc
         })
@@ -3039,7 +3040,7 @@ pub(crate) fn geneisokay(reads100m: usize, hash: &BTreeMap<Position, Posread>) -
             (f, a) if !a.isvalid() => OkStatus::new(
                 AcceptedStatus::Rejected,
                 Some(format!(
-                    "{} at position {} ({})",
+                    "{} {} is a {}",
                     *SUSPICIOUSPOSITIONALERT,
                     f.getobasedpos(),
                     if a.iswarning() {

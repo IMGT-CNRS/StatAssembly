@@ -1,7 +1,8 @@
+#!/usr/bin/env xdg-open
 [Desktop Entry]
 Name=IMGT_StatAssembly
 StartupWMClass=IMGT_StatAssembly
-Exec="IMGT_StatAssembly.AppImage"
+Exec=../binaries/IMGT_StatAssembly_linux_x64_86
 Icon=../images/logo_software.png
 Type=Application
 Terminal=true

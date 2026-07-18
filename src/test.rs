@@ -5,6 +5,7 @@ mod tests {
         fs::File,
         io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
         path::PathBuf,
+        process::Command,
         thread::sleep,
         time::Duration,
     };
@@ -16,7 +17,7 @@ mod tests {
         r#struct::{Args, Filecrea, HashMapinfo, Locus, Species, SpeciesError},
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
-            generatelightbam, generatesequence, getprogressbarclassic,
+            generatelightbam, generatesequence, generatesequenceraw, getprogressbarclassic,
         },
     };
     use clap::Parser;
@@ -229,18 +230,19 @@ mod tests {
             .map_err(|f| f.to_string())
             .unwrap();
         let spec = Species::new(&args4.species).unwrap();
-        let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
+        let (locus, _blast, _release) = match locusposparser(&args4, &spec, true) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
         };
-        let test = Filecrea::createtemp(None::<PathBuf>, None).unwrap();
-        let compress = generatesequence(&args4, test.getpath(), true, &result).unwrap();
-        let decompress = decompressseq(&compress).unwrap();
-        let mut bufone = BufReader::new(File::open(&args4.assembly.unwrap()).unwrap());
+        // Generate sequence changes the reader so we need to compress and decompress.
+        let compress = generatesequenceraw(&args4, &locus).unwrap();
+        let compressreal = generatesequence(&args4, testo.path(), true, &locus).unwrap();
+        let decompress = decompressseq(&compressreal).unwrap();
+        let mut bufone = BufReader::new(compress);
         let mut buftwo = BufReader::new(decompress.getfile().unwrap());
         loop {
-            let mut buf1 = [0; 2048];
-            let mut buf2 = [0; 2048];
+            let mut buf1 = [0; 4096];
+            let mut buf2 = [0; 4096];
             match (bufone.read_exact(&mut buf1), buftwo.read_exact(&mut buf2)) {
                 (Err(a), Err(b)) if b.kind() == UnexpectedEof && a.kind() == UnexpectedEof => break,
                 (Ok(_), Ok(_)) if buf1.eq(&buf2) => (),

@@ -10,7 +10,7 @@ IMGT/StatAssembly uses BAM file to assess the quality of the IG/TR loci in assem
 
 It is a script written in Rust, compiled as a optimized binary or an AppImage.
 
-The script was made by [IMGT team](https://www.imgt.org) and is part of [IMGT rules](#results-analysis) to assess the quality of loci, genes and alleles.
+The script was made by [IMGT&reg; team](https://www.imgt.org#universe) and is part of [IMGT&reg; rules](#results-analysis) to assess the quality of loci, genes and alleles.
 
 <p float="center">
   <img src="images/logo_software.png" margin="" width="100" />
@@ -136,7 +136,7 @@ Haplotype must be one of the following:
 The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared and shown together in graphs.
 
 Contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
-*You can use [IMGT description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [LIGM-Motif](https://imgt.org/ligmotif/) to identify locus position*.
+*You can use [IMGT&reg; description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [IMGT/LIGM-Motif](https://imgt.org/ligmotif/) to identify locus position*.
 Example in test files.
 
 * A CSV file (-g) containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
@@ -211,14 +211,14 @@ The expected output from execution with test files is present in `example_files/
 
 ### Description of generated file in example folder
 
-For each assembly (in the graph named readresult.png) and for each allele (if applicable), the color of the graph would give information in the assembly and/or allele validates [IMGT criterias](#results-analysis).
+For each assembly (in the graph named readresult.png) and for each allele (if applicable), the color of the graph would give information in the assembly and/or allele validates [IMGT&reg; criterias](#results-analysis).
 
 > [!TIP]
 > The images provided can also be created as svg file with ```--svg``` argument.
 <details>
 <summary>Description</summary>
 
-- *break.txt* lists where breaks are present. Breaks represents positions where less than x reads are covering this position (default: 3, parameter: breaks).
+- *break.txt* lists where breaks are present. Breaks represents positions where less than x reads are covering this position (default: 3, parameter: `breaks`).
 - *mismatchresult.txt* shows two graphs.
   - The first graph shows the PHRED quality score (`rgb(0, 0, 0)` (black) curve) with the legend on the right axis. The rate of mismatches (`rgb(126, 87, 194)`) and misalign (`rgb(239, 83, 80)`) is also shown for each position with the legend on the left axis. A misalign is a read that has an indel at this position and a mismatch a read with a substitution.
   - The bottom graph shows the number of mismatch rate for all reads which alignment cover the position indicated (`rgb(255, 171, 145)`).
@@ -226,29 +226,40 @@ For each assembly (in the graph named readresult.png) and for each allele (if ap
 - *positionresult.csv* lists all the information of both graphs. However mismatches and misalign represents a number and not a rate as in the graph. The rate could be recalculated by dividing with the sum of reads in the column map60,map1 and map0.
 - If gene list is provided:
   - *allele_confidence.csv*: List all suspicious (shown as ! in Excel and `rgb(239, 83, 80)` on charts) and warning positions (shown as ~ in Excel and `rgb(255, 183, 77)` on charts). By default:
-    - Warning positions (`rgb(255, 183, 77)`) are positions where less than x reads (parameter: minreads default 10) are present and/or the rate of reads matching the base compared to the number of reads present at this position is above the suspicious position rate and below the treeshold (parameter: percentwarning default 0.8).
-    - Suspicious positions (`rgb(239, 83, 80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: percentalerting default 0.6).
-  - A folder containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0, 0, 0)` (black) curve.
-  - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (how many times larger the reads are compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with deletions (D) or insertions (I). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: coverage).
-  - *newloc.csv* contains locus information with status (Accepted/Rejected).
-  - *sequence.fasta.gz* contains extracted sequence of all identified loci (compressed).
-  - *validatedalleles.fasta* contains the list of all alleles (with their closest IMGT match) that are validated, as well as their locus.
-  - **genelist_new.csv* gives a gene list on all the loci (if not provided) based on closest IMGT match. It does not provide gene status which is in ```gene_analysis.csv```.
+    - Warning positions (`rgb(255, 183, 77)`) are positions where less than x reads (parameter: `minreads` default 10) are present and/or the rate of reads matching the base compared to the number of reads present at this position is above the suspicious position rate and below the treeshold (parameter: `percentwarning` default 0.8).
+    - Suspicious positions (`rgb(239, 83, 80)`) are positions where the rate of reads matching the base compared to the number of reads present at this position is less than the treeshold (parameter: `percentalerting` default 0.6).
+  - A folder `gene_primary` and/or `gene_alternate` containing a graph for each gene, with number of total reads for each position (total reads), reads without indels (sequence match) and sequence match. The number of reads that covers the entire region with 100% match are displayed with the `rgb(0, 0, 0)` (black) curve. The average ratio of soft clips is also shown (black histogram). The number of real reads based on the phred score is also shown with the `rgb(121, 85, 72)` (brown) curve. Phred score is displayed at the lower panel.
+  - *geneanalysis.csv*: List all genes, their chromosome, strand, start and end. It displays the average read coverage (the ratio of the average length of the reads covering this zone compared to the length of the given region), the number of reads on this region. Then for each position, the number of reads in total with the number of reads with identical sequence (=), ones with substitutions (X) and ones with deletions (D) or insertions (I) and the ratio of reads with soft clips at that position (S). Readsfull column counts the number of reads spanning the entire region, whereas reads100 and reads100m shows respectively the number of reads matching without indels or with perfect match the full region. Realreads100m is a score of perfect match reads based on their phred score. Coveragex shows how much position are covered by at least x reads (default: 10, parameter: `coverage`).
+- *newloc.csv*: contains locus information with status (Accepted/Rejected).
+- *sequence.fasta.gz*: contains extracted sequence of all identified loci (compressed).
+- *validatedalleles.fasta*: contains the list of all alleles (with their closest IMGT/GENE-DB match) that are validated, as well as their locus.
+- **genelist_new.csv*: gives a gene list for all loci (if not provided) based on closest IMGT/GENE-DB match. It does not provide gene status which is in ```gene_analysis.csv```.
+
+For each read matching perfectly the gene, a score is assigned. The sum is the realreads100m score. The score is rounded in the graph:
+- Phred score unknown or less than 10 gives 0
+- Phred score between 11 and 20 gives 0.1,
+- Between 21 and 30 gives 0.3,
+- Between 31 and 40 gives 0.7,
+- Between 41 and 50 gives 0.9,
+- Above 51, the score is maximal: 1.
 </details>
 
 ### Results analysis
 
-For a better overview of IMGT rules based on this analysis, check [IMGT assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
+For a better overview of IMGT&reg; rules based on this analysis, check [IMGT&reg; assembly quality rules](https://imgt.org/IMGTScientificChart/Assemblies/IMGTassemblyquality.php).
 
-For readresult.png and each allele graph, the color of the graph would indicate if the locus and/or gene meets IMGT criterias ![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Green for validation and ![#f03c15](https://placehold.co/15x15/f03c15/f03c15.png) red for rejection).
-* For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
-* For genes: At least 10 matching reads and no suspicious or warning positions.
+> [!NOTE]
+> For `readresult.png` and each allele graph, the color of the graph would indicate if the locus and/or gene meets IMGT&reg; criterias.
+> - [x] ![#c5f015](https://placehold.co/15x15/c5f015/c5f015.png) Green for validation
+> - [ ] ![#f03c15](https://placehold.co/15x15/f03c15/f03c15.png) Red for rejection
+>
+> Criterias are as followed:
+> * For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
+> * For genes: At least 10 matching reads and no suspicious or warning positions and soft clips less than 40%.
 
 *The threshold can be changed for the graphs but not for the validation (and therefore the color title and csv files).*
 
 ## How to cite
-
-More informations on this software can be found in the article.
 
 If you use IMGT/StatAssembly in your work, please cite the article related to the software and the version you used:
 
@@ -263,13 +274,14 @@ Version will follow SemVer [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Thanks
 
-Thanks to [Christophe Klopp](https://www.researchgate.net/profile/Christophe-Klopp) from Sigenae - an INRAE bioinformatic platform, who give us some ideas to improve the software.
+Thanks to [Christophe Klopp](https://www.researchgate.net/profile/Christophe-Klopp) from Sigenae - an INRAE bioinformatic platform, who give us some ideas to improve the software. Thanks to [IMGT&reg; team](https://imgt.org/#universe) for comments and feedbacks.
 
 ## License
 
-IMGT/StatAssembly - &copy; Copyright Guilhem Zeitoun (IMGT), 2025-2026, licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
+IMGT/StatAssembly - &copy; Copyright 2025-2026. Guilhem Zeitoun IMGT&reg;, IGH, Univ Montpellier, CNRS, Montpellier, France.
+The software is licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
 
-The IMGT logo and the software logo remain the property of IMGT and all rights are reserved.
+The IMGT&reg; logo and the software logo remain the property of IMGT&reg; and all rights are reserved.
 
 The [Rust crab](https://www.rustacean.net/) is under [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/).
 
