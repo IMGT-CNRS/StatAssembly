@@ -235,8 +235,8 @@ For each assembly (in the graph named readresult.png) and for each allele (if ap
 - *validatedalleles.fasta*: contains the list of all alleles (with their closest IMGT/GENE-DB match) that are validated, as well as their locus.
 - **genelist_new.csv*: gives a gene list for all loci (if not provided) based on closest IMGT/GENE-DB match. It does not provide gene status which is in ```gene_analysis.csv```.
 
-For each read matching perfectly the gene, a score is assigned. The sum is the realreads100m score. The score is rounded in the graph:
-- Phred score unknown or less than 10 gives 0
+For each read matching perfectly the gene, a score is assigned. The sum is the realreads100m score. The score is rounded in the graph. This score is the average PHRED score quality of the read at the gene position:
+- Phred score unknown or less than 10 gives 0,
 - Phred score between 11 and 20 gives 0.1,
 - Between 21 and 30 gives 0.3,
 - Between 31 and 40 gives 0.7,
@@ -254,7 +254,7 @@ For a better overview of IMGT&reg; rules based on this analysis, check [IMGT&reg
 > - [ ] ![#f03c15](https://placehold.co/15x15/f03c15/f03c15.png) Red for rejection
 >
 > Criterias are as followed:
-> * For locus: Number of reads inside the window coverage (10<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
+> * For locus: Number of reads inside the window coverage (max(10,Mean coverage / 2)<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
 > * For genes: At least 10 matching reads and no suspicious or warning positions and soft clips less than 40%.
 
 *The threshold can be changed for the graphs but not for the validation (and therefore the color title and csv files).*
