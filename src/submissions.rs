@@ -1307,7 +1307,7 @@ pub(crate) fn askforsubmission(
                 "IMGT does not currently support automatic submissions.".to_string(),
             )); */
 
-            //return Ok(());
+            return Ok(());
         }
         Ok(p) => {
             return Err(io::Error::new(
