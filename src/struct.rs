@@ -925,13 +925,13 @@ impl Params {
             (_, b, _) if b < MIN_READLENGTH => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "The average read length does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software"
+                    "The average read length of {b} does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software."
                 ),
             )),
             (.., c) if c < MIN_PHREDSCORE => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "The PHRED score does not exceed {MIN_READLENGTH}. For accurate results, please provide high-quality long-reads to the software"
+                    "The PHRED score of {c} does not exceed minimum {MIN_PHREDSCORE}. For accurate results, please provide high-quality long-reads to the software."
                 ),
             )),
             _ => Ok(()),
