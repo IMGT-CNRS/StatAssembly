@@ -4,11 +4,11 @@
 ![GitLab Release](https://img.shields.io/gitlab/v/release/imgt-igh%2Fstatassembly?gitlab_url=https%3A%2F%2Fsrc.koda.cnrs.fr)
 ![GitLab License](https://img.shields.io/gitlab/license/imgt-igh%2Fstatassembly?gitlab_url=https%3A%2F%2Fsrc.koda.cnrs.fr%2F)
 
-IMGT/StatAssembly uses BAM file to assess the quality of the IG/TR loci in assemblies and validation of alleles.
+IMGT/StatAssembly uses BAM files to assess the quality of the IG/TR loci in assemblies and to validate new alleles.
 
 ## Software information
 
-It is a script written in Rust, compiled as a optimized binary or an AppImage.
+It is a script written in Rust, compiled as an optimized binary or an AppImage.
 
 The script was made by [IMGT&reg; team](https://www.imgt.org#universe) and is part of [IMGT&reg; rules](#results-analysis) to assess the quality of loci, genes and alleles.
 
@@ -102,7 +102,8 @@ samtools faidx assembly.fasta
 ```
 
 ### Analyze 
-* The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without*. The use of HiFi reads should be preferred as short or noisy reads might give confusing results.
+
+* The BAM file (-f) from analysis and its index, the presence of a cigar with `=`/`X` (match; substitution), a MD tag or a cs tag is recommended. *Some analysis won't be available without it*. The use of HiFi reads should be preferred as short or noisy reads might give confusing results.
 
 > [!TIP]
 > If your BAM file does not contain equal CIGAR format or a CS/MD tag, you can recalculate this tag without relaunching the analysis completely if you have the bam file and the assembly like:
@@ -113,7 +114,7 @@ samtools faidx assembly.fasta
 >
 > Then you can use the new BAM file to have full results in the software.
 
-* A TSV file (-l) with the following information, separated by a tabular:
+* If the find analysis is not performed. A TSV file (-l) with the following information, separated by a tabular:
 
 ```tsv
 Locus Haplotype contig  start end
@@ -135,11 +136,11 @@ Haplotype must be one of the following:
 
 The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared and shown together in graphs.
 
-Contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
-*You can use [IMGT&reg; description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [IMGT/LIGM-Motif](https://imgt.org/ligmotif/) to identify locus position*.
+The contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
+*You can use [IMGT&reg; description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [IMGT/LIGM-Motif](https://imgt.org/ligmotif/) to identify the locus position. if you use find analysis*.
 Example in test files.
 
-* A CSV file (-g) containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
+* (Optional). if the find analysis is not performed. A CSV file (-g) containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
 
 ```csv
 "gene","chromosome","strand","start","end"
@@ -154,14 +155,17 @@ Example in test files.
 
 ### Generation of a BAM file
 
-To generate the BAM file used in the analysis, you can follow those steps.
+To generate the BAM file used in the analysis, you can follow the steps given below.
+
+> [!WARNING]
+> In order to generate accurate results, use the two haplotypes of an assembly when creating the BAM file so that the reads match their correct haplotype.
 
 <details>
 <summary>Steps</summary>
 
-***Those commands (minimap2 and samtools) needs a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.***
+***The commands (minimap2 and samtools) need a lot of memory (more than 32 Go, hundreds of Go of storage and at least 32 threads). Run it from your cluster if you have to. The script may take several hours because of the alignment.***
 
-* Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) and name it assembly.fasta.
+* Download the assembly of T2T-CHM13v2.0 from [NCBI website](https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_009914755.1/) named as assembly.fasta.
 * Download HiFi reads of T2T-CHMv2.0 from [NCBI SRA](https://www.ncbi.nlm.nih.gov/sra/?term=SRX789768*+CHM13) and keep their SRA names. Or execute ``/bin/bash example_files/download.sh``.
 * Install dependancies if not existing
 
@@ -278,7 +282,8 @@ Thanks to [Christophe Klopp](https://www.researchgate.net/profile/Christophe-Klo
 
 ## License
 
-IMGT/StatAssembly - &copy; Copyright 2025-2026. Guilhem Zeitoun IMGT&reg;, IGH, Univ Montpellier, CNRS, Montpellier, France.
+IMGT/StatAssembly - &copy; Copyright 2025-2026. IMGT&reg;, IGH, Univ Montpellier, CNRS, Montpellier, France.
+Authors: Guilhem Zeitoun and IMGT&reg; team.
 The software is licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
 
 The IMGT&reg; logo and the software logo remain the property of IMGT&reg; and all rights are reserved.
