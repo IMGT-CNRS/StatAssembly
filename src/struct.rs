@@ -238,6 +238,7 @@ impl Filecrea {
         let a = self.getpath();
         File::create(a)
     }
+    #[allow(unused)]
     pub(crate) fn flagtodelete(&mut self) {
         self.delete = true;
     }
@@ -1234,6 +1235,12 @@ impl Posread {
     }
     pub(crate) fn getinsertion(&self) -> usize {
         self.insertion
+    }
+    pub(crate) fn addsoftclip(&mut self, count: usize) {
+        self.softclips += count as f32
+    }
+    pub(crate) fn getsoftclip(&self) -> f32 {
+        self.softclips
     }
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -2243,6 +2250,7 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) reads100: usize,
     #[serde(rename = "reads perfect match")]
     pub(crate) reads100m: usize,
+    #[serde(rename = "phred-dependant reads perfect match")]
     pub(crate) realreads100m: f32,
     #[serde(skip_serializing)]
     pub(crate) phredscore: Phred,
@@ -2516,23 +2524,26 @@ impl PartialOrd for LocusInfos {
 pub(crate) struct HashMapinfo {
     pub(crate) locuspos: Position,
     pub(crate) position: Position,
-    pub(crate) map60: i64,
-    pub(crate) map1: i64,
-    pub(crate) map0: i64,
+    pub(crate) map60: usize,
+    pub(crate) map1: usize,
+    pub(crate) map0: usize,
     #[serde(
         serialize_with = "globalmismatch",
         deserialize_with = "globaldemismatch"
     )]
     pub(crate) globalmismatch: usize,
-    pub(crate) overlaps: i64,
-    pub(crate) secondary: i64,
-    pub(crate) supplementary: i64,
-    pub(crate) mismatches: i64,
-    pub(crate) misalign: i64,
+    pub(crate) overlaps: usize,
+    pub(crate) secondary: usize,
+    pub(crate) supplementary: usize,
+    pub(crate) total: usize,
+    pub(crate) mismatches: usize,
+    pub(crate) misalign: usize,
     #[serde(serialize_with = "qualcheck", deserialize_with = "qualdecheck")]
     pub(crate) qual: Option<usize>,
-    #[serde(rename = "percent-softclips")]
-    pub(crate) softclips: f32,
+    #[serde(rename = "primary-softclips")]
+    pub(crate) psoftclips: f32,
+    #[serde(rename = "other-softclips")]
+    pub(crate) osoftclips: f32,
 }
 fn qualcheck<S>(num: &Option<usize>, s: S) -> Result<S::Ok, S::Error>
 where
@@ -2566,7 +2577,7 @@ impl PartialEq for HashMapinfo {
 }
 impl Eq for HashMapinfo {}
 impl HashMapinfo {
-    pub(crate) fn getmaxvalue(&self) -> i64 {
+    pub(crate) fn getmaxvalue(&self) -> usize {
         let elem = [
             self.map0,
             self.map1,
@@ -2576,13 +2587,22 @@ impl HashMapinfo {
         ];
         elem.into_iter().max().unwrap_or(self.overlaps)
     }
+    /// Get counted secondary alignments
+    #[allow(unused)]
+    pub(crate) fn getsecondary(&self) -> usize {
+        self.secondary.add(self.supplementary)
+    }
+    /// Get all secondary alignments (even PCR duplicate...), None if fails
+    pub(crate) fn getfullsecondary(&self) -> Option<usize> {
+        self.total.checked_sub(self.gettotalmap())
+    }
     /// Get the number of primary reads
-    pub(crate) fn gettotalmap(&self) -> i64 {
+    pub(crate) fn gettotalmap(&self) -> usize {
         self.map0 + self.map1 + self.map60
     }
     /// Get the number of primary reads **(except map0)**
     #[allow(dead_code)]
-    pub(crate) fn gettotalscore(&self) -> i64 {
+    pub(crate) fn gettotalscore(&self) -> usize {
         self.map1 + self.map60
     }
 }
@@ -2597,21 +2617,42 @@ impl Ord for HashMapinfo {
     }
 }
 impl HashMapinfo {
+    pub(crate) fn smalldefault( locuspos: Position, position: Position) -> Self {
+    HashMapinfo {
+            locuspos,
+            position,
+            map60: usize::default(),
+            map1: usize::default(),
+            map0: usize::default(),
+            globalmismatch: usize::default(),
+            secondary: usize::default(),
+            supplementary: usize::default(),
+            overlaps: usize::default(),
+            mismatches: usize::default(),
+            misalign: usize::default(),
+            qual: None,
+            psoftclips: 0f32,
+            osoftclips: 0f32,
+            total: usize::default(),
+        }
+    }
     #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn new(
         locuspos: Position,
         position: Position,
-        map60: i64,
-        map1: i64,
-        map0: i64,
-        secondary: i64,
-        supplementary: i64,
+        map60: usize,
+        map1: usize,
+        map0: usize,
+        secondary: usize,
+        supplementary: usize,
+        total: usize,
         globalmismatch: usize,
-        overlaps: i64,
-        mismatches: i64,
-        misalign: i64,
+        overlaps: usize,
+        mismatches: usize,
+        misalign: usize,
         qual: Option<usize>,
-        softclips: f32,
+        psoftclips: f32,
+        osoftclips: f32,
     ) -> Self {
         HashMapinfo {
             locuspos,
@@ -2619,6 +2660,7 @@ impl HashMapinfo {
             map60,
             map1,
             map0,
+            total,
             globalmismatch,
             secondary,
             supplementary,
@@ -2626,7 +2668,8 @@ impl HashMapinfo {
             mismatches,
             misalign,
             qual,
-            softclips,
+            psoftclips,
+            osoftclips
         }
     }
 }

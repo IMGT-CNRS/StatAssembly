@@ -2,10 +2,8 @@
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
-        fs::File,
         io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
         path::PathBuf,
-        process::Command,
         thread::sleep,
         time::Duration,
     };
@@ -14,7 +12,7 @@ mod tests {
         extractgenelist, generategeneinfos, getorsetparams,
         identification::{sendresult, sendresultcompressed},
         locusposparser, posread,
-        r#struct::{Args, Filecrea, HashMapinfo, Locus, Species, SpeciesError},
+        r#struct::{Args, Filecrea, HashMapinfo, Species, SpeciesError},
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
             generatelightbam, generatesequence, generatesequenceraw, getprogressbarclassic,

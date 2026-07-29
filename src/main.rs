@@ -36,7 +36,7 @@ use crate::submissions::{
     GITHUBVERSION, INVALIDCOVERAGE, LIMITDATE, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH,
     SUSPICIOUSPOSITIONALERT, askforsubmission, checkifblastpresent, generatelightbam,
     generatesequence, genesblast, getindexforbam, getprogressbarclassic, getprogressbarspin,
-    matchmotif, positionfiltering,
+    positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use extended_htslib::bam::record::{Cigar, CsValue};
@@ -658,16 +658,24 @@ fn processcounting(
         max(record.reference_start(), locus.start.getzbasedpos()),
     )
         ..Position::newfromzposition(min(locus.end.getobasedpos(), record.reference_end()));
-    if pos.contains_key(start)
-        && let Some(d) = pos.get_mut(start)
-        && record.cigar().leading_softclips() > 0
-    {
-        d.softclips += 1.0;
-    } else if pos.contains_key(end)
-        && let Some(d) = pos.get_mut(end)
-        && record.cigar().trailing_softclips() > 0
-    {
-        d.softclips += 1.0;
+    let hitter = if let Some(d) = pos.get_mut(start) {
+        Some(d)
+    } else if let Some(d) = pos.get_mut(end) {
+        Some(d)
+    } else {
+        None
+    };
+    match ( //Leading and trailing are only present at the start or end so no need to check that.
+        hitter,
+        record.cigar().leading_softclips() > 0
+            || record.cigar().trailing_softclips() > 0
+            || record.cigar().leading_hardclips() > 0
+            || record.cigar().trailing_hardclips() > 0,
+        record.is_primary(),
+    ) {
+        (_, false, _) | (None, ..) => (),
+        (Some(d), true, true) => d.psoftclips += 1.0,
+        (Some(d), true, false) => d.osoftclips += 1.0,
     }
     let (message, matched, aligned) = match iteralert(args, message, record) {
         (_, None, _) => {
@@ -679,10 +687,11 @@ fn processcounting(
         }
     };
     for (i, targeting) in pos.range_mut(newrange) {
+        targeting.total += 1;
         if !record.is_primary() {
             if record.is_secondary() {
                 targeting.secondary += 1;
-            } else {
+            } else if record.is_supplementary() {
                 targeting.supplementary += 1;
                 /* targeting
                 .supplementary
@@ -984,12 +993,7 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
         })
         .collect();
     iterator.into_iter().for_each(|(i, p)| {
-        let default = HashMapinfo {
-            locuspos: Position::newfromzposition(i),
-            position: Position::newfromzposition(p),
-            qual: None,
-            ..Default::default()
-        };
+        let default = HashMapinfo::smalldefault(Position::newfromzposition(i),Position::newfromzposition(p));
         pos.insert(Position::newfromzposition(p), default);
     });
     let mut message = false;
@@ -1060,8 +1064,11 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
                 ),
             )
         }
-        if p.softclips.is_normal() {
-            p.softclips = (p.softclips * 100f32 / max(p.gettotalmap(), 1) as f32).round() / 100f32
+        if p.psoftclips.is_normal() {
+            p.psoftclips = (p.psoftclips * 100f32 / max(p.gettotalmap(), 1) as f32).round() / 100f32
+        }
+        if p.osoftclips.is_normal() {
+            p.osoftclips = (p.psoftclips * 100f32 / max(p.getfullsecondary().unwrap_or(1), 1) as f32).round() / 100f32
         }
         p.globalmismatch /= max(
             std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
@@ -1952,20 +1959,21 @@ fn generategeneinfos(
     };
     let mut coverageperc = 0;
     let mut empty = true;
-    for record in records
+    for mut record in records
         .filter_map(Result::ok)
         .filter(|p| filterread(args, p))
     {
         empty = false;
         reads += 1;
+        record.cache_cigar();
         if let Some(d) = hash.get_mut(&Position::newfromzposition(record.reference_start()))
-            && record.cigar().leading_softclips() > 0
+            && (record.cigar_cached().unwrap().leading_softclips() > 0 || record.cigar_cached().unwrap().leading_softclips() > 0)
         {
-            d.softclips += 1f32
+            d.addsoftclip(1);
         } else if let Some(d) = hash.get_mut(&Position::newfromzposition(record.reference_end()))
-            && record.cigar().trailing_softclips() > 0
+            && (record.cigar_cached().unwrap().leading_softclips() > 0 || record.cigar_cached().unwrap().leading_hardclips() > 0)
         {
-            d.softclips += 1f32
+            d.addsoftclip(1);
         }
         let range = record.reference_start()..record.reference_end();
         coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
@@ -2110,7 +2118,7 @@ fn generategeneinfos(
                 f.getmismatchcount(),
                 f.getindelcount(),
                 f.getinsertion(),
-                f.softclips
+                f.getsoftclip()
             ));
             acc
         })
@@ -3078,10 +3086,10 @@ pub(crate) fn locusisokay(mean: u64, lengthloci: &Position, graph: &[&HashMapinf
     if let Some(a) = graph
         .iter()
         .filter(|d| !telomereposition(&d.position, lengthloci))
-        .find(|f| !coveragewindow(mean).contains(&f.overlaps))
+        .find(|f| !coveragewindow(mean).contains(&f.overlaps.try_into().unwrap_or_default()))
     {
         match a {
-            a if a.overlaps < *coveragewindow(mean).start() => OkStatus::new(
+            a if a.overlaps < usize::try_from(*coveragewindow(mean).start()).unwrap_or_default() => OkStatus::new(
                 Rejected,
                 Some(format!(
                     "{} at position {} ({})",
@@ -3100,7 +3108,7 @@ pub(crate) fn locusisokay(mean: u64, lengthloci: &Position, graph: &[&HashMapinf
                 )),
             ),
         }
-    } else if let Some(a) = graph.iter().find(|f| f.softclips > SOFTCLIPRATIO) {
+    } else if let Some(a) = graph.iter().find(|f| f.psoftclips > SOFTCLIPRATIO) {
         OkStatus::new(
             Rejected,
             Some(format!(
@@ -3113,11 +3121,11 @@ pub(crate) fn locusisokay(mean: u64, lengthloci: &Position, graph: &[&HashMapinf
         OkStatus::new(AcceptedStatus::Accepted, None)
     }
 }
-pub(crate) fn coveragewindow(mean: u64) -> RangeInclusive<i64> {
+pub(crate) fn coveragewindow(mean: u64) -> RangeInclusive<u64> {
     max(
         MINIMUMCOVERAGE.try_into().unwrap_or_default(),
-        (mean as f32 / MAXCOVERAGERATIO).round() as i64,
-    )..=((mean as f32 * MAXCOVERAGERATIO).round() as i64)
+        (mean as f32 / MAXCOVERAGERATIO).round() as u64,
+    )..=((mean as f32 * MAXCOVERAGERATIO).round() as u64)
 }
 fn readgraph<T>(
     outputfile: &std::path::Path,
@@ -3133,8 +3141,8 @@ where
 {
     let text_style = fontstyle.into_text_style(&root);
     let max = max(
-        i64::try_from(mean).unwrap_or(i64::MAX),
-        pos.iter().map(|max| max.getmaxvalue()).max().unwrap_or(0),
+        usize::try_from(mean).unwrap_or(usize::MAX),
+        pos.iter().map(|max| max.getmaxvalue()).max().unwrap_or(0).try_into().unwrap_or_default(),
     ) + 5;
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
@@ -3158,6 +3166,7 @@ where
             loci.getlength().saturating_sub(full.length(&loci.end)) / 9,
         )
     } else {
+        println!("Length for {} and {} is {:?}",loci.getlocushaplo(),loci.contig,loci.getfulllength(args));
         (None, None, loci.getlength() / 9)
     };
     let colorgene = if loci.status.getstatus().isvalid() {
@@ -3210,7 +3219,7 @@ where
                     {
                         Some((
                             p.position.getobasedpos(),
-                            mean.try_into().unwrap_or(i64::MAX),
+                            mean.try_into().unwrap_or(usize::MAX),
                         ))
                     } else {
                         None
@@ -3233,12 +3242,12 @@ where
                         == 0
                         || p.position == loci.end
                     {
-                        Some((p.position.getobasedpos(), *coveragewindows.end()))
+                        Some((p.position.getobasedpos(), usize::try_from(*coveragewindows.end()).unwrap_or_default()))
                     } else {
                         None
                     }
                 }),
-                *coveragewindows.start(),
+                usize::try_from(*coveragewindows.start()).unwrap_or_default(),
                 full_palette::GREY_A700.mix(0.4).filled(),
             )
             .border_style(full_palette::BLACK.mix(0.8)),
@@ -3420,7 +3429,7 @@ where
     let breaks: Vec<(i64, i64)> = pos
         .iter()
         .filter_map(|elem| {
-            if elem.overlaps <= args.breaks.into() {
+            if elem.overlaps <= usize::try_from(args.breaks).unwrap_or_default() {
                 Some((elem.position.getobasedpos(), 100))
             } else {
                 None
@@ -3473,17 +3482,34 @@ where
                 .baseline(0)
                 .margin(3)
                 .data(pos.iter().filter_map(|p| {
-                    if p.softclips.is_normal() {
-                        Some((p.position.getobasedpos(), (p.softclips * 100f32) as i64))
+                    if p.psoftclips.is_normal() {
+                        Some((p.position.getobasedpos(), (p.psoftclips * 100f32) as i64))
                     } else {
                         None
                     }
                 }))
-                .style(full_palette::BLACK.mix(0.8).filled()),
+                .style(full_palette::BLACK.mix(0.7).filled()),
         )
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
-        .label("Softclips percent")
+        .label("Not primary softclips percent")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
+        chart
+        .draw_series(
+            Histogram::vertical(&chart)
+                .baseline(0)
+                .margin(3)
+                .data(pos.iter().filter_map(|p| {
+                    if p.psoftclips.is_normal() {
+                        Some((p.position.getobasedpos(), (p.psoftclips * 100f32) as i64))
+                    } else {
+                        None
+                    }
+                }))
+                .style(full_palette::DEEPPURPLE_600.mix(0.8).filled()),
+        )
+        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
+        .label("Primary softclips percent")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], full_palette::DEEPPURPLE_600));
     if !args.nolegend {
         chart
             .configure_series_labels()
