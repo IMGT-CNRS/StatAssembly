@@ -39,6 +39,35 @@ mod tests {
         );
     }
     #[test]
+    fn checkparams() {
+        let testo = TempDir::new().unwrap();
+        let fake_args = vec![
+            "IMGT_StatAssembly",
+            "-f",
+            "example_files/CHM13v2.0.bam",
+            "-a",
+            "example_files/assembly.fasta",
+            "-l",
+            "example_files/CHM13v2.0loc.csv",
+            "-s",
+            "human",
+            "--extractedlength",
+            "4772468",
+            "-g",
+            "example_files/CHM13v2.0geneloc.csv",
+            "-o",
+            testo.path().to_str().unwrap(),
+            "analyze",
+        ];
+        let args4 = Args::try_parse_from(fake_args)
+            .map_err(|f| f.to_string())
+            .unwrap();
+        let params = getorsetparams(&testo.path().join("test.txt"), &args4).unwrap();
+        assert_eq!(params.getavg(), 14009, "Average read not the same");
+        assert_eq!(params.getmean(), 56, "Mean coverage is not the same");
+        assert_eq!(params.getphred(), 78, "Phred score is not the same");
+    }
+    #[test]
     fn generatesequencetest() {
         let testo = TempDir::new().unwrap();
         let fake_args = vec![

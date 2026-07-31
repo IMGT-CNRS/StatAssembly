@@ -8,8 +8,9 @@ use crate::{
     r#struct::{Args, Filecrea, LocusInfos},
     submissions::{generatelightbam, generatesequence},
 };
-use rsomics_bam_mpileup as pileup;
+use bam as pileup;
 pub(crate) fn pileup(loci: &LocusInfos, args: &Args) -> io::Result<()> {
+    todo!("Change structure");
     let filename = Filecrea::createfrompath(
         args.outdir
             .join(format!("{}_pileup.txt", loci.getlocushaplo())),

@@ -2,8 +2,8 @@
 #![deny(clippy::expect_used)]
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
-    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Locus, LocusInfos, Name,
-    Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
+    Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Genehit, GenesList, Locus,
+    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
 };
 use crate::{EMAIL, NAME, PHYLUMLIMIT, TIMEOUT_IN_MN, VERSION, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
@@ -678,6 +678,8 @@ pub(crate) fn genesblast(
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
+        } else {
+            p.complement = Strand::Plus;
         }
     });
     statusblastvs(&mut blast);
@@ -708,17 +710,24 @@ pub(crate) fn locuspos(
     Some((opt.clone(), bl))
 }
      */
-pub(crate) fn filter_new_alleles<'a, T>(data: &'a [T], motifs: &[T]) -> impl Iterator<Item = &'a T>
+pub(crate) fn filter_new_alleles<'a, T>(
+    data: &'a [Genehit],
+    motifs: &'a [T],
+) -> impl Iterator<Item = &'a Genehit>
 where
     T: Blastcalc + Debug,
 {
-    data.iter().filter(|p| p.onlynewalleles()).filter(move |f| {
-        motifs.iter().any(|p| {
-            checkoverlap(&p.getposrange(), &f.getposrange())
-                && p.getposrange() != f.getposrange()
-                && p.getposrange().count() > f.getposrange().count()
+    data.iter()
+        .filter(|p| p.getstatus().getstatus().isvalid())
+        .filter(move |f| {
+            f.gethit().is_some_and(|f| {
+                motifs.iter().any(|p| {
+                    checkoverlap(&p.getposrange(), &f.getposrange())
+                        && p.getposrange() != f.getposrange()
+                        && p.getposrange().count() > f.getposrange().count()
+                })
+            })
         })
-    })
 }
 //if there is space, BLAST would cut the header and parsing would fail, we therefore regenerate a file for reference without this issue
 fn checknospaceinheaderandvalidseq(
@@ -861,6 +870,8 @@ where
                     if let Ok(mut r) = record {
                         if r.sstart > r.send {
                             (r.sstart, r.send, r.complement) = (r.send, r.sstart, Strand::Minus)
+                        } else {
+                            r.complement = Strand::Plus;
                         }
                         result.push(r);
                     } else if let Err(r) = record {
@@ -1134,7 +1145,7 @@ pub(crate) fn launchblast(
 pub(crate) fn submit(
     args: &Args,
     locus: &[crate::LocusInfos],
-    c: &[Blastmatch],
+    c: &[Genehit],
     realspecies: &Species,
 ) -> Result<(), String> {
     //let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
@@ -1195,13 +1206,11 @@ pub(crate) fn submit(
     });
 
     let mut c = c.to_vec();
-    c.iter_mut().for_each(|p| {
-        if let Some(loc) = p.getlocusname()
-            && let Some(find) = locus.iter().find(|fi| {
-                p.getchromosomefromsubject().is_some_and(|a| a == fi.contig)
-                    && fi.getlocus() == &loc
-            })
-            && p.sseqid.starts_with("GENE")
+    c.iter_mut().for_each(|hit| {
+        let db = hit.clone();
+        let chromo = db.getgeneinfo().getchromosome();
+        if let Some(p) = hit.hit.as_mut()
+            && let Some(find) = locus.iter().find(|fi| fi.contig == chromo)
             && let Some((start, end, complement)) = p.getpositionfromsubject()
             && let Some((newstart, newend, newcomplement)) = find.locusinposition(
                 &start,
@@ -1240,15 +1249,17 @@ pub(crate) fn submit(
         .delimiter(b'\t')
         .from_path(dir.join("motifs2.txt"))
         .map_err(|e| format!("Error setting motifs match: {e}"))?;
-    for matches in c.iter() {
+    for matches in c.iter().filter_map(|p| p.gethit()) {
         let _ = matche.serialize(matches);
     }
     let _ = matche.flush();
     let file = dir.join("newpotentialalleles.fasta");
     let sequence = filter_new_alleles(&c, &motifs).fold(String::new(), |mut acc, f| {
-        let f: &dyn Blastcalc = f;
-        let f: &dyn Seqresult = &Newfasta::from(f);
-        acc.push_str(&format!("\n{}", f));
+        if let Some(f) = f.gethit() {
+            let f: &dyn Blastcalc = f;
+            let f: &dyn Seqresult = &Newfasta::from(f);
+            acc.push_str(&format!("\n{}", f));
+        }
         acc
     });
     println!("BLAST results were added.");
@@ -1283,6 +1294,7 @@ pub(crate) fn submit(
     //let _ = fs::remove_dir_all(dir);
     Ok(())
     //form(&client);
+    //
 }
 pub fn asknonewalleles() -> bool {
     println!(
@@ -1294,7 +1306,7 @@ pub(crate) fn askforsubmission(
     realspecies: &Species,
     locus: &[LocusInfos],
     args: &Args,
-    infos: &HashMap<LocusInfos, Vec<Blastmatch>>,
+    infos: &HashMap<LocusInfos, Vec<Genehit>>,
 ) -> io::Result<()> {
     let quest = REQUESTCLIENT
         .get(SUBMISSIONLINK.as_str())
@@ -1325,10 +1337,10 @@ pub(crate) fn askforsubmission(
             ));
         }
     };
-    if !args.nosubmit {
+    if !args.nosubmit && args.assembly.is_some() {
         if !infos
             .iter()
-            .any(|(_, p)| p.iter().any(|p| p.onlynewalleles()))
+            .any(|(_, p)| p.iter().any(|p| p.isnewalleleandvalid()))
         {
             if !asknonewalleles() {
                 return Ok(());
@@ -1340,7 +1352,7 @@ pub(crate) fn askforsubmission(
                 return Ok(());
             }
         }
-        let mut blastmatch: Vec<Blastmatch> = Vec::new();
+        let mut blastmatch: Vec<Genehit> = Vec::new();
         for data in infos.values() {
             blastmatch.append(&mut data.clone());
         }
@@ -1401,7 +1413,7 @@ pub(crate) fn generatesequenceraw(
                     list.getlocushaplo(),
                     list.start.getobasedpos(),
                     list.end.getobasedpos(),
-                    list.complement
+                    list.strand
                 )),
                 seq.as_bytes(),
             )?;

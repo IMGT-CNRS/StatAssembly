@@ -282,8 +282,10 @@ Thanks to [Christophe Klopp](https://www.researchgate.net/profile/Christophe-Klo
 
 ## License
 
-IMGT/StatAssembly - &copy; Copyright 2025-2026. IMGT&reg;, IGH, Univ Montpellier, CNRS, Montpellier, France.
 Authors: Guilhem Zeitoun and IMGT&reg; team.
+
+IMGT/StatAssembly - &copy; Copyright 2025-2026. IMGT&reg;, IGH, Univ Montpellier, CNRS, Montpellier, France.
+
 The software is licensed under the [EUPL](https://interoperable-europe.ec.europa.eu/collection/eupl/eupl-text-eupl-12) (European Union Public Licence) v1.2.
 
 The IMGT&reg; logo and the software logo remain the property of IMGT&reg; and all rights are reserved.

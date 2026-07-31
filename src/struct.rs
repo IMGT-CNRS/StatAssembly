@@ -32,7 +32,7 @@ use std::ops::{Add, Not, RangeInclusive, Sub};
 use std::path::Path;
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
-use std::{env, fs};
+use std::{default, env, fs};
 use strum_macros::EnumIter;
 #[derive(Parser, Debug)]
 #[clap(
@@ -402,11 +402,7 @@ impl PartialOrd for LocusHaplo {
 }
 impl Ord for LocusHaplo {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self
-            .getlocus()
-            .to_string()
-            .cmp(&other.getlocus().to_string())
-        {
+        match self.getlocus().cmp(&other.getlocus()) {
             Ordering::Equal => self.haplo.cmp(&other.haplo),
             ord => ord,
         }
@@ -1321,12 +1317,12 @@ impl Blastmatch {
             identity,
         }
     }
+    /// Try to parse subject into name
+    pub(crate) fn turnsubjectintoname(&self) -> Option<Name> {
+        Name::from_str(self.getsubject()).ok()
+    }
 }
 impl Blast {
-    #[allow(dead_code)]
-    pub(crate) fn getstatus(&self) -> &Status {
-        &self.status
-    }
     pub(crate) fn setstatus(&mut self) {
         match (self.pident, self.qlen, self.length) {
             (100.0, a, b) if a == b => self.status = Status::Equal,
@@ -1336,19 +1332,19 @@ impl Blast {
     }
 }
 #[allow(clippy::from_over_into)]
-//Blastmatch is for matches, should not be converted
-impl Into<Blastmatch> for Blast {
-    fn into(mut self) -> Blastmatch {
-        self.setstatus();
+//Blastmatch is for matches, should not be converted in the inverted way
+impl From<Blast> for Blastmatch {
+    fn from(mut value: Blast) -> Self {
+        value.setstatus();
         Blastmatch::new(
-            self.qseqid,
-            self.sseqid,
-            self.sseq,
-            self.sstart,
-            self.send,
-            self.complement,
-            self.status,
-            self.pident,
+            value.qseqid,
+            value.sseqid,
+            value.sseq,
+            value.sstart,
+            value.send,
+            value.complement,
+            value.status,
+            value.pident,
         )
     }
 }
@@ -1983,16 +1979,12 @@ impl LocusInfos {
         &self.locusinfo
     }
     pub(crate) fn getfulllength(&self, args: &Args) -> Option<Position> {
-        let length = match getassemblyreader(args).map(|p| {
-            p.index
-                .sequences()
-                .into_iter()
-                .find(|p| p.name == self.contig)
-        }) {
-            Ok(Some(b)) => b.len.try_into().unwrap_or(i64::MAX),
-            _ => return None,
-        };
-        Some(Position::newfromoposition(length))
+        let read = getassemblyreader(args).ok()?;
+        read.index
+            .sequences()
+            .into_iter()
+            .find(|p| p.name == self.contig)
+            .map(|b| Position::newfromoposition(b.len.try_into().unwrap_or(i64::MAX)))
     }
     pub(crate) fn setstatus(
         &mut self,
@@ -2010,7 +2002,7 @@ impl LocusInfos {
     }
     //Get position for alignment
     pub(crate) fn fullposition(&self, record: &Blastmatch) -> Option<(Position, Position, Strand)> {
-        let (start, end) = if self.complement.isrev() {
+        let (start, end) = if self.strand.isrev() {
             let end =
                 record.qseqid.posend - Position::newfromzposition(record.sstart.try_into().ok()?);
             let start =
@@ -2047,7 +2039,7 @@ impl LocusInfos {
         if newend.length(newstart) < matchend.length(matchstart) {
             return None;
         }
-        let (start, end) = if self.complement.isrev() {
+        let (start, end) = if self.strand.isrev() {
             let end = newend.getobasedpos() - std::cmp::min(matchstart, matchend).getobasedpos();
             let start = newend.getobasedpos() - std::cmp::max(matchstart, matchend).getobasedpos();
             (start, end)
@@ -2078,7 +2070,7 @@ impl LocusInfos {
         if start > end || end.length(start) > self.getlength() {
             return None;
         }
-        if self.complement.isrev() {
+        if self.strand.isrev() {
             let newend = self
                 .end
                 .getobasedpos()
@@ -2116,7 +2108,7 @@ impl LocusInfos {
             chromosome: self.contig.clone(),
             start: self.start,
             end: self.end,
-            strand: self.complement.clone(),
+            strand: self.strand.clone(),
             status: OkStatus::default(),
         };
         fake.extractsequence(fasta)
@@ -2156,6 +2148,7 @@ impl Eq for GeneInfos {}
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq, Hash)]
 pub(crate) enum Strand {
     #[default]
+    Unknown,
     Plus,
     Minus,
 }
@@ -2175,6 +2168,7 @@ impl Not for Strand {
         match self {
             Strand::Plus => Strand::Minus,
             Strand::Minus => Strand::Plus,
+            Strand::Unknown => Strand::Unknown,
         }
     }
 }
@@ -2200,6 +2194,7 @@ impl Display for Strand {
         match self {
             Self::Plus => write!(f, "FWD"),
             Self::Minus => write!(f, "REV"),
+            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -2231,6 +2226,57 @@ impl IntoIterator for Phred {
     type Item = Vec<u8>;
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Genehit {
+    pub(crate) geneinfo: GeneInfosFinish,
+    pub(crate) hit: Option<Blastmatch>,
+}
+impl Genehit {
+    ///Construct a Vec of Genehit from Geneinfosfinish and Blastmatch
+    pub(crate) fn constructfromvec(list: &[GeneInfosFinish], hit: &[Blastmatch]) -> Vec<Self> {
+        let mut construct = Vec::new();
+        construct.reserve_exact(list.len());
+        for gene in list {
+            let find = hit.iter().find(|p| {
+                p.getallelename() == gene.getgene().name
+                    && p.turnsubjectintoname()
+                        .and_then(|f| f.numacc)
+                        .unwrap_or(p.getsubject().to_string())
+                        == gene.getchromosome()
+            });
+            let new = Self::new(gene.clone(), find.cloned());
+            construct.push(new);
+        }
+        construct
+    }
+    pub(crate) fn getgeneinfo(&self) -> &GeneInfosFinish {
+        &self.geneinfo
+    }
+    pub(crate) fn gethit(&self) -> Option<&Blastmatch> {
+        self.hit.as_ref()
+    }
+    pub(crate) fn new(geneinfo: GeneInfosFinish, hit: Option<Blastmatch>) -> Self {
+        Genehit { geneinfo, hit }
+    }
+    pub(crate) fn isnewallele(&self) -> Option<bool> {
+        self.hit.as_ref().map(|a| a.onlynewalleles())
+    }
+    pub(crate) fn getstatus(&self) -> &OkStatus {
+        self.geneinfo.getstatus()
+    }
+    pub(crate) fn isnewalleleandvalid(&self) -> bool {
+        self.isnewallele()
+            .is_some_and(|f| f && self.getstatus().getstatus().isvalid())
+    }
+}
+impl From<GeneInfosFinish> for Genehit {
+    fn from(value: GeneInfosFinish) -> Self {
+        Genehit {
+            geneinfo: value,
+            hit: None,
+        }
     }
 }
 #[derive(Clone, Debug, Serialize)]
@@ -2388,20 +2434,23 @@ impl Eq for GeneInfosFinish {}
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Hash)]
 pub(crate) struct FakeLocusinfo {
     pub(crate) locus: Locus,
-    #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    //#[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
     #[serde(default)]
     pub(crate) haplotype: Option<Haplotype>,
-    #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    //#[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
     #[serde(default)]
     pub(crate) contig: Option<String>,
-    //#[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    // #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
     #[serde(default)]
     pub(crate) start: Option<Position>,
-    //#[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    // #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
     #[serde(default)]
     pub(crate) end: Option<Position>,
     #[serde(skip)]
-    pub(crate) complement: Strand,
+    pub(crate) strand: Strand,
+    // #[serde_as(as = "DefaultOnError<Option<DisplayFromStr>>")]
+    #[serde(default)]
+    pub(crate) status: Option<OkStatus>,
 }
 impl From<LocusInfos> for FakeLocusinfo {
     fn from(value: LocusInfos) -> Self {
@@ -2411,7 +2460,8 @@ impl From<LocusInfos> for FakeLocusinfo {
             contig: Some(value.contig),
             start: Some(value.start),
             end: Some(value.end),
-            complement: value.complement,
+            strand: value.strand,
+            status: None,
         }
     }
 }
@@ -2422,7 +2472,8 @@ impl FakeLocusinfo {
         contig: Option<String>,
         start: Option<Position>,
         end: Option<Position>,
-        complement: Option<Strand>,
+        strand: Option<Strand>,
+        okstatus: Option<OkStatus>,
     ) -> Self {
         FakeLocusinfo {
             locus,
@@ -2430,7 +2481,8 @@ impl FakeLocusinfo {
             contig,
             start,
             end,
-            complement: complement.unwrap_or_default(),
+            strand: strand.unwrap_or(Strand::Unknown),
+            status: okstatus,
         }
     }
     pub(crate) fn checkauto(&self) -> bool {
@@ -2451,7 +2503,7 @@ impl FakeLocusinfo {
                 a.clone(),
                 b,
                 c,
-                self.complement,
+                self.strand,
             )),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2468,7 +2520,7 @@ pub(crate) struct LocusInfos {
     pub(crate) start: Position,
     pub(crate) end: Position,
     #[serde(skip)]
-    pub(crate) complement: Strand,
+    pub(crate) strand: Strand,
     #[serde(skip_deserializing)]
     pub(crate) status: OkStatus,
 }
@@ -2478,7 +2530,7 @@ impl Serialize for LocusInfos {
         S: serde::Serializer,
     {
         let mut new = self.clone();
-        if new.complement.isrev() {
+        if new.strand.isrev() {
             (new.start, new.end) = (self.end, self.start)
         };
         let mut se = serializer.serialize_tuple_struct("LocusInfos", 6)?;
@@ -2498,14 +2550,14 @@ impl LocusInfos {
         contig: String,
         start: Position,
         end: Position,
-        complement: Strand,
+        strand: Strand,
     ) -> Self {
         Self {
             locusinfo: LocusHaplo::new(locus, haplotype),
             contig,
             start,
             end,
-            complement,
+            strand,
             status: OkStatus::default(),
         }
     }
@@ -2617,8 +2669,8 @@ impl Ord for HashMapinfo {
     }
 }
 impl HashMapinfo {
-    pub(crate) fn smalldefault( locuspos: Position, position: Position) -> Self {
-    HashMapinfo {
+    pub(crate) fn smalldefault(locuspos: Position, position: Position) -> Self {
+        HashMapinfo {
             locuspos,
             position,
             map60: usize::default(),
@@ -2669,7 +2721,7 @@ impl HashMapinfo {
             misalign,
             qual,
             psoftclips,
-            osoftclips
+            osoftclips,
         }
     }
 }

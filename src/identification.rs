@@ -21,7 +21,7 @@ use std::{
     fs::File,
     io::{
         self, BufReader, Cursor,
-        ErrorKind::{self},
+        ErrorKind::{self, InvalidFilename},
         Read, Write,
     },
     path::{Path, PathBuf},
@@ -189,10 +189,13 @@ where
     })
 }
 pub(crate) fn locusallposition(
-    subject: &Path,
     species: &Species,
     args: &Args,
 ) -> io::Result<(Vec<LocusInfos>, Vec<Blastmatch>, String)> {
+    let assembly = args
+        .assembly
+        .as_ref()
+        .ok_or(io::Error::new(InvalidFilename, "No assembly given"))?;
     let infos = if args.nobornes {
         None
     } else {
@@ -231,7 +234,7 @@ pub(crate) fn locusallposition(
     merge.write_all(read.as_bytes())?;
     merge.write_all(read2.as_bytes())?;
     println!("Blasting to get position of loci."); */
-    let info = threadlaunch(referencepath, subject, args, bornespath);
+    let info = threadlaunch(referencepath, &assembly, args, bornespath);
     let (mut blast, mut bornes) = match info {
         Ok((a, Some(Some(b)))) => (a, Some(b)),
         Ok((a, None)) => {
@@ -268,6 +271,8 @@ pub(crate) fn locusallposition(
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
             (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
+        } else {
+            p.complement = Strand::Plus;
         }
         p.setstatus();
     });
@@ -516,11 +521,15 @@ pub(crate) fn find_global_best_range(
                     sseq,
                     Position::new(
                         false,
-                        start.saturating_sub(BORNES).try_into().unwrap_or_default(),
-                    ),
+                        start
+                            .checked_sub(BORNES)
+                            .unwrap_or(1)
+                            .try_into()
+                            .unwrap_or(1),
+                    ), //TODO: Set position 1 if saturating
                     Position::new(
                         false,
-                        end.saturating_add(BORNES).try_into().unwrap_or_default(),
+                        end.checked_add(BORNES).unwrap_or(1).try_into().unwrap_or(1),
                     ),
                     if complement {
                         Strand::Minus
