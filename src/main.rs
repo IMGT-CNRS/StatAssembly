@@ -24,7 +24,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::io::ErrorKind::{InvalidData, InvalidInput};
 use std::num::NonZero;
-use std::ops::{Add, Div, Mul, RangeInclusive};
+use std::ops::{Add, Div, Mul, Range, RangeInclusive};
 use std::path::Path;
 use std::process::ExitCode;
 use std::str::FromStr;
@@ -150,12 +150,8 @@ fn iteralert(
     args: &Args,
     mut message: bool,
     record: &bam::Record,
-) -> (
-    bool,
-    Option<Vec<RangeInclusive<i64>>>,
-    Vec<RangeInclusive<i64>>,
-) {
-    let aligned: Vec<RangeInclusive<i64>> = record.aligned_blocks().map(|[a, b]| a..=b).collect();
+) -> (bool, Option<Vec<Range<i64>>>, Vec<Range<i64>>) {
+    let aligned: Vec<Range<i64>> = record.aligned_blocks().map(|[a, b]| a..b).collect();
     match iterblock(record) {
         Some(a) => {
             if args.force && !message {
@@ -167,7 +163,7 @@ fn iteralert(
             }
             (
                 message,
-                Some(a.into_iter().map(|[a, b]| a..=b).collect()),
+                Some(a.into_iter().map(|[a, b]| a..b).collect()),
                 aligned,
             )
         }
@@ -187,7 +183,7 @@ fn iteralert(
                 message,
                 Some(
                     std::iter::empty::<IterAlignedPairs>()
-                        .map(|_| 0..=0)
+                        .map(|_| 0i64..0)
                         .collect(),
                 ),
                 aligned,
@@ -734,14 +730,14 @@ fn processcounting(
         //If not a match, add to mismatches or misalign (if none is found)
         if !matched
             .iter()
-            .skip_while(|p| p.end() <= i)
-            .take_while(|p| p.start() <= i)
+            .skip_while(|p| p.end <= *i)
+            .take_while(|p| p.start <= *i)
             .any(|s| s.contains(i))
         {
             if aligned
                 .iter()
-                .skip_while(|p| p.end() <= i)
-                .take_while(|p| p.start() <= i)
+                .skip_while(|p| p.end <= *i)
+                .take_while(|p| p.start <= *i)
                 .any(|s| s.contains(i))
             {
                 //Aligns but not correct nt
