@@ -12,7 +12,7 @@ categories = ["science::bioinformatics::sequence-analysis"]
 [dependencies]
 bio-types = "1.0.4"
 bzip2-sys = { version = "0.1.13", features = ["static"] }
-clap = { version = "4.6.4", features = ["derive", "cargo"] }
+clap = { version = "4.6.5", features = ["derive", "cargo"] }
 csv = "1.4.0"
 itertools = "0.15.0"
 #noodles-core = "0.15.0"
@@ -41,7 +41,7 @@ quick-xml = "0.41.0"
 indicatif = "0.18.6"
 chrono = { version = "0.4.45", default-features = false, features = ["now"] }
 rammap-core = { version = "1.1.2", default-features = false, features = ["parallel"] }
-oxidize-pdf = { version = "4.2.1", optional = true }
+oxidize-pdf = { version = "4.2.2", optional = true }
 bam = { version = "0.1.4", optional = true }
 rayon = "1.12.0"
 [lints.rust]

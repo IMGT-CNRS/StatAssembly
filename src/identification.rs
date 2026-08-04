@@ -676,10 +676,10 @@ pub(crate) fn downloadref(
         );
         match sendresult(&REQUESTCLIENT, VQUESTLINK.as_str()) {
             Ok(e) => {
-                match File::create(tempfile.getpath()).map(|mut f| f.write_all(e.as_bytes())) {
+                match tempfile.setfile().map(|mut f| f.write_all(e.as_bytes())) {
                     Ok(Ok(_)) => (),
-                    _ => {
-                        eprintln!("Cannot write refseq in sequence.");
+                    Err(e) | Ok(Err(e)) => {
+                        eprintln!("Cannot write refseq in sequence. Error is {e}.");
                         return None;
                     }
                 }

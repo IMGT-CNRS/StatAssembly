@@ -183,7 +183,7 @@ fn iteralert(
                 message,
                 Some(
                     std::iter::empty::<IterAlignedPairs>()
-                        .map(|_| 0i64..0)
+                        .map(|_| 0..0)
                         .collect(),
                 ),
                 aligned,
@@ -1211,13 +1211,7 @@ fn main() -> ExitCode {
     };
     println!(
         "{} is {} (taxon: {}).",
-        speciesblast
-            .getrank()
-            .chars()
-            .take(1)
-            .map(|p| p.to_ascii_uppercase())
-            .take_while(|_| true)
-            .collect::<String>(),
+        speciesblast.getrank().chars().collect::<String>(),
         speciesblast.getname(),
         speciesblast
             .getid()
