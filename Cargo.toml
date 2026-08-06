@@ -12,7 +12,7 @@ categories = ["science::bioinformatics::sequence-analysis"]
 [dependencies]
 bio-types = "1.0.4"
 bzip2-sys = { version = "0.1.13", features = ["static"] }
-clap = { version = "4.6.5", features = ["derive", "cargo"] }
+clap = { version = "4.6.6", features = ["derive", "cargo"] }
 csv = "1.4.0"
 itertools = "0.15.0"
 #noodles-core = "0.15.0"
@@ -23,7 +23,7 @@ ordered-float = "5.3.0"
 plotters = { version = "0.3.7", features = ["all_series","bitmap_backend"] }
 ranges = "0.4.0"
 #extended-htslib = { version = "*", features = ["bzip2","curl","lzma","static"] }
-extended-htslib = { version = "0.3.0", features = ["bzip2","curl","lzma","static"] }
+extended-htslib = { git = "https://gitea.vpntls.eu/guilhem/extended-rustlib.git", branch = "pileup", features = ["bzip2","curl","lzma","static"] }
 serde = { version = "1.0.229", features = ["serde_derive"] }
 lazy_static = "1.5.0"
 regex = "1.13.1"
@@ -32,7 +32,7 @@ flate2 = "1.1.9"
 reqwest = { version = "0.13.4", features = ["blocking", "multipart", "query", "json","http3"] }
 tempfile = "3.27.0"
 tar = "0.4.46"
-webbrowser = "1.2.2"
+webbrowser = "1.2.4"
 strum = { version = "0.28.0", features = ["strum_macros"] }
 strum_macros = "0.28.0"
 serde_with = "3.21.0"

@@ -15,18 +15,22 @@ use crate::r#struct::AcceptedStatus::Rejected;
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
 use clap::Parser;
+use extended_htslib::bam::pileup::{RustPileupConfig, RustPileups};
+use extended_htslib::faidx;
 use itertools::Itertools;
 use plotters::coord::Shift;
 use plotters::coord::ranged1d::SegmentValue;
 use plotters::style::full_palette::{BROWN_500, GREY_400};
 use rayon::prelude::*;
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::ErrorKind::{InvalidData, InvalidInput};
 use std::num::NonZero;
 use std::ops::{Add, Div, Mul, Range, RangeInclusive};
 use std::path::Path;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::str::FromStr;
 use std::thread::available_parallelism;
 use std::time::Instant;
@@ -201,6 +205,30 @@ fn filterread(args: &Args, record: &bam::Record) -> bool {
     }
     true
 }
+fn getassemblyreaderforpileup(args: &Args) -> io::Result<faidx::Reader> {
+    let (assembly, index) = match (args.assembly.as_ref(), args.assemblyindex.as_ref()) {
+        (Some(a), Some(b)) => (a, Some(b)),
+        (Some(a), None) => (a, None),
+        (None, _) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "No assembly provided",
+            ));
+        }
+    };
+    let elem = match (assembly, index) {
+        (a, Some(b)) => faidx::Reader::from_path_and_index(&a, &b)
+            .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
+        (a, None) => faidx::Reader::from_path(&a)
+            .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
+    };
+    Ok(elem.map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Assembly error, maybe index is missing (create it with samtools faidx): {e}"),
+        )
+    })?)
+}
 fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
     let (assembly, index) = match (args.assembly.as_ref(), args.assemblyindex.as_ref()) {
         (Some(a), Some(b)) => (Some(File::open(a)?), Some(File::open(b)?)),
@@ -224,14 +252,12 @@ fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
             ));
         }
     };
-    let elem = match elem {
-        Ok(d) => Ok(d),
-        Err(e) => Err(io::Error::new(
+    Ok(elem.map_err(|e| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Assembly error, maybe index is missing (create it with samtools faidx): {e}"),
-        )),
-    }?;
-    Ok(elem)
+        )
+    })?)
 }
 //Check we can read BAM file and return the reader with desired threads
 fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
@@ -255,6 +281,11 @@ fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors
     };
     let _ = reader.set_threads(threads.get());
     Ok(reader)
+}
+// Inner vec to vec
+#[must_use]
+fn unmergelocus<T>(initial: Vec<Vec<T>>) -> Vec<T> {
+    initial.into_iter().flatten().collect_vec()
 }
 //Check there is one alternate for one primary.
 fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
@@ -585,6 +616,44 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
     args.geneloc = Some(genenamefile.getpath().to_path_buf());
     Ok(Some(genenamefile))
 }
+fn printpileup(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
+    println!("Generating pileup...");
+    let mut file = File::create(
+        args.pileup
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("Not called without a pileup file")),
+    )?;
+    let elem: Vec<RustPileups> = locus
+        .par_iter()
+        .map(|loc| {
+            let reader = getreaderoffile(&args).map_err(|d| io::Error::new(InvalidInput, d))?;
+            let assemblyreader = match args.assembly.as_ref() {
+                Some(_) => Some(getassemblyreaderforpileup(&args)?),
+                None => None,
+            };
+            let d = RustPileups::new(
+                reader,
+                assemblyreader,
+                bam::FetchDefinition::RegionString(
+                    loc.contig.as_bytes(),
+                    loc.start.getzbasedpos(),
+                    loc.end.getzbasedpos(),
+                ),
+                RustPileupConfig::default(),
+            )
+            .map_err(|d| io::Error::new(InvalidInput, d))?;
+            Ok(d)
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let val = elem.iter().fold(String::new(), |mut acc, f| {
+        acc.push_str(&f.to_string());
+        acc
+    });
+    file.write_all(val.trim().as_bytes())?;
+    file.flush()?;
+    println!("Pileup finished");
+    Ok(())
+}
 fn printnewloc(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
     let file = File::create(args.outdir.join("newloc.csv"))?;
     let mut csv = csv::WriterBuilder::new()
@@ -839,7 +908,7 @@ fn getmeancoveragelengthandphred(args: &Args) -> io::Result<Params> {
     let mean = totalmap / total_mapped;
     let readavg = readvalues / count;
     let phred = phred / count;
-    println!("Calculated in {:.1} s", time.elapsed().as_secs());
+    println!("Calculated in {:.1} s", time.elapsed().as_secs_f32());
     Ok(Params::new(readavg, mean, phred))
 }
 fn getorsetparams(meanpath: &Path, args: &Args) -> io::Result<Params> {
@@ -1111,6 +1180,24 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
     });
     Ok(pos)
 }
+fn ucwords<'a, T>(s: T) -> Cow<'a, str>
+where
+    T: AsRef<str>,
+{
+    let mut initial = String::new();
+    let mut c = s.as_ref().chars();
+    let mut start = false;
+    while let Some(f) = c.next() {
+        if start {
+            start = false;
+            initial.push_str(&f.to_ascii_uppercase().to_string());
+        } else {
+            initial.push_str(&f.to_ascii_lowercase().to_string());
+        }
+    }
+    return Cow::Owned(initial);
+}
+
 fn main() -> ExitCode {
     /*
     let mainpa = env::current_dir().unwrap();
@@ -1211,7 +1298,7 @@ fn main() -> ExitCode {
     };
     println!(
         "{} is {} (taxon: {}).",
-        speciesblast.getrank().chars().collect::<String>(),
+        ucwords(speciesblast.getrank()),
         speciesblast.getname(),
         speciesblast
             .getid()
@@ -1221,9 +1308,9 @@ fn main() -> ExitCode {
         eprintln!("Percent warning must be greater or equal than percent alerting.");
         return ExitCode::FAILURE;
     }
-    let blastpresent = checkifblastpresent();
+    let blastpresent = !args.noblast && checkifblastpresent();
     if !blastpresent {
-        eprintln!("BLAST is not found and won't be used, some analysis won't be performed");
+        eprintln!("BLAST is not found and won't be used, some analysis won't be performed.");
         args.nosubmit = true;
     }
     //Get locus, geneloc and outputdir, print errors if we have
@@ -1316,10 +1403,9 @@ fn main() -> ExitCode {
         endmessage(firstinstant, &args);
         return ExitCode::SUCCESS;
     }
-    let initiallocus = &locus;
     //Group between primary and alternate
-    let mut grouped = match mergelocus(locus.clone()) {
-        Some(g) => g,
+    let mut groupedin = match mergelocus(locus) {
+        Some(g) => Rc::new(g),
         None => {
             eprintln!(
                 "Check order of loci in the file {}.",
@@ -1330,6 +1416,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let oldlocus = Rc::clone(&groupedin);
     let meanpath = outputdir.join(".mean");
     let mean = match getorsetparams(&meanpath, &args) {
         Ok(a) => a.getmean(),
@@ -1339,7 +1426,8 @@ fn main() -> ExitCode {
         }
     };
     let mut locushashresult: HashMap<LocusInfos, Vec<Genehit>> = HashMap::new();
-    for locus in grouped.iter_mut() {
+    let grouped = Rc::make_mut(&mut groupedin);
+    for locus in grouped {
         let haplotype = locus.len();
         let nlocus = locus.clone();
         let floci = match nlocus.first() {
@@ -1614,24 +1702,28 @@ fn main() -> ExitCode {
                 println!("Gene list finished.");
             } else {
                 if !args.nosubmit && args.assembly.is_some() {
-                    let mut data =
-                        match generategenelist(&blastcheck, &speciesblast, initiallocus, &args) {
-                            Ok((Some(a), b)) => {
-                                if let Some(release) = b {
-                                    releaseversion = Some(release);
-                                }
-                                a
+                    let mut data = match generategenelist(
+                        &blastcheck,
+                        &speciesblast,
+                        unmergelocus(oldlocus.to_vec()).as_slice(),
+                        &args,
+                    ) {
+                        Ok((Some(a), b)) => {
+                            if let Some(release) = b {
+                                releaseversion = Some(release);
                             }
-                            Ok((None, _)) => continue,
-                            Err(e) => {
-                                eprintln!(
-                                    "Gene list generation for locus {} has an error: {}.",
-                                    loci.getlocus(),
-                                    e
-                                );
-                                continue;
-                            }
-                        };
+                            a
+                        }
+                        Ok((None, _)) => continue,
+                        Err(e) => {
+                            eprintln!(
+                                "Gene list generation for locus {} has an error: {}.",
+                                loci.getlocus(),
+                                e
+                            );
+                            continue;
+                        }
+                    };
                     let locivec = vec![loci.clone()];
                     positionfiltering(&locivec, &mut data);
                     let result = match (
@@ -1677,11 +1769,18 @@ fn main() -> ExitCode {
         }
         println!("Locus {} is done!", floci.getlocus());
     }
+    drop(oldlocus); //Drop to allow unwrap or clone to actually not clone
+    let locus = unmergelocus(Rc::unwrap_or_clone(groupedin));
     if let Some(light) = &args.outlightbam
         && let Err(e) = generatelightbam(&args, light, getindexforbam(&light).as_ref(), &locus)
     {
         eprintln!("{e}");
         return ExitCode::FAILURE;
+    }
+    if args.pileup.is_some()
+        && let Err(e) = printpileup(&args, &locus)
+    {
+        eprintln!("Error setting pileup: {e}");
     }
     if let Err(e) = printnewloc(&args, &locus) {
         eprintln!("Error setting new locus result: {e}");
@@ -1994,27 +2093,22 @@ fn generategeneinfos(
         }
         let range = record.reference_start()..record.reference_end();
         coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
-        let mut oldref = None;
         let mut skip = 0;
-        'outer: for (_, refpos, cigar) in record.aligned_pairs_full() {
+        'outer: for (_, rrange, cigar) in record.aligned_block_pairs_cigar() {
             if skip >= 1 {
                 skip -= 1;
                 continue;
             }
-            match (cigar, oldref) {
-                (Cigar::Ins(a), Some(old)) => {
-                    match hash.get_mut(&Position::newfromzposition(old)) {
+            if matches!(cigar, Cigar::Ins(_)) {
+                for p in rrange {
+                    match hash.get_mut(&Position::newfromzposition(p)) {
                         Some(d) => d.addinsertion(1),
                         None => {
-                            if old > gene.end.getzbasedpos() {
+                            if p > gene.end.getzbasedpos() {
                                 break 'outer;
                             }
                         } //Outside coverage of gene
                     }
-                    skip = a.saturating_sub(1);
-                }
-                _ => {
-                    oldref = refpos;
                 }
             }
         }

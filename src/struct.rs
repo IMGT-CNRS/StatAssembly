@@ -6,7 +6,7 @@ use plotters::backend::{BitMapBackend, SVGBackend};
 use plotters::coord::Shift;
 use plotters::drawing::DrawingArea;
 use serde::ser::SerializeTupleStruct;
-use serde_with::{DefaultOnError, DisplayFromStr, serde_as};
+use serde_with::serde_as;
 use tempfile::NamedTempFile;
 /*
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
@@ -32,7 +32,7 @@ use std::ops::{Add, Not, RangeInclusive, Sub};
 use std::path::Path;
 use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
-use std::{default, env, fs};
+use std::{env, fs};
 use strum_macros::EnumIter;
 #[derive(Parser, Debug)]
 #[clap(
@@ -101,6 +101,9 @@ pub(crate) struct Args {
     /// Assembly Index file if not default
     #[arg(long, short = 'j')]
     pub(crate) assemblyindex: Option<PathBuf>,
+    /// Do not launch BLAST analysis (required for find analysis)
+    #[arg(long)]
+    pub(crate) noblast: bool,
     /// Query full quality PHRED score (script will be longer to execute)
     #[arg(long)]
     pub(crate) fullquality: bool,
@@ -131,6 +134,9 @@ pub(crate) struct Args {
     ///Output light BAM for submission
     #[arg(short = 'z', long)]
     pub(crate) outlightbam: Option<PathBuf>,
+    /// Output pileup
+    #[arg(short = 'p', long)]
+    pub(crate) pileup: Option<PathBuf>,
     ///Haploid status (only if locuspos is not set)
     #[arg(long, conflicts_with = "locuspos")]
     pub(crate) haploid: bool,
@@ -1394,6 +1400,7 @@ pub trait Blastcalc {
         getpositionfromblast(self.getsubject())
     }
     /// Get chromosome from blast, not position of the element
+    #[allow(dead_code)]
     fn getchromosomefromsubject(&self) -> Option<String> {
         getchromosomefromblast(self.getsubject())
     }
@@ -2000,7 +2007,8 @@ impl LocusInfos {
             &pos.values().collect_vec(),
         )
     }
-    //Get position for alignment
+    /// Get position for alignment
+    #[allow(dead_code)]
     pub(crate) fn fullposition(&self, record: &Blastmatch) -> Option<(Position, Position, Strand)> {
         let (start, end) = if self.strand.isrev() {
             let end =
