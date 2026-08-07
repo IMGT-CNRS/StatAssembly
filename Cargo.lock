@@ -958,7 +958,7 @@ dependencies = [
 [[package]]
 name = "extended-htslib"
 version = "0.4.0"
-source = "git+https://gitea.vpntls.eu/guilhem/extended-rustlib.git?branch=pileup#6fa27184d915d925698f6b7f611f537664d9e63d"
+source = "git+https://gitea.vpntls.eu/guilhem/extended-rustlib.git?branch=pileup#18a8f0e999574a0da9f7378ad0fc62a8f6e00a35"
 dependencies = [
  "bio-types",
  "byteorder",

@@ -25,6 +25,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::ErrorKind::{InvalidData, InvalidInput};
 use std::num::NonZero;
 use std::ops::{Add, Div, Mul, Range, RangeInclusive};
@@ -484,7 +485,7 @@ fn locusposparser(
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique gene name.",
+                "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique locus name.",
                 d.getlocus(),
                 d.gethaplotype(),
                 d.contig,
@@ -597,7 +598,7 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
     } else {
         Filecrea::createfrompath(args.outdir.join("genelist_new.csv"))
     };
-    let genefile = File::create(genenamefile.getpath())?;
+    let genefile = genenamefile.setfile()?;
     let mut csv = csv::WriterBuilder::new()
         .delimiter(b',')
         .has_headers(true)
@@ -1321,7 +1322,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (locus, blastcheck, releaseversion) =
+    let (locus, mut blastcheck, releaseversion) =
         match locusposparser(&args, &speciesblast, blastpresent) {
             Err(f) => {
                 eprintln!("Error locus parser: {f}");
@@ -1636,9 +1637,15 @@ fn main() -> ExitCode {
                 loci.gethaplotype(),
                 loci.status
             );
-            if args.geneloc.is_some() {
+            if args
+                .geneloc
+                .as_ref()
+                .is_some_and(|f| f.try_exists().unwrap_or(false))
+                || blastcheck.as_ref().is_some()
+            {
                 println!("Gene list starting!");
-                let _filepath = if let Some(a) = blastcheck.as_ref()
+                println!("Old File is {:?} old is {:?}", "", args.geneloc);
+                let filepath = if let Some(a) = blastcheck.as_ref()
                     && !args
                         .geneloc
                         .as_ref()
@@ -1654,9 +1661,18 @@ fn main() -> ExitCode {
                 } else {
                     None
                 };
+                println!(
+                    "File is {:?} old is {:?} for {}/{}",
+                    filepath.is_some(),
+                    args.geneloc,
+                    args.geneloc
+                        .as_ref()
+                        .is_some_and(|f| f.try_exists().unwrap_or(false)),
+                    blastcheck.as_ref().is_some()
+                );
                 let (geneli, blasthit) = match genelist(loci, &speciesblast, &args, false) {
                     Err(e) => {
-                        eprintln!("Cannot create gene list. Error is {e}");
+                        eprintln!("Cannot extract gene list. Error is {e}");
                         return ExitCode::FAILURE;
                     }
                     Ok(b) if b.is_empty() => {
@@ -1699,6 +1715,7 @@ fn main() -> ExitCode {
                         &mut locushashresult,
                     );
                 }
+                drop(filepath); //Keep filecreat open
                 println!("Gene list finished.");
             } else {
                 if !args.nosubmit && args.assembly.is_some() {
@@ -1724,6 +1741,9 @@ fn main() -> ExitCode {
                             continue;
                         }
                     };
+                    if blastcheck.is_none() {
+                        blastcheck = Some(data.clone());
+                    }
                     let locivec = vec![loci.clone()];
                     positionfiltering(&locivec, &mut data);
                     let result = match (
@@ -1999,10 +2019,11 @@ fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
         println!(
             "Some genes has the same name on the same chromosome. Underscore (_) would be added"
         );
-        let mut count = 0;
+        let mut count: HashMap<Genename, usize> = HashMap::new();
         for name in genes.iter_mut() {
             name.gene.name = if finish.iter().any(|g| g.gene.eq(&name.gene)) {
-                count += 1;
+                let count = count.entry(name.gene.clone()).or_insert(0);
+                *count += 1;
                 format!("{}_{}", name.gene.name, count)
                     .replace(",", "_")
                     .trim()
