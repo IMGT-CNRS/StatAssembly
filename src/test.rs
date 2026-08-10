@@ -2,6 +2,7 @@
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
+        fs,
         io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
         path::PathBuf,
         thread::sleep,
@@ -9,17 +10,20 @@ mod tests {
     };
 
     use crate::{
-        extractgenelist, generategeneinfos, getorsetparams,
+        extractgenelist, generategeneinfos, getorsetparams, getreaderoffile,
         identification::{sendresult, sendresultcompressed},
         locusposparser, posread,
-        r#struct::{Args, Filecrea, HashMapinfo, Species, SpeciesError},
+        r#struct::{
+            Args, Filecrea, Genename, Haplotype::Primary, HashMapinfo, LocusHaplo, Species,
+            SpeciesError,
+        },
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
             generatelightbam, generatesequence, generatesequenceraw, getprogressbarclassic,
         },
     };
     use clap::Parser;
-    use extended_htslib::bam::{self, Read};
+    use extended_htslib::bam::{self, FetchDefinition, Read};
     use itertools::Itertools;
     use tempfile::{NamedTempFile, TempDir};
     #[test]
@@ -86,7 +90,7 @@ mod tests {
             testo.path().to_str().unwrap(),
             "analyze",
         ];
-        let human = Species::new("Homo sapiens").unwrap();
+        let human = Species::newunchecked("Homo sapiens");
         let args4 = Args::try_parse_from(fake_args)
             .map_err(|f| f.to_string())
             .unwrap();
@@ -153,13 +157,8 @@ mod tests {
             )
             .unwrap();
         let mut data: Vec<HashMapinfo> = Vec::with_capacity(5000);
-        let mut count = 0;
-        for line in val.deserialize() {
-            count += 1;
+        for line in val.deserialize().take(5000) {
             data.push(line.unwrap());
-            if count >= 5000 {
-                break;
-            }
         }
         assert_eq!(data.iter().nth(3069).unwrap().qual, Some(80), "Issue");
         assert!(data.iter().nth(1022).unwrap().qual.is_none(), "Issue");
@@ -176,6 +175,7 @@ mod tests {
             "example_files/CHM13v2.0.bam",
             "-a",
             "example_files/assembly.fasta",
+            "--totalread",
             "-l",
             "example_files/CHM13v2.0loc.csv",
             "-s",
@@ -191,7 +191,7 @@ mod tests {
         let args4 = Args::try_parse_from(fake_args)
             .map_err(|f| f.to_string())
             .unwrap();
-        let spec = Species::new(&args4.species).unwrap();
+        let spec = Species::newunchecked(&args4.species);
         let (mut result, _blast, _release) = match locusposparser(&args4, &spec, true) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
@@ -199,10 +199,81 @@ mod tests {
         let meanpath = PathBuf::from("example_files/results").join(".mean");
         assert!(meanpath.exists(), "No .mean in example_files");
         let mean = getorsetparams(&meanpath, &args4).unwrap();
+        let mut done = false;
         result.iter_mut().for_each(|p| {
             let pos = posread(&args4, &p).unwrap();
+            if p.getlocushaplo() == &LocusHaplo::new(crate::r#struct::Locus::IGK, Primary) {
+                let mut elem = pos.iter().skip(1675043).take(11).map(|(_, b)| b);
+                let first = elem.next().unwrap();
+                let file = Filecrea::createtemp(None::<PathBuf>, None::<PathBuf>).unwrap();
+                let mut csv = csv::WriterBuilder::new()
+                    .comment(Some(b'#'))
+                    .has_headers(false)
+                    .delimiter(b'\t')
+                    .flexible(false)
+                    .from_path(file.getpath())
+                    .unwrap();
+                for record in elem {
+                    csv.serialize(record).unwrap();
+                }
+                csv.flush().unwrap();
+                let text = fs::read_to_string(file.getpath()).unwrap();
+                assert_eq!(
+                    text.to_string().trim(),
+                    "269534	90531414	49	0	0	0.0013	49	34	0	83	0	0	NC	0.0	0.0
+269533	90531415	49	0	0	0.0013	49	34	0	83	0	0	NC	0.0	0.0
+269532	90531416	49	0	0	0.0013	49	34	0	83	0	0	NC	0.0	0.0
+269531	90531417	49	0	0	0.0013	49	34	0	83	0	0	NC	0.0	0.0
+269530	90531418	50	0	0	0.0013	49	34	0	84	0	0	NC	0.02	0.0
+269529	90531419	50	0	0	0.0013	50	34	0	84	0	0	NC	0.0	0.0
+269528	90531420	50	0	0	0.0013	50	34	0	84	0	0	NC	0.0	0.0
+269527	90531421	50	0	0	0.0013	50	34	0	84	0	0	NC	0.0	0.0
+269526	90531422	50	0	0	0.0013	50	34	0	84	0	0	NC	0.0	0.0
+269525	90531423	50	0	0	0.0013	50	34	0	84	0	0	NC	0.0	0.0",
+                    "Invalid posresult"
+                );
+                let mut reader = getreaderoffile(&args4).unwrap();
+                reader
+                    .fetch(FetchDefinition::RegionString(
+                        p.getcontig().to_string().as_bytes(),
+                        first.position.getzbasedpos(),
+                        first.position.getobasedpos(),
+                    ))
+                    .unwrap();
+                let (mut map60, mut map1, mut map0, mut total, mut sup, mut secondary) =
+                    (0, 0, 0, 0, 0, 0);
+                for record in reader.records().filter_map(Result::ok) {
+                    match (
+                        record.is_primary(),
+                        record.is_secondary(),
+                        record.is_supplementary(),
+                        record.mapq(),
+                    ) {
+                        (true, .., 60) => map60 += 1,
+                        (true, .., 1..=59) => map1 += 1,
+                        (true, .., 0) => map0 += 1,
+                        (false, true, ..) => secondary += 1,
+                        (false, false, true, _) => sup += 1,
+                        _ => (),
+                    }
+                    total += 1;
+                }
+                let pos = pos
+                    .iter()
+                    .find(|(_, value)| value.position == first.position)
+                    .unwrap()
+                    .1;
+                assert_eq!(map60, pos.map60);
+                assert_eq!(map1, pos.map1);
+                assert_eq!(map0, pos.map0);
+                assert_eq!(total, pos.total);
+                assert_eq!(secondary, pos.secondary);
+                assert_eq!(sup, pos.supplementary);
+                done = true;
+            }
             p.setstatus(mean.mean, &args4, &pos);
         });
+        assert!(done, "Haplotype IGK not found");
         assert!(
             result.iter().all(|f| f.status.getstatus().isvalid()),
             "One locus is not valid"
@@ -256,7 +327,7 @@ mod tests {
         let args4 = Args::try_parse_from(fake_args)
             .map_err(|f| f.to_string())
             .unwrap();
-        let spec = Species::new(&args4.species).unwrap();
+        let spec = Species::newunchecked(&args4.species);
         let (locus, _blast, _release) = match locusposparser(&args4, &spec, true) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
@@ -308,7 +379,7 @@ mod tests {
         let args4 = Args::try_parse_from(fake_args)
             .map_err(|f| f.to_string())
             .unwrap();
-        let spec = Species::new(&args4.species).unwrap();
+        let spec = Species::newunchecked(&args4.species);
         let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
@@ -319,15 +390,34 @@ mod tests {
         );
         let progress = getprogressbarclassic(result.len().try_into().unwrap_or_default()).unwrap();
         let mut i = 0;
+        let mut done = false;
         for loci in result {
             let genelist = extractgenelist(&args4, &loci, false).unwrap();
             for mut gene in genelist {
                 let v = generategeneinfos(&args4, &mut gene).unwrap().0;
+                if gene.gene
+                    == Genename::new("IGHV(III)-82*01", Some("V-REGION".to_string())).unwrap()
+                {
+                    let info = "IGHV(III)-82*01_V-REGION	NC_060938.1	Minus	101154845	101155136	292	47.242	35	34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D2I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D1I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(32=0X2D0I)-34(33=0X1D2I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D1I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D42I)-34(34=0X0D0I)-34(34=0X0D1I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D1I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D2I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D4I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D6I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D11I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=1X0D0I)-34(34=0X0D1I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D1I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=1X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(32=0X2D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(33=0X1D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(34=0X0D0I)-34(32=0X2D0I)-34(33=0X1D0I)-34(34=0X0D0I)-35(35=0X0D0I)-35(34=0X1D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(34=0X1D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(34=0X1D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(34=0X1D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(34=0X1D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)-35(35=0X0D0I)	34	24	24	23.6	292	Rejected because A warning or suspicious position at position 101155044 (warning)";
+                    let file = Filecrea::createtemp(None::<PathBuf>, None::<PathBuf>).unwrap();
+                    let mut csv = csv::WriterBuilder::new()
+                        .comment(Some(b'#'))
+                        .has_headers(false)
+                        .delimiter(b'\t')
+                        .flexible(false)
+                        .from_path(file.getpath())
+                        .unwrap();
+                    csv.serialize(&v).unwrap();
+                    csv.flush().unwrap();
+                    assert_eq!(fs::read_to_string(file.getpath()).unwrap().trim(), info);
+                    done = true;
+                }
                 assert!(v.status.status.isvalid(), "Gene {} is not valid", gene.gene);
             }
             i += 1;
             progress.set_position(i);
         }
         progress.with_finish(indicatif::ProgressFinish::AndClear);
+        assert!(done, "IGHV(III)-82 not analyzed");
     }
 }

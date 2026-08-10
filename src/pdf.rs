@@ -25,7 +25,7 @@ pub(crate) fn generatepdf(
         .map(|a| {
             let mut b = Vec::new();
             b.push(a.locusinfo.to_string());
-            b.push(a.contig.to_string());
+            b.push(a.getcontig().to_string());
             b.push(a.start.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.end.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.complement.to_string());

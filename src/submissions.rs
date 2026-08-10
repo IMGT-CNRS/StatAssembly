@@ -264,7 +264,7 @@ where
         locus.iter().any(|f| {
             let range: RangeInclusive<usize> = f.start.getobasedpos().try_into().unwrap_or_default()
                 ..=f.end.getobasedpos().try_into().unwrap_or_default();
-            f.contig.as_str() == p.getsubject()
+            f.getcontig().as_str() == p.getsubject()
                 && checkoverlap(&(p.getpos().0..=p.getpos().1), &range)
         })
     })
@@ -1192,7 +1192,7 @@ pub(crate) fn submit(
     motifs.iter_mut().for_each(|p| {
         if let Some(find) = locus
             .iter()
-            .find(|k| format!("{}:{}", k.getlocus(), k.contig) == p.sseqid)
+            .find(|k| format!("{}:{}", k.getlocus(), k.getcontig()) == p.sseqid)
             && let Some((newstart, newend, newcomplement)) = find.positioninlocus(
                 &Position::newfromoposition(p.sstart.try_into().unwrap_or_default()),
                 &Position::newfromoposition(p.send.try_into().unwrap_or_default()),
@@ -1210,7 +1210,7 @@ pub(crate) fn submit(
         let db = hit.clone();
         let chromo = db.getgeneinfo().getchromosome();
         if let Some(p) = hit.hit.as_mut()
-            && let Some(find) = locus.iter().find(|fi| fi.contig == chromo)
+            && let Some(find) = locus.iter().find(|fi| fi.getcontig() == chromo)
             && let Some((start, end, complement)) = p.getpositionfromsubject()
             && let Some((newstart, newend, newcomplement)) = find.locusinposition(
                 &start,
@@ -1407,7 +1407,7 @@ pub(crate) fn generatesequenceraw(
                 .extractsequence(&mut assembly)
                 .unwrap_or("Sequence is unavailable".to_string());
             fastawriter.write(
-                &format!("{}:{}", list.getlocus(), list.contig),
+                &format!("{}:{}", list.getlocus(), list.getcontig()),
                 Some(&format!(
                     "{}:{}-{}/{}",
                     list.getlocushaplo(),
@@ -1502,7 +1502,7 @@ where
             };
             if bam
                 .fetch((
-                    f.contig.as_bytes(),
+                    f.getcontig().as_bytes(),
                     f.start.getzbasedpos(),
                     f.end.getzbasedpos().saturating_add(1),
                 ))

@@ -9,12 +9,11 @@ Made by: Guilhem Zeitoun
 use crate::identification::{downloadref, locusallposition};
 #[cfg(feature = "pdf")]
 use crate::pdf::generatepdf;
-#[cfg(feature = "bam")]
-use crate::pilebam::pileup;
 use crate::r#struct::AcceptedStatus::Rejected;
 use bio::io::fasta;
 use bio_types::sequence::SequenceRead;
 use clap::Parser;
+#[cfg(feature = "pileup")]
 use extended_htslib::bam::pileup::{RustPileupConfig, RustPileups};
 use extended_htslib::faidx;
 use itertools::Itertools;
@@ -25,6 +24,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
+#[cfg(feature = "pileup")]
 use std::hash::Hash;
 use std::io::ErrorKind::{InvalidData, InvalidInput};
 use std::num::NonZero;
@@ -67,8 +67,6 @@ use std::{
 mod identification;
 #[cfg(feature = "pdf")]
 mod pdf;
-#[cfg(feature = "bam")]
-mod pilebam;
 mod r#struct;
 mod submissions;
 #[cfg(test)]
@@ -91,8 +89,8 @@ const BORNES: usize = 10_000;
 const WARNINGPERC: u8 = 80;
 const ALERTPERC: u8 = 60;
 const SOFTCLIPRATIO: f32 = 0.4;
-pub(crate) const DELIMITERFASTA: char = '/';
-pub(crate) const LOCUSSEPARATOR: usize = 1_000_000;
+const DELIMITERFASTA: char = '/';
+const LOCUSSEPARATOR: usize = 1_000_000;
 lazy_static! {
     static ref fontstyle: (&'static str, u32, &'static RGBColor) = {
         let args = Args::parse();
@@ -206,30 +204,6 @@ fn filterread(args: &Args, record: &bam::Record) -> bool {
     }
     true
 }
-fn getassemblyreaderforpileup(args: &Args) -> io::Result<faidx::Reader> {
-    let (assembly, index) = match (args.assembly.as_ref(), args.assemblyindex.as_ref()) {
-        (Some(a), Some(b)) => (a, Some(b)),
-        (Some(a), None) => (a, None),
-        (None, _) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "No assembly provided",
-            ));
-        }
-    };
-    let elem = match (assembly, index) {
-        (a, Some(b)) => faidx::Reader::from_path_and_index(&a, &b)
-            .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
-        (a, None) => faidx::Reader::from_path(&a)
-            .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
-    };
-    Ok(elem.map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Assembly error, maybe index is missing (create it with samtools faidx): {e}"),
-        )
-    })?)
-}
 fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
     let (assembly, index) = match (args.assembly.as_ref(), args.assemblyindex.as_ref()) {
         (Some(a), Some(b)) => (Some(File::open(a)?), Some(File::open(b)?)),
@@ -245,6 +219,15 @@ fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
         (_, Some(a), Some(b)) => fasta::IndexedReader::new(a, b)
             .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
         (Some(p), ..) => fasta::IndexedReader::from_file(&p)
+            .or_else(|_| {
+                println!("Creating index for assembly.fasta");
+                faidx::build(&p).map_err(|e| bio::io::fasta::ReadError::Open {
+                    //Try to build index if not present
+                    path: p.clone(),
+                    source: io::Error::new(io::ErrorKind::InvalidInput, e.to_string()),
+                })?;
+                fasta::IndexedReader::from_file(&p)
+            })
             .map_err(|p| io::Error::new(io::ErrorKind::InvalidInput, p.to_string())),
         _ => {
             return Err(io::Error::new(
@@ -262,9 +245,21 @@ fn getassemblyreader(args: &Args) -> io::Result<fasta::IndexedReader<File>> {
 }
 //Check we can read BAM file and return the reader with desired threads
 fn getreaderoffile(args: &Args) -> Result<IndexedReader, extended_htslib::errors::Error> {
+    let threads: u32 = match args.threads {
+        0 => available_parallelism()
+            .unwrap_or(NonZero::new(1).unwrap())
+            .get()
+            .try_into()
+            .unwrap_or(1),
+        n => n.try_into().unwrap_or(1),
+    };
     let mut reader = match (&args.file, &args.index) {
         (Some(file), Some(d)) => bam::IndexedReader::from_path_and_index(file, d),
-        (Some(file), _) => bam::IndexedReader::from_path(file),
+        (Some(file), _) => bam::IndexedReader::from_path(file).or_else(|_| {
+            eprintln!("Creating index for BAM file");
+            bam::index::build(file, None, bam::index::Type::Csi(2_u32.pow(14)), threads)?;
+            bam::IndexedReader::from_path(file)
+        }),
         _ => {
             return Err(extended_htslib::errors::Error::FileSeek);
         }
@@ -339,14 +334,14 @@ fn mergelocus(mut locus: Vec<LocusInfos>) -> Option<Vec<Vec<LocusInfos>>> {
     Some(elem)
 }
 //Get number of mismatches for the record (x 10_000 to get as an integer)
-fn getglobalmismatch(args: &Args, record: &bam::Record) -> usize {
+fn getglobalmismatch(record: &bam::Record) -> usize {
     let length = if record.seq_len() != 0 {
         record.seq_len()
     } else {
         1
     };
-    match (args.totalread, record.aux(b"NM")) {
-        (true, Ok(extended_htslib::bam::record::Aux::U8(d))) => {
+    match record.aux(b"NM") {
+        Ok(extended_htslib::bam::record::Aux::U8(d)) => {
             if d == 0 {
                 0
             } else {
@@ -488,7 +483,7 @@ fn locusposparser(
                 "The locus {} ({}) on region {}:{}-{} appears more than once. Please provide a unique locus name.",
                 d.getlocus(),
                 d.gethaplotype(),
-                d.contig,
+                d.getcontig(),
                 d.start.getobasedpos(),
                 d.end.getobasedpos()
             ),
@@ -515,7 +510,7 @@ fn locusposparser(
                 "The region {}-{} ({}) from {} is more than {} bp (actually: {}) and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
                 big.start.getobasedpos(),
                 big.end.getobasedpos(),
-                big.contig,
+                big.getcontig(),
                 big.getlocus(),
                 ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
                 big.getlength().to_formatted_string(&Locale::en),
@@ -591,8 +586,13 @@ fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
         .collect()
 }
 fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>> {
-    let mut finish: Vec<GeneInfos> = getgeneinfos(data);
-    checkandcorrectgenelistduplicate(&mut finish);
+    let mut genelist = getgeneinfos(data);
+    checkandcorrectgenelistduplicate(&mut genelist);
+    let finish: io::Result<Vec<GeneInfosFinish>> = genelist
+        .into_iter()
+        .map(|mut d| generategeneinfos(args, &mut d).map(|(a, b)| a))
+        .collect();
+    let finish = finish?;
     let genenamefile = if tmp {
         Filecrea::createtemp(None, Some("genelist_new.csv"))?
     } else {
@@ -617,6 +617,7 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
     args.geneloc = Some(genenamefile.getpath().to_path_buf());
     Ok(Some(genenamefile))
 }
+#[cfg(feature = "pileup")]
 fn printpileup(args: &Args, locus: &[LocusInfos]) -> io::Result<()> {
     println!("Generating pileup...");
     let mut file = File::create(
@@ -765,7 +766,7 @@ fn processcounting(
                 .supplementary
                 .push(String::from_utf8_lossy(p.qname()).to_string()); */
             }
-            return Ok(false);
+            continue;
         }
         let i = &i.getzbasedpos();
         let _time = Instant::now();
@@ -782,7 +783,10 @@ fn processcounting(
                 return Ok(false);
             }
         };
-        targeting.globalmismatch += getglobalmismatch(args, record);
+        targeting.globalmismatch = match (args.totalread, getglobalmismatch(record)) {
+            (false, _) => None,
+            (true, a) => Some(targeting.globalmismatch.unwrap_or_default() + a),
+        };
         /* match record.mapq() {
             0 => (),
             _ => targeting.globalmismatch += getglobalmismatch(args, record),
@@ -1065,7 +1069,7 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
     if loci.fetch(&mut reader).is_err() {
         eprintln!(
             "The region {}:{}-{} cannot be found, skipped.",
-            loci.contig,
+            loci.getcontig(),
             loci.start.getobasedpos(),
             loci.end.getobasedpos()
         );
@@ -1147,7 +1151,7 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
     if nocount {
         eprintln!(
             "The region {}:{}-{} has no data, skipped.",
-            loci.contig,
+            loci.getcontig(),
             loci.start.getobasedpos(),
             loci.end.getobasedpos()
         );
@@ -1174,10 +1178,15 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
                 (p.psoftclips * 100f32 / max(p.getfullsecondary().unwrap_or(1), 1) as f32).round()
                     / 100f32
         }
-        p.globalmismatch /= max(
-            std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
-            1,
-        );
+        p.globalmismatch = match p.globalmismatch {
+            Some(a) => Some(
+                a / max(
+                    std::convert::TryInto::<usize>::try_into(p.gettotalmap()).unwrap_or(1),
+                    1,
+                ),
+            ),
+            None => None,
+        };
     });
     Ok(pos)
 }
@@ -1401,7 +1410,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
-        endmessage(firstinstant, &args);
+        endmessage(&firstinstant, &args);
         return ExitCode::SUCCESS;
     }
     //Group between primary and alternate
@@ -1467,7 +1476,7 @@ fn main() -> ExitCode {
             givename(
                 &speciesblast,
                 loc.getlocus(),
-                &loc.contig,
+                &loc.getcontig(),
                 haplotypebool,
                 &format!("readresult.{}", if args.svg { "svg" } else { "png" }),
                 true,
@@ -1478,7 +1487,7 @@ fn main() -> ExitCode {
             givename(
                 &speciesblast,
                 loc.getlocus(),
-                &loc.contig,
+                &loc.getcontig(),
                 haplotypebool,
                 &format!("mismatchresult.{}", if args.svg { "svg" } else { "png" }),
                 true,
@@ -1644,7 +1653,6 @@ fn main() -> ExitCode {
                 || blastcheck.as_ref().is_some()
             {
                 println!("Gene list starting!");
-                println!("Old File is {:?} old is {:?}", "", args.geneloc);
                 let filepath = if let Some(a) = blastcheck.as_ref()
                     && !args
                         .geneloc
@@ -1661,15 +1669,6 @@ fn main() -> ExitCode {
                 } else {
                     None
                 };
-                println!(
-                    "File is {:?} old is {:?} for {}/{}",
-                    filepath.is_some(),
-                    args.geneloc,
-                    args.geneloc
-                        .as_ref()
-                        .is_some_and(|f| f.try_exists().unwrap_or(false)),
-                    blastcheck.as_ref().is_some()
-                );
                 let (geneli, blasthit) = match genelist(loci, &speciesblast, &args, false) {
                     Err(e) => {
                         eprintln!("Cannot extract gene list. Error is {e}");
@@ -1782,7 +1781,7 @@ fn main() -> ExitCode {
                     eprintln!("No assembly to check gene list.");
                 }
             }
-            #[cfg(feature = "bam")]
+            #[cfg(feature = "pileup")]
             if let Err(e) = pileup(loci, &args) {
                 eprintln!("Cannot make pileup. Error is {e}");
             }
@@ -1797,6 +1796,7 @@ fn main() -> ExitCode {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
+    #[cfg(feature = "pileup")]
     if args.pileup.is_some()
         && let Err(e) = printpileup(&args, &locus)
     {
@@ -1844,7 +1844,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    endmessage(firstinstant, &args);
+    endmessage(&firstinstant, &args);
     ExitCode::SUCCESS
 }
 fn locushash(
@@ -1860,7 +1860,7 @@ fn locushash(
         locushashresult.insert(loci.clone(), generation);
     }
 }
-fn endmessage(firstinstant: Instant, args: &Args) {
+fn endmessage(firstinstant: &Instant, args: &Args) {
     println!(
         "{} (version {}) done sucessfully in {:.3} seconds. Output files are located in {}.",
         NAME.as_str(),
@@ -1893,6 +1893,7 @@ where
     csv.flush()?;
     Ok(())
 }
+// Print only validated alleles
 fn printvalidatedalleles<T>(
     args: &Args,
     release: Option<T>,
@@ -1925,25 +1926,29 @@ where
     if args.assembly.is_none() {
         csv.write_record(&["No assembly provided, no hits with IMGT/GENE-DB"])?;
     }
-    for (locus, elem) in locushash {
-        for (blast, hit) in elem.iter().filter_map(|p| {
-            if let Some(a) = p.gethit() {
-                Some((&p.geneinfo, Some(a)))
-            } else {
-                Some((&p.geneinfo, None))
-            }
-        }) {
+    for (locus, elem) in locushash.iter() {
+        for (geneinfo, hit) in elem
+            .iter()
+            .filter(|a| a.getstatus().getstatus().isvalid())
+            .filter_map(|p| {
+                if let Some(a) = p.gethit() {
+                    Some((&p.geneinfo, Some(a)))
+                } else {
+                    Some((&p.geneinfo, None))
+                }
+            })
+        {
             csv.write_record(&[
-                format!("{}", blast.gene).as_str(),
+                format!("{}", geneinfo.gene).as_str(),
                 format!(
                     "{}-{}",
-                    blast.getstart().getobasedpos(),
-                    blast.getend().getobasedpos()
+                    geneinfo.getstart().getobasedpos(),
+                    geneinfo.getend().getobasedpos()
                 )
                 .as_str(),
-                blast.getchromosome(),
+                geneinfo.getchromosome(),
                 locus.getlocushaplo().to_string().as_str(),
-                blast.getstrand().to_string().as_str(),
+                geneinfo.getstrand().to_string().as_str(),
                 hit.map_or("No hits", |f| f.getallelename()),
                 hit.map_or("Unknown".to_string(), |f| f.getidentity().to_string())
                     .as_str(),
@@ -2045,7 +2050,7 @@ fn extractgenelist(
     //Retain genes inside the correct loci
     if !full {
         genes.retain(|gene| {
-            gene.chromosome == loci.contig
+            &gene.chromosome == loci.getcontig()
                 && (loci.start.getobasedpos()..=loci.end.getobasedpos())
                     .contains(&gene.start.getobasedpos())
                 && (loci.start.getobasedpos()..=loci.end.getobasedpos())
@@ -2294,7 +2299,7 @@ fn genelist(
     let outputfile = outputdir.join(givename(
         species,
         loci.getlocus(),
-        &loci.contig,
+        &loci.getcontig(),
         loci.gethaplotype().isprimary(),
         "geneanalysis.csv",
         false,
@@ -2368,7 +2373,7 @@ fn printbreaks(
     let mut breakfile = File::create(outputdir.join(givename(
         species,
         loci.getlocus(),
-        &loci.contig,
+        &loci.getcontig(),
         loci.gethaplotype().isprimary(),
         "break.txt",
         false,
@@ -2395,9 +2400,9 @@ fn printbreaks(
                     prev_num = &finalbreak;
                 }
                 if f == prev_num {
-                    acc.push_str(&format!("{}:{}\n", loci.contig, f));
+                    acc.push_str(&format!("{}:{}\n", loci.getcontig(), f));
                 } else {
-                    acc.push_str(&format!("{}:{}..{}\n", loci.contig, f, prev_num));
+                    acc.push_str(&format!("{}:{}..{}\n", loci.getcontig(), f, prev_num));
                 }
                 if *num != finalpos && *num != finalbreak {
                     first = Some(num);
@@ -2412,7 +2417,7 @@ fn printbreaks(
         acc
     });
     if let Some(d) = first {
-        acc.push_str(&format!("{}:{}\n", loci.contig, d + 1));
+        acc.push_str(&format!("{}:{}\n", loci.getcontig(), d + 1));
     }
     breakfile.write_all(acc.trim().as_bytes())?;
     breakfile.flush()?;
@@ -2428,7 +2433,7 @@ fn printpossus(
     let outputfile = outputdir.join(givename(
         species,
         loci.getlocus(),
-        &loci.contig,
+        &loci.getcontig(),
         loci.gethaplotype().isprimary(),
         "allele_confidence.csv",
         false,
@@ -2845,7 +2850,7 @@ fn createcsv(
     let outputfile = outputdir.join(givename(
         species,
         loci.getlocus(),
-        &loci.contig,
+        &loci.getcontig(),
         loci.gethaplotype().isprimary(),
         "positionresult.csv",
         false,
@@ -2913,7 +2918,7 @@ where
             format!(
                 "Mismatches rate and quality on the locus {} ({}-{})",
                 loci.getlocus(),
-                loci.contig,
+                loci.getcontig(),
                 loci.gethaplotype()
             ),
             ("sans-serif", 28),
@@ -3017,7 +3022,7 @@ where
     if let Some(bottom) = bottom {
         let max = pos
             .iter()
-            .map(|f| f.globalmismatch)
+            .map(|f| f.globalmismatch.unwrap_or_default())
             .max()
             .unwrap_or_default();
         let mut chart = ChartBuilder::on(&bottom)
@@ -3058,7 +3063,8 @@ where
         chart
             .draw_series(AreaSeries::new(
                 pos.iter().filter_map(|p| {
-                    let score = p.globalmismatch as f64 / GLOBALMISMATCHFLOATING as f64;
+                    let score =
+                        p.globalmismatch.unwrap_or_default() as f64 / GLOBALMISMATCHFLOATING as f64;
                     if score.is_finite() && score != 0.0 && p.gettotalmap() > 0 {
                         Some((p.position.getobasedpos(), score))
                     } else {
@@ -3332,7 +3338,7 @@ where
             format!(
                 "Reads mapping quality over the locus {} ({}-{})",
                 loci.getlocus(),
-                loci.contig,
+                loci.getcontig(),
                 loci.gethaplotype()
             ),
             ("sans-serif", 28, &colorgene),

@@ -555,6 +555,16 @@ impl Species {
     pub(crate) fn getrank(&self) -> &str {
         &self.rank
     }
+    pub(crate) fn newunchecked<T>(species: T) -> Self
+    where
+        T: AsRef<str>,
+    {
+        Self {
+            rank: "Species".to_string(),
+            name: species.as_ref().to_string(),
+            id: None,
+        }
+    }
     pub(crate) fn new<T>(species: T) -> Result<Self, SpeciesError>
     where
         T: AsRef<str>,
@@ -1965,6 +1975,26 @@ impl GenesList for GeneInfos {
     }
 }
 impl LocusInfos {
+    pub(crate) fn new(
+        locus: Locus,
+        haplotype: Haplotype,
+        contig: String,
+        start: Position,
+        end: Position,
+        strand: Strand,
+    ) -> Self {
+        Self {
+            locusinfo: LocusHaplo::new(locus, haplotype),
+            contig,
+            start,
+            end,
+            strand,
+            status: OkStatus::default(),
+        }
+    }
+    pub(crate) fn getcontig(&self) -> &String {
+        &self.contig
+    }
     pub(crate) fn getlocus(&self) -> &Locus {
         &self.locusinfo.locus
     }
@@ -1973,7 +2003,7 @@ impl LocusInfos {
         reader: &mut IndexedReader,
     ) -> Result<(), extended_htslib::errors::Error> {
         reader.fetch((
-            &self.contig,
+            &self.getcontig(),
             self.start.getzbasedpos(),
             self.end.getobasedpos(),
         ))
@@ -1990,7 +2020,7 @@ impl LocusInfos {
         read.index
             .sequences()
             .into_iter()
-            .find(|p| p.name == self.contig)
+            .find(|p| &p.name == self.getcontig())
             .map(|b| Position::newfromoposition(b.len.try_into().unwrap_or(i64::MAX)))
     }
     pub(crate) fn setstatus(
@@ -2113,7 +2143,7 @@ impl LocusInfos {
     ) -> io::Result<String> {
         let fake = GeneInfos {
             gene: Genename::new("FAKE", None)?,
-            chromosome: self.contig.clone(),
+            chromosome: self.getcontig().clone(),
             start: self.start,
             end: self.end,
             strand: self.strand.clone(),
@@ -2551,25 +2581,6 @@ impl Serialize for LocusInfos {
         se.end()
     }
 }
-impl LocusInfos {
-    pub(crate) fn new(
-        locus: Locus,
-        haplotype: Haplotype,
-        contig: String,
-        start: Position,
-        end: Position,
-        strand: Strand,
-    ) -> Self {
-        Self {
-            locusinfo: LocusHaplo::new(locus, haplotype),
-            contig,
-            start,
-            end,
-            strand,
-            status: OkStatus::default(),
-        }
-    }
-}
 impl Ord for LocusInfos {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.locusinfo.cmp(&other.locusinfo)
@@ -2591,7 +2602,7 @@ pub(crate) struct HashMapinfo {
         serialize_with = "globalmismatch",
         deserialize_with = "globaldemismatch"
     )]
-    pub(crate) globalmismatch: usize,
+    pub(crate) globalmismatch: Option<usize>,
     pub(crate) overlaps: usize,
     pub(crate) secondary: usize,
     pub(crate) supplementary: usize,
@@ -2684,7 +2695,7 @@ impl HashMapinfo {
             map60: usize::default(),
             map1: usize::default(),
             map0: usize::default(),
-            globalmismatch: usize::default(),
+            globalmismatch: None,
             secondary: usize::default(),
             supplementary: usize::default(),
             overlaps: usize::default(),
@@ -2706,7 +2717,7 @@ impl HashMapinfo {
         secondary: usize,
         supplementary: usize,
         total: usize,
-        globalmismatch: usize,
+        globalmismatch: Option<usize>,
         overlaps: usize,
         mismatches: usize,
         misalign: usize,
@@ -2733,14 +2744,19 @@ impl HashMapinfo {
         }
     }
 }
-pub(crate) fn globalmismatch<S>(num: &usize, s: S) -> Result<S::Ok, S::Error>
+fn globalmismatch<S>(num: &Option<usize>, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    let val = *num as f32 / crate::GLOBALMISMATCHFLOATING as f32;
-    s.collect_str(&format!("{val}"))
+    match num {
+        Some(num) => {
+            let val = *num as f32 / crate::GLOBALMISMATCHFLOATING as f32;
+            s.collect_str(&format!("{val}"))
+        }
+        _ => s.serialize_str("NC"),
+    }
 }
-fn globaldemismatch<'a, S>(s: S) -> Result<usize, S::Error>
+fn globaldemismatch<'a, S>(s: S) -> Result<Option<usize>, S::Error>
 where
     S: serde::Deserializer<'a>,
 {
@@ -2748,7 +2764,10 @@ where
     match f.parse::<f32>() {
         Ok(a) => {
             let val = a * (crate::GLOBALMISMATCHFLOATING as f32);
-            Ok(val.round() as usize)
+            Ok(Some(val.round() as usize))
+        }
+        Err(_) if f.trim().eq_ignore_ascii_case("NC") || f.trim().eq_ignore_ascii_case("N/A") => {
+            Ok(None)
         }
         Err(_) => Err(serde::de::Error::invalid_value(
             de::Unexpected::Option,

@@ -320,7 +320,7 @@ pub(crate) fn locusallposition(
                     .index
                     .sequences()
                     .iter()
-                    .find(|c| c.name == a.contig)
+                    .find(|c| &c.name == a.getcontig())
                     .map(|b| b.len);
                 if let Some(max) = max
                     && let Ok(maxi) = max.try_into()
@@ -336,7 +336,7 @@ pub(crate) fn locusallposition(
     if let Some(bornes2) = &mut bornes
         && let Ok(d) = &range
     {
-        bornes2.retain(|p| d.iter().any(|k| k.contig == p.getsubject()));
+        bornes2.retain(|p| d.iter().any(|k| k.getcontig() == p.getsubject()));
         bornes2.sort_unstable_by(|a, b| {
             match a
                 .getallelename()
