@@ -941,7 +941,7 @@ fn getorsetparams(meanpath: &Path, args: &Args) -> io::Result<Params> {
             println!("Getting mean coverage from calculations, it might take some minutes.");
             let params = getmeancoveragelengthandphred(args)?;
             println!(
-                "Mean coverage is {} and average length of reads is {}. PHRED score is {}",
+                "Mean coverage is {} and average length of reads is {}. PHRED score is {}. Storing value.",
                 params.getmean(),
                 params.getavg(),
                 params.getphred()
@@ -2026,7 +2026,10 @@ fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
         );
         let mut count: HashMap<Genename, usize> = HashMap::new();
         for name in genes.iter_mut() {
-            name.gene.name = if finish.iter().any(|g| g.gene.eq(&name.gene)) {
+            name.gene.name = if finish
+                .iter()
+                .any(|g| g.gene.eq(&name.gene) && g.chromosome.eq(&name.chromosome))
+            {
                 let count = count.entry(name.gene.clone()).or_insert(0);
                 *count += 1;
                 format!("{}_{}", name.gene.name, count)

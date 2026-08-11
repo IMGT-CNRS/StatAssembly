@@ -62,6 +62,6 @@ auto_link_exclude_list = [
     "libpthread.so*",
 ]
 [features]
-default = []
+default = ["pileup"]
 pdf = ["dep:oxidize-pdf"]
 pileup = []
