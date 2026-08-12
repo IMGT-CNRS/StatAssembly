@@ -2,20 +2,22 @@
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
+        collections::HashMap,
         fs,
         io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
-        path::PathBuf,
+        path::{Path, PathBuf},
         thread::sleep,
         time::Duration,
     };
 
     use crate::{
-        extractgenelist, generategeneinfos, getorsetparams, getreaderoffile,
+        extractgenelist, filtervalidatedallelesrecreate, generategeneinfos, getorsetparams,
+        getreaderoffile,
         identification::{sendresult, sendresultcompressed},
         locusposparser, posread,
         r#struct::{
-            Args, Filecrea, Genename, Haplotype::Primary, HashMapinfo, LocusHaplo, Species,
-            SpeciesError,
+            Args, Filecrea, Genehit, Genename, Haplotype::Primary, HashMapinfo, LocusHaplo,
+            LocusInfos, Species, SpeciesError,
         },
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
@@ -383,25 +385,28 @@ mod tests {
             .map_err(|f| f.to_string())
             .unwrap();
         let spec = Species::newunchecked(&args4.species);
-        let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
+        let (mut result, _blast, _release) = match locusposparser(&args4, &spec, false) {
             Err(e) => panic!("Error is {e}"),
             Ok(a) => a,
         };
-        assert!(
-            result.iter().any(|f| !f.status.isvalidated()),
-            "One locus is not valid"
-        );
         let progress = getprogressbarclassic(result.len().try_into().unwrap_or_default()).unwrap();
         let mut i = 0;
         let mut done = false;
-        for loci in result {
+        let mean = getorsetparams(Path::new("example_files/results/.mean"), &args4).unwrap();
+        let mut locushash: HashMap<LocusInfos, Vec<Genehit>> = HashMap::new();
+        for loci in result.iter_mut() {
+            let info = posread(&args4, &loci).unwrap();
+            loci.setstatus(mean.getmean(), &args4, &info);
             let genelist = extractgenelist(&args4, &loci, false).unwrap();
+            locushash.insert(loci.clone(), Vec::new());
             for mut gene in genelist {
                 let (v, hashmap) = generategeneinfos(&args4, &mut gene).unwrap();
+                let entry = locushash.get_mut(&loci).unwrap();
+                entry.push(Genehit::new(v.clone(), None));
                 if gene.gene
                     == Genename::new("IGHV(III)-82*01", Some("V-REGION".to_string())).unwrap()
                 {
-                    let info = "IGHV(III)-82*01_V-REGION	NC_060938.1	Minus	101154845	101155136	292	47.242	35	34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(32=0X2D0I0S)-34(33=0X1D2I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(32=0X2D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(32=0X2D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)	34	24	24	23.6	292	Accepted";
+                    let info = "IGHV(III)-82*01_V-REGION	NC_060938.1	Minus	101154845	101155136	292	47.242	35	34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(32=0X2D0I0S)-34(33=0X1D2I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=1X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D1I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=1X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(32=0X2D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(34=0X0D0I0S)-34(32=0X2D0I0S)-34(33=0X1D0I0S)-34(34=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(34=0X1D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)-35(35=0X0D0I0S)	34	24	24	24.0	292	Accepted";
                     let file = Filecrea::createtemp(None::<PathBuf>, None::<PathBuf>).unwrap();
                     let mut csv = csv::WriterBuilder::new()
                         .comment(Some(b'#'))
@@ -420,8 +425,8 @@ mod tests {
                         None,
                         FetchDefinition::RegionString(
                             gene.chromosome.as_bytes(),
-                            gene.start.getzbasedpos(),
-                            gene.end.getobasedpos(),
+                            gene.start.getobasedpos(),
+                            gene.end.getzbasedpos(),
                         ),
                         RustPileupConfig::default(),
                     )
@@ -432,11 +437,22 @@ mod tests {
                                 hit.getpos().try_into().unwrap(),
                             ))
                             .unwrap();
-                        if hit.rbases.get(0).unwrap().contains("D") {
-                            assert!(line.getindel() > 0);
+                        if hit.rbases.get(0).unwrap().contains("*")
+                            || hit.rbases.get(0).unwrap().contains("#")
+                        {
+                            assert!(line.getindel() < line.gettotal());
+                        } else {
+                            assert!(
+                                line.getindel() == line.gettotal(),
+                                "Should equal {} but is {}",
+                                line.gettotal(),
+                                line.getindel()
+                            );
                         }
-                        if hit.rbases.get(0).unwrap().contains("I") {
+                        if hit.rbases.get(0).unwrap().contains("+") {
                             assert!(line.getinsertion() > 0);
+                        } else {
+                            assert!(line.getinsertion() == 0);
                         }
                     }
                     done = true;
@@ -446,6 +462,16 @@ mod tests {
             i += 1;
             progress.set_position(i);
         }
+        assert!(
+            result.iter().all(|f| f.status.isvalidated()),
+            "One locus is not valid"
+        );
+        let new = filtervalidatedallelesrecreate(&locushash);
+        assert_eq!(
+            new.values().map(|p| p.len()).sum::<usize>(),
+            locushash.values().map(|p| p.len()).sum::<usize>(),
+            "Validated alleles issue"
+        );
         progress.with_finish(indicatif::ProgressFinish::AndClear);
         assert!(done, "IGHV(III)-82 not analyzed");
         testo.close().unwrap()

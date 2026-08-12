@@ -908,13 +908,13 @@ fn getorsetparams(meanpath: &Path, args: &Args) -> io::Result<Params> {
             params
         }
         _ => {
-            println!("Getting mean coverage from calculations, it might take some minutes.");
+            println!("Getting global metrics from calculations, it might take some minutes.");
             let params = getmeancoveragelengthandphred(args)?;
             println!(
-                "Mean coverage is {} and average length of reads is {}. PHRED score is {}. Storing value.",
-                params.getmean(),
-                params.getavg(),
-                params.getphred()
+                "Mean coverage is {}. Average length of reads is {} bp. Average PHRED score is {}. Storing value.",
+                params.getmean().to_formatted_string(&Locale::en),
+                params.getavg().to_formatted_string(&Locale::en),
+                params.getphred().to_formatted_string(&Locale::en)
             );
             let _ = fs::write(meanpath, params.to_string().as_bytes());
             params
@@ -1301,7 +1301,7 @@ fn main() -> ExitCode {
     let mean = match getorsetparams(&outputdir.join(".mean"), &args) {
         Ok(a) => a.getmean(),
         Err(e) => {
-            eprintln!("Error making parameters: {e}.");
+            eprintln!("Error getting parameters or bad parameters: {e}.");
             return ExitCode::FAILURE;
         }
     };
@@ -1657,13 +1657,13 @@ fn main() -> ExitCode {
     endmessage(&firstinstant, &args);
     ExitCode::SUCCESS
 }
-fn filternewandvalidatedallelesrecreate(
+fn filtervalidatedallelesrecreate(
     entry: &HashMap<LocusInfos, Vec<Genehit>>,
 ) -> HashMap<LocusInfos, Vec<Genehit>> {
     let mut entry = entry.clone();
     entry
         .values_mut()
-        .for_each(|gene| gene.retain(|p| p.isnewalleleandvalid()));
+        .for_each(|gene| gene.retain(|p| p.getstatus().isvalidated()));
     entry.retain(|g, v| g.getstatus().isvalidated() && !v.is_empty());
     entry
 }
@@ -1728,7 +1728,7 @@ fn printvalidatedalleles<T>(
 where
     T: AsRef<str>,
 {
-    let locushash = filternewandvalidatedallelesrecreate(&locushash);
+    let locushash = filtervalidatedallelesrecreate(&locushash);
     let path = args.outdir.join("validatedalleles.fasta");
     let writer = File::create(path)?;
     let mut csv = csv::WriterBuilder::new()
@@ -2025,7 +2025,7 @@ fn generategeneinfos(
                     .skip(start.try_into().unwrap_or_default())
                     .take(
                         end.saturating_sub(start)
-                            .saturating_sub(1)
+                            .saturating_add(1)
                             .try_into()
                             .unwrap_or_default(),
                     )

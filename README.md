@@ -118,6 +118,7 @@ samtools faidx assembly.fasta
 
 ```tsv
 Locus Haplotype contig  start end
+IGH Primary NC_060938.1 99830032  101161300
 ```
 
 Locus must be one of the following:
@@ -136,9 +137,8 @@ Haplotype must be one of the following:
 
 The rest is ***case sensitive***. You can only have one alternate per primary (the line just after the primary) and as many primary as you want. Primary and Alternate are compared and shown together in graphs.
 
-The contig name has to match reference ID, start and end should match SAM regions (1-based position). If start is greater than end, the locus would be considered reverse.
-*You can use [IMGT&reg; description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [IMGT/LIGM-Motif](https://imgt.org/ligmotif/) to identify the locus position. if you use find analysis*.
-Example in test files.
+The contig name has to match reference ID, start and end should match SAM regions (1-based position). *If start is greater than end, the locus would be considered reverse*.
+*You can use [IMGT&reg; description](https://www.imgt.org/IMGTrepertoire/LocusGenes/#h1_11) or [IMGT/LIGM-Motif](https://imgt.org/ligmotif/) to identify the locus position as well as analyze part of the software*.
 
 * (Optional). if the find analysis is not performed. A CSV file (-g) containing gene position on the chromosome (optional). ***Header must be preserved***, quotes are escape characters:
 
@@ -150,7 +150,9 @@ Example in test files.
 ```
 
 Strand can be 0 or 1 (reverse), + or - (reverse), plus or minus (reverse). Strand is related to the chromosome.
-Chromosome, start and end should be 1-based position. *Start should be less than end (else start and end are swapped)*.
+Chromosome, start and end should be 1-based position. *Start should be less than end (else start and end are swapped without changing the strand)*.
+
+
 Example in test files.
 
 ### Generation of a BAM file
@@ -241,11 +243,11 @@ For each assembly (in the graph named readresult.png) and for each allele (if ap
 
 For each read matching perfectly the gene, a score is assigned. The sum is the realreads100m score. The score is rounded in the graph. This score is the average PHRED score quality of the read at the gene position:
 - Phred score unknown or less than 10 gives 0,
-- Phred score between 11 and 20 gives 0.1,
-- Between 21 and 30 gives 0.3,
-- Between 31 and 40 gives 0.7,
-- Between 41 and 50 gives 0.9,
-- Above 51, the score is maximal: 1.
+- Phred score between 11 and 20 gives 0.1 ($`\frac{1}{10}=10%`$),
+- Between 21 and 30 gives 0.3 (($`\frac{3}{10}`=30%$)),
+- Between 31 and 40 gives 0.7 (($`\frac{7}{10}`=70%$)),
+- Between 41 and 50 gives 0.9 (($`\frac{9}{10}`=90%$)),
+- Above 51, the score is maximal: 1 ($`\frac{10}{10}`=100%$).
 </details>
 
 ### Results analysis
@@ -274,7 +276,7 @@ If you use IMGT/StatAssembly in your work, please cite the article related to th
 
 ### Versioning
 
-Version will follow SemVer [Semantic Versioning 2.0.0](https://semver.org/).
+Versions will follow [Semantic Versioning 2.0.0 (SemVer)](https://semver.org/).
 
 ### Thanks
 
