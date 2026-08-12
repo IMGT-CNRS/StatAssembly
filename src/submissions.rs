@@ -51,44 +51,41 @@ lazy_static! {
         .http3_prior_knowledge()
         .build()
         .unwrap_or_default();
-    pub static ref WEBSERVER: String = obfstr::obfstring!("https://imgt.org");
+    pub static ref WEBSERVER: String = "https://imgt.org".to_string();
     pub static ref RELEASELINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
-        obfstr::obfstr!("/download/GENE-DB/RELEASE")
+        "/download/GENE-DB/RELEASE"
     );
-    pub static ref LIMITDATE: String = obfstr::obfstring!("2026-08-31T23:59:59Z");
+    //pub static ref LIMITDATE: String = "2026-08-31T23:59:59Z".to_string();
     pub static ref MOTIFLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
-        obfstr::obfstring!("/submissions/newmotif_fusionne.fasta.gz")
+        "/submissions/newmotif_fusionne.fasta.gz".to_string()
     );
-    pub static ref INVALIDCOVERAGE: String = obfstr::obfstring!("Coverage is out of the window");
-    pub static ref NOTENOUGHMATCHREADS: String = obfstr::obfstring!("Not enough matching reads");
-    pub static ref SOFTCLIPTOOMUCH: String = obfstr::obfstring!("Too much softclips");
-    pub static ref SUSPICIOUSPOSITIONALERT: String = obfstr::obfstring!("The position");
+    pub static ref INVALIDCOVERAGE: String = "Coverage is out of the window".to_string();
+    pub static ref NOTENOUGHMATCHREADS: String = "Not enough matching reads".to_string();
+    pub static ref SOFTCLIPTOOMUCH: String = "Too much softclips".to_string();
+    pub static ref SUSPICIOUSPOSITIONALERT: String = "The position".to_string();
     /* pub static ref MOTIFLINK: String =
-        obfstr::obfstring!("http://localhost:8910/submissions/newmotif_fusionne.fasta.gz");
+        "http://localhost:8910/submissions/newmotif_fusionne.fasta.gz".to_string();
     pub static ref BORNESLINK: String =
-        obfstr::obfstring!("http://localhost:8910/submissions/bornes_mammals.fasta.gz");  */
+        "http://localhost:8910/submissions/bornes_mammals.fasta.gz".to_string();  */
         pub static ref BORNESLINK: String = format!(
             "{}{}",
             WEBSERVER.as_str(),
-            obfstr::obfstring!("/submissions/bornes_mammals.fasta.gz")
+            "/submissions/bornes_mammals.fasta.gz".to_string()
         );
     pub static ref VQUESTLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
-        obfstr::obfstring!(
-            "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
-        )
+          "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
     );
-    pub static ref GITHUBVERSION: String = obfstr::obfstring!(
-        "https://src.koda.cnrs.fr/api/v4/projects/imgt-igh%2Fstatassembly/repository/tags");
+    pub static ref GITHUBVERSION: String = "https://src.koda.cnrs.fr/api/v4/projects/imgt-igh%2Fstatassembly/repository/tags".to_string();
     pub static ref SUBMISSIONLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
-        obfstr::obfstring!("/submissions/")
+        "/submissions/".to_string()
     );
 }
 

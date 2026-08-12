@@ -134,9 +134,9 @@ pub(crate) struct Args {
     ///Output light BAM for submission
     #[arg(short = 'z', long)]
     pub(crate) outlightbam: Option<PathBuf>,
-    /// Output pileup
+    /// Output pileup in outdir
     #[arg(short = 'p', long)]
-    pub(crate) pileup: Option<PathBuf>,
+    pub(crate) pileup: bool,
     ///Haploid status (only if locuspos is not set)
     #[arg(long, conflicts_with = "locuspos")]
     pub(crate) haploid: bool,
@@ -555,6 +555,7 @@ impl Species {
     pub(crate) fn getrank(&self) -> &str {
         &self.rank
     }
+    #[allow(unused)]
     pub(crate) fn newunchecked<T>(species: T) -> Self
     where
         T: AsRef<str>,
@@ -846,6 +847,13 @@ impl OkStatus {
     pub(crate) fn getmotif(&self) -> &Option<String> {
         &self.motif
     }
+    pub(crate) fn isvalidated(&self) -> bool {
+        self.status.isvalid()
+    }
+    #[allow(dead_code)]
+    pub(crate) fn isrejected(&self) -> bool {
+        self.status.isinvalid()
+    }
 }
 impl Display for OkStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -941,7 +949,7 @@ impl Params {
                     "The average read length of {b} does not exceed {MIN_READLENGTH} bp. For accurate results, please provide long-reads to the software."
                 ),
             )),
-            (.., c) if c < MIN_PHREDSCORE => Err(io::Error::new(
+            (.., c) if c < MIN_PHREDSCORE && c > u64::MIN => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "The PHRED score of {c} does not exceed minimum {MIN_PHREDSCORE}. For accurate results, please provide high-quality long-reads to the software."
@@ -2022,6 +2030,9 @@ impl LocusInfos {
             .into_iter()
             .find(|p| &p.name == self.getcontig())
             .map(|b| Position::newfromoposition(b.len.try_into().unwrap_or(i64::MAX)))
+    }
+    pub(crate) fn getstatus(&self) -> &OkStatus {
+        &self.status
     }
     pub(crate) fn setstatus(
         &mut self,

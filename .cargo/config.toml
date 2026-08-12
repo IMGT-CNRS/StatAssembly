@@ -1,2 +1,4 @@
 [build]
 rustflags = ["--cfg", "reqwest_unstable"]
+[net]
+git-fetch-with-cli=true
