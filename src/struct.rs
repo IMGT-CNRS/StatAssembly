@@ -520,7 +520,7 @@ impl Blastlevel {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpeciesError {
     Invalid(String),
     Blocked,
@@ -2508,6 +2508,10 @@ impl GeneInfosFinish {
     }
     pub(crate) fn make_default(gene: GeneInfos) -> Self {
         Self::new(gene, 0, 0, None, 0, 0, 0f32, 0.0, Vec::new(), 0)
+    }
+    pub(crate) fn isdefault(&self) -> bool {
+        self.reads + self.readsfull + self.reads100 + self.reads100m == 0
+            && self.status.getstatus().isunknown()
     }
 }
 impl Ord for GeneInfosFinish {

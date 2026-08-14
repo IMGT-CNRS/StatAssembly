@@ -2,6 +2,7 @@
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
+        cmp::{self},
         collections::HashMap,
         fs,
         io::{BufReader, Cursor, ErrorKind::UnexpectedEof, Read as read2, Seek},
@@ -27,6 +28,7 @@ mod tests {
     use clap::Parser;
     use extended_htslib::bam::{
         self, FetchDefinition, Read,
+        ext::BamRecordExtensions,
         pileup::{RustPileupConfig, RustPileups},
     };
     use itertools::Itertools;
@@ -126,11 +128,11 @@ mod tests {
         assert_eq!(human.getid(), Some(9606), "Species taxon is invalid");
         assert!(
             human.getrank().eq_ignore_ascii_case("species"),
-            "Species has not a valid rank"
+            "Species should be valid rank"
         );
         assert!(
             human.getname().eq_ignore_ascii_case("Homo sapiens"),
-            "Homo sapiens is not valid"
+            "Homo sapiens should be valid"
         );
         sleep(Duration::new(3, 0)); //Sleep for NCBI
         let dog = Species::new("dog").unwrap();
@@ -138,11 +140,11 @@ mod tests {
         assert_eq!(dog.getid(), Some(9615), "Species taxon is invalid");
         assert!(
             dog.getrank().eq_ignore_ascii_case("subspecies"),
-            "Subspecies has not a valid rank"
+            "Subspecies should be a valid rank"
         );
         assert!(
             dog.getname().eq_ignore_ascii_case("Canis lupus familiaris"),
-            "Dog is not valid"
+            "Dog should be valid"
         );
         sleep(Duration::new(3, 0)); //Sleep for NCBI
         let lamprey = Species::new("least brook lamprey");
@@ -150,6 +152,16 @@ mod tests {
             matches!(lamprey, Err(SpeciesError::Blocked)),
             "Lamprey should be blocked"
         );
+        sleep(Duration::new(3, 0)); //Sleep for NCBI
+        let pongo = Species::new("pongo");
+        let expected = "The term used is not a species or an subspecies.".to_string();
+        if let Err(e) = pongo
+            && e == SpeciesError::Invalid(expected)
+        {
+            ()
+        } else {
+            panic!("Pongo should be blocked");
+        }
     }
     #[test]
     fn testlocusparsing() {
@@ -169,7 +181,13 @@ mod tests {
         assert!(data.iter().nth(1022).unwrap().qual.is_none(), "Issue");
     }
     #[test]
-    fn testlocuspositiononlyandbam() {
+    fn sort() {
+        let firstread = "SRR11292123.93478";
+        let secondread = "SRR9087599.373459";
+        assert!(natord::compare_ignore_case(firstread, secondread) == cmp::Ordering::Greater);
+    }
+    #[test]
+    fn testbam() {
         let testo = TempDir::new().unwrap();
         let a = Filecrea::createtemp(None, Some("test.bam")).unwrap();
         let b = Filecrea::createtemp(None, Some("test.bam.csi")).unwrap();
@@ -191,6 +209,63 @@ mod tests {
             testo.path().to_str().unwrap(),
             "-z",
             a.getpath().to_str().unwrap(),
+            "analyze",
+        ];
+        let args4 = Args::try_parse_from(fake_args)
+            .map_err(|f| f.to_string())
+            .unwrap();
+        let spec = Species::newunchecked(&args4.species);
+        let (result, _blast, _release) = match locusposparser(&args4, &spec, true) {
+            Err(e) => panic!("Error is {e}"),
+            Ok(a) => a,
+        };
+        generatelightbam(
+            &args4,
+            args4.outlightbam.as_ref().unwrap(),
+            Some(&b.getpath().to_path_buf()),
+            &result,
+        )
+        .unwrap();
+        let mut br = bam::Reader::from_path(args4.file.unwrap()).unwrap();
+        let mut cr = bam::Reader::from_path(args4.outlightbam.unwrap().as_path()).unwrap();
+        let mut activ = false;
+        for (record, record2) in br
+            .rc_records()
+            .filter_map(Result::ok)
+            .zip_eq(cr.rc_records().filter_map(Result::ok))
+        {
+            activ = true;
+            assert_eq!(
+                record.reference_start(),
+                record2.reference_start(),
+                "Initial record {} is different because {}",
+                String::from_utf8_lossy(record.qname()),
+                String::from_utf8_lossy(record2.qname())
+            );
+        }
+        if !activ {
+            panic!("No records found");
+        }
+    }
+    #[test]
+    fn testlocusposition() {
+        let testo = TempDir::new().unwrap();
+        // Fake args as a Vec<&str>
+        let fake_args = vec![
+            "IMGT_StatAssembly",
+            "-f",
+            "example_files/CHM13v2.0.bam",
+            "-a",
+            "example_files/assembly.fasta",
+            "--totalread",
+            "-l",
+            "example_files/CHM13v2.0loc.csv",
+            "-s",
+            "human",
+            "-g",
+            "example_files/CHM13v2.0geneloc.csv",
+            "-o",
+            testo.path().to_str().unwrap(),
             "analyze",
         ];
         let args4 = Args::try_parse_from(fake_args)
@@ -283,33 +358,6 @@ mod tests {
             result.iter().all(|f| f.status.isvalidated()),
             "One locus is not valid"
         );
-        generatelightbam(
-            &args4,
-            args4.outlightbam.as_ref().unwrap(),
-            Some(&b.getpath().to_path_buf()),
-            &result,
-        )
-        .unwrap();
-        let mut br = bam::Reader::from_path(args4.file.unwrap()).unwrap();
-        let mut cr = bam::Reader::from_path(args4.outlightbam.unwrap().as_path()).unwrap();
-        let mut activ = false;
-        for (record, record2) in br
-            .records()
-            .filter_map(Result::ok)
-            .zip_eq(cr.records().filter_map(Result::ok))
-        {
-            activ = true;
-            assert_eq!(
-                record,
-                record2,
-                "Record4 {} is different because {}",
-                String::from_utf8_lossy(record.qname()),
-                String::from_utf8_lossy(record2.qname())
-            );
-        }
-        if !activ {
-            panic!("No records found");
-        }
     }
     #[test]
     fn compressanddecompress() {

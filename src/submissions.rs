@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::ErrorKind::InvalidData;
 use std::io::{BufWriter, IsTerminal, Seek, Write};
+use std::num::NonZero;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -1406,7 +1407,7 @@ pub(crate) fn generatesequenceraw(
                 .extractsequence(&mut assembly)
                 .unwrap_or("Sequence is unavailable".to_string());
             fastawriter.write(
-                &format!("{}:{}", list.getlocus(), list.getcontig()),
+                &format!("{}", list.getcontig()),
                 Some(&format!(
                     "{}:{}-{}/{}",
                     list.getlocushaplo(),
@@ -1494,7 +1495,17 @@ where
             let file = light.as_ref().display();
             return Err(format!("Cannot create file {file} for light bam."));
         };
-        for f in locus.iter() {
+        let _ = writer.set_threads(
+            available_parallelism()
+                .unwrap_or(NonZero::new(1).unwrap_or_else(|| unreachable!("1")))
+                .get(),
+        );
+        let mut locus = locus.to_vec();
+        locus.sort_unstable_by(|a, b| match a.getcontig().cmp(&b.getcontig()) {
+            Ordering::Equal => a.start.cmp(&b.start),
+            ord => ord,
+        });
+        for f in locus.into_iter() {
             let mut bam = if let Ok(r) = getreaderoffile(args) {
                 r
             } else {
@@ -1504,25 +1515,28 @@ where
                 .fetch((
                     f.getcontig().as_bytes(),
                     f.start.getzbasedpos(),
-                    f.end.getzbasedpos().saturating_add(1),
+                    f.end.getobasedpos(),
                 ))
                 .is_err()
             {
                 return Err("Cannot read BAM file region for light bam.".to_string());
             }
             let mut data = Vec::new();
-            data.try_reserve(4000)
+            data.try_reserve(2048)
                 .map_err(|_| "Cannot reserve memory".to_string())?;
             for read in bam.rc_records().filter_map(Result::ok) {
                 if data.len().abs_diff(data.capacity()) < 10 {
-                    data.try_reserve(4000)
+                    data.try_reserve(2048)
                         .map_err(|_| "Cannot reserve memory".to_string())?;
                 }
                 data.push(read);
             }
             data.shrink_to_fit();
-            let sorting = |a: &Rc<bam::Record>, b: &Rc<bam::Record>| match a.pos().cmp(&b.pos()) {
-                Ordering::Equal => a.qname().cmp(b.qname()).reverse(),
+            let sorting = |a: &Rc<bam::Record>, b: &Rc<bam::Record>| match a
+                .reference_start()
+                .cmp(&b.reference_start())
+            {
+                Ordering::Equal => a.qname().cmp(&b.qname()),
                 ord => ord,
             };
             //Sorting the BAM if it was not sorted aka one element is greater than the following

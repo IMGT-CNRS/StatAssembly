@@ -21,7 +21,6 @@ use plotters::coord::Shift;
 use plotters::coord::ranged1d::SegmentValue;
 use plotters::style::full_palette::{BROWN_500, GREY_400};
 use rayon::prelude::*;
-use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::ErrorKind::{InvalidData, InvalidInput};
@@ -1160,7 +1159,7 @@ where
 {
     let mut initial = String::new();
     let mut c = s.as_ref().chars();
-    let mut start = false;
+    let mut start = true;
     while let Some(f) = c.next() {
         if start {
             start = false;
@@ -1869,17 +1868,23 @@ where
                         .eq_ignore_ascii_case(&name.getchromosome())
             }) {
                 let count = count.entry(name.getgene().clone()).or_insert(0);
-                *count += 1;
-                format!("{}_{}", name.getgene().name, count)
-                    .replace(",", "_")
-                    .trim()
-                    .to_string()
+                if *count == 0 {
+                    *count += 1;
+                    name.getgene().name.replace(",", "_").trim().to_string()
+                } else {
+                    let val = format!("{}_{}", name.getgene().name, count)
+                        .replace(",", "_")
+                        .trim()
+                        .to_string();
+                    *count += 1;
+                    val
+                }
             } else {
                 name.getgene().name.replace(",", "_").trim().to_string()
             };
             let newname = Genename::new(newname, name.getgene().exon.clone()).unwrap();
             name.setgene(newname);
-            name.setchromosome(name.getchromosome().replace(",", "_").trim().to_string());
+            //name.setchromosome(name.getchromosome().replace(",", "_").trim().to_string());
         }
         println!("Correction finished.");
     }
@@ -2154,6 +2159,11 @@ fn genelist(
     let progressbar = getprogressbarclassic(genes.len().try_into().unwrap_or_default())?;
     for (pos, mut gene) in genes.into_iter().enumerate() {
         let (elem, hash) = generategeneinfos(args, &mut gene)?;
+        if elem.isdefault() {
+            progressbar.set_position(pos.saturating_add(1).try_into().unwrap_or_default());
+            //We have 0 reads so no need to print any graph
+            continue;
+        }
         let plots = outputdir.join(format!(
             "gene_{}",
             loci.gethaplotype().to_string().as_str().to_lowercase()
@@ -2509,6 +2519,12 @@ where
     /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
     //let softclipmax = core::cmp::max(calc,max);
      */
+    let max = (hash
+        .iter()
+        .map(|(_, p)| (p.getsoftclip() * 100f32.round()) as usize)
+        .max()
+        .unwrap_or(0)
+        + 5); //Soft clips is on percent (x100)
     let mut secondary = chart.set_secondary_coord(
         usize::try_from(loci.start.getobasedpos()).unwrap_or(0)
             ..usize::try_from(loci.end.getobasedpos()).unwrap_or(0),
@@ -2581,9 +2597,9 @@ where
                 let infos: Vec<&u8> = iter.iter().filter_map(|b| b.get(index)).collect();
                 infos
                     .get(infos.len() / 2)
-                    .map(|b| (index + 1, min(100, (**b).into())))
+                    .map(|b| (index + 1, min(max, (**b).into())))
             }),
-            full_palette::BLUEGREY.mix(0.4),
+            full_palette::BLUEGREY.mix(0.4).stroke_width(2),
         ))
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("PHRED score")
@@ -2803,10 +2819,9 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
-    let mut secondary = chart.set_secondary_coord(
-        loci.start.getobasedpos()..loci.end.getobasedpos(),
-        0..100usize,
-    );
+    let max = 100;
+    let mut secondary =
+        chart.set_secondary_coord(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max);
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{f}%"))
@@ -2832,10 +2847,8 @@ where
     secondary
         .draw_secondary_series(LineSeries::new(
             pos.iter().filter_map(|p| {
-                if let Some(a) = p.qual
-                    && a > 0
-                {
-                    Some((p.position.getobasedpos(), a))
+                if let Some(a) = p.qual {
+                    Some((p.position.getobasedpos(), min(a, max)))
                 } else {
                     None
                 }
@@ -2960,59 +2973,26 @@ pub(crate) fn checknewversion() -> bool {
     };
     if let Some(a) = r.first() {
         let version = &a.name;
-        let regexp = if let Ok(a) = Regex::new(r"([0-9]+)\.([0-9]+)\.([0-9]+)") {
-            a
-        } else {
-            return false;
-        };
-        let cap = regexp.captures(version);
-        let cap2 = regexp.captures(VERSION);
-        let (major, minor, patch, major2, minor2, patch2) = match (cap, cap2) {
-            (Some(b), Some(c))
-                if let Some(maj) = b.get(1)
-                    && let Some(min) = b.get(2)
-                    && let Some(patch) = b.get(3)
-                    && let Some(maj2) = c.get(1)
-                    && let Some(min2) = c.get(2)
-                    && let Some(patch2) = c.get(3) =>
+        let semver = semver::Version::from_str(&version.replace("v", "").to_string());
+        let actualversion = semver::Version::from_str(VERSION);
+        match (semver, actualversion) {
+            (Ok(liveversion), Ok(actual))
+                if liveversion.gt(&actual) && liveversion.patch > actual.patch =>
             {
-                (
-                    maj.as_str(),
-                    min.as_str(),
-                    patch.as_str(),
-                    maj2.as_str(),
-                    min2.as_str(),
-                    patch2.as_str(),
-                )
+                eprintln!(
+                    "A patch version of {} is available. Please update when possible.",
+                    NAME.as_str()
+                );
+                false
             }
-            _ => {
-                eprintln!("Invalid version");
-                return false;
+            (Ok(liveversion), Ok(actual)) if liveversion.gt(&actual) => {
+                eprintln!(
+                    "Another version of {} is available. Please update to continue. Exiting.",
+                    NAME.as_str()
+                );
+                true
             }
-        };
-        let (major, minor, patch, major2, minor2, patch2) = match (
-            major.parse::<usize>(),
-            minor.parse::<usize>(),
-            patch.parse::<usize>(),
-            major2.parse::<usize>(),
-            minor2.parse::<usize>(),
-            patch2.parse::<usize>(),
-        ) {
-            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, e, f),
-            _ => {
-                eprintln!("Invalid version: {}", version);
-                return false;
-            }
-        };
-        let name = env!("CARGO_CRATE_NAME").replace("_", "/");
-        if major > major2 || (major == major2 && minor > minor2) {
-            eprintln!("Another version of {name} is available. Please update.");
-            true
-        } else if major == major2 && minor == minor2 && patch > patch2 {
-            eprintln!("A patch version of {name} is available. Please update.");
-            false
-        } else {
-            false
+            _ => false,
         }
     } else {
         false

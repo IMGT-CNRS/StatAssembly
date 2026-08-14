@@ -337,6 +337,11 @@ pub(crate) fn locusallposition(
         && let Ok(d) = &range
     {
         bornes2.retain(|p| d.iter().any(|k| k.getcontig() == p.getsubject()));
+        /* if args.haploid {
+            todo!(
+                "Return one or two bornes, how does it change locus position?? should we do this beore find_global_range?"
+            );
+        } */
         bornes2.sort_unstable_by(|a, b| {
             match a
                 .getallelename()
@@ -467,6 +472,7 @@ pub(crate) fn find_global_best_range(
     if let Some(borneblast) = &bornes {
         'borne: for borneblast in borneblast {
             for values in locus.values_mut() {
+                //todo!("Check min and max if already filtered and check good contig");
                 for val in values.iter() {
                     let a = borneblast;
                     let b = val;
