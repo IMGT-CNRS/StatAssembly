@@ -7,6 +7,7 @@ use crate::r#struct::{
 };
 use crate::{EMAIL, NAME, PHYLUMLIMIT, TIMEOUT_IN_MN, VERSION, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
+use extended_htslib::bam::ext::BamRecordExtensions;
 use extended_htslib::bam::index::Type;
 use extended_htslib::bam::{self, Read};
 use flate2::GzBuilder;
@@ -24,6 +25,7 @@ use std::fmt::Debug;
 use std::io::ErrorKind::InvalidData;
 use std::io::{BufWriter, IsTerminal, Seek, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::str::FromStr;
 use std::thread::{self, available_parallelism, sleep};
 use std::{
@@ -1474,12 +1476,13 @@ pub(crate) fn generatelightbam<T>(
 where
     T: AsRef<Path>,
 {
-    println!("Generating small BAM for submission");
+    println!("Generating small BAM.");
     let bam = if let Ok(r) = getreaderoffile(args) {
         r
     } else {
         return Err("Cannot access BAM file for light bam.".to_string());
     };
+    let mut onemessage = false;
     {
         let mut writer = if let Ok(files) = bam::Writer::from_path(
             light.as_ref(),
@@ -1507,15 +1510,37 @@ where
             {
                 return Err("Cannot read BAM file region for light bam.".to_string());
             }
+            let mut data = Vec::new();
+            data.try_reserve(4000)
+                .map_err(|_| "Cannot reserve memory".to_string())?;
             for read in bam.rc_records().filter_map(Result::ok) {
-                if writer.write(&read).is_err() {
+                if data.len().abs_diff(data.capacity()) < 10 {
+                    data.try_reserve(4000)
+                        .map_err(|_| "Cannot reserve memory".to_string())?;
+                }
+                data.push(read);
+            }
+            data.shrink_to_fit();
+            let sorting = |a: &Rc<bam::Record>, b: &Rc<bam::Record>| match a.pos().cmp(&b.pos()) {
+                Ordering::Equal => a.qname().cmp(b.qname()).reverse(),
+                ord => ord,
+            };
+            //Sorting the BAM if it was not sorted aka one element is greater than the following
+            if !data.is_sorted_by(|a, b| sorting(a, b) != Ordering::Greater) {
+                if !onemessage {
+                    onemessage = true;
+                    println!("BAM was not sorted, sorting now.");
+                }
+                data.sort_unstable_by(sorting);
+            }
+            for record in data {
+                if writer.write(&record).is_err() {
                     return Err("Cannot read BAM file region for light bam.".to_string());
                 };
             }
         }
     }
-    //Drop writer else there is an issue when making index
-    println!("Building index");
+    println!("Indexing BAM file.");
     bam::index::build(
         light.as_ref(),
         lightindex.as_ref().map(|a| a.as_ref()),

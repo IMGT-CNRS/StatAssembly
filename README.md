@@ -214,6 +214,7 @@ The BAM file as a result is different from the BAM in example_folder as it is re
 ## Output
 
 The expected output from execution with test files is present in `example_files/results/`.
+Submission to IMGT&reg; from the software is not currently implemented and the `--nosubmit` flag is a noop.
 
 ### Description of generated file in example folder
 
@@ -260,7 +261,7 @@ For a better overview of IMGT&reg; rules based on this analysis, check [IMGT&reg
 > - [ ] ![#f03c15](https://placehold.co/15x15/f03c15/f03c15.png) Red for rejection
 >
 > Criterias are as followed:
-> * For locus: Number of reads inside the window coverage (max(10,Mean coverage / 2)<Nb<Mean coverage x 2) and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
+> * For locus: Number of reads ($x$) inside the window coverage ($m$) $max(10,\frac{m}{2}<x<2\times m$ and soft clips less than 40%. Telomeric region (10 kb) is not taken into account.
 > * For genes: At least 10 matching reads and no suspicious or warning positions and soft clips less than 40%.
 
 *The threshold can be changed for the graphs but not for the validation (and therefore the color title and csv files).*

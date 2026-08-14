@@ -6,7 +6,7 @@ Made by: Guilhem Zeitoun
 */
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
-use crate::identification::{downloadref, locusallposition};
+use crate::identification::locusallposition;
 #[cfg(feature = "pdf")]
 use crate::pdf::generatepdf;
 #[cfg(feature = "pileup")]
@@ -585,24 +585,11 @@ fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
         })
         .collect()
 }
-fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>> {
-    let mut genelist = getgeneinfos(data);
-    checkandcorrectgenelistduplicate(&mut genelist);
-    println!("Correction finished.");
-    let progressbar = getprogressbarclassic(genelist.len().try_into().unwrap_or_default());
-    let finish: io::Result<Vec<GeneInfosFinish>> = genelist
-        .into_iter()
-        .map(|mut d| {
-            if let Ok(b) = &progressbar {
-                b.set_length(b.length().unwrap_or_default() + 1);
-            }
-            generategeneinfos(args, &mut d).map(|(a, _)| a)
-        })
-        .collect();
-    if let Ok(a) = progressbar {
-        a.finish_and_clear();
-    }
-    let finish = finish?;
+fn printgenelist<T>(genelist: &mut [T], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>>
+where
+    T: GenesList + Clone + Ord + serde::Serialize,
+{
+    checkandcorrectgenelistduplicate(genelist);
     let genenamefile = if tmp {
         Filecrea::createtemp(None, Some("genelist_new.csv"))?
     } else {
@@ -612,10 +599,10 @@ fn printgenelist(data: &[Blastmatch], args: &mut Args, tmp: bool) -> io::Result<
     let mut csv = csv::WriterBuilder::new()
         .delimiter(b',')
         .has_headers(true)
-        .quote_style(csv::QuoteStyle::NonNumeric)
+        .quote_style(csv::QuoteStyle::Necessary)
         .comment(Some(b'#'))
         .from_writer(genefile);
-    for gene in finish.iter() {
+    for gene in genelist.iter() {
         if let Err(e) = csv.serialize(gene) {
             return Err(io::Error::new(
                 InvalidInput,
@@ -1205,7 +1192,10 @@ fn findanalyse(
     }
     if args.assembly.is_some() {
         let v = match generategenelist(&blastcheck, &speciesblast, &locus, &args) {
-            Ok((Some(a), _)) => printgenelist(&a, args, false).map(|_| ()),
+            Ok((Some(a), _)) => {
+                let mut genelist = getgeneinfos(&a);
+                printgenelist(&mut genelist, args, false).map(|_| ())
+            }
             Ok((None, _)) => Ok(()),
             Err(a) => Err(a),
         };
@@ -1506,7 +1496,7 @@ fn main() -> ExitCode {
                         (b, None)
                     }
                     Ok(b) => {
-                        if args.assembly.as_ref().is_some() && !args.nosubmit && blastpresent {
+                        if args.assembly.as_ref().is_some() && blastpresent {
                             println!("Blasting gene list");
                             let geneinfo: Vec<GeneInfos> =
                                 b.iter().map(|f| f.clone().into()).collect();
@@ -1543,7 +1533,7 @@ fn main() -> ExitCode {
                 }
             } else {
                 //We have an assembly
-                if !args.nosubmit && args.assembly.is_some() {
+                if args.assembly.is_some() && blastpresent {
                     let mut data = match generategenelist(
                         &blastcheck,
                         &speciesblast,
@@ -1571,8 +1561,9 @@ fn main() -> ExitCode {
                     }
                     let locivec = vec![loci.clone()];
                     positionfiltering(&locivec, &mut data);
+                    let mut genes = getgeneinfos(&data);
                     let result = match (
-                        printgenelist(&data, &mut args, true),
+                        printgenelist(&mut genes, &mut args, true),
                         genelist(loci, &speciesblast, &args, false),
                     ) {
                         (Err(e), _) => {
@@ -1594,7 +1585,7 @@ fn main() -> ExitCode {
                         (Ok(_), Ok(b)) => b,
                     };
                     locushash(&result, loci, &data, &mut locushashresult);
-                } else if !args.nosubmit {
+                } else {
                     eprintln!("No assembly to check gene list.");
                 }
             }
@@ -1606,8 +1597,7 @@ fn main() -> ExitCode {
     if let Some(light) = &args.outlightbam
         && let Err(e) = generatelightbam(&args, light, getindexforbam(&light).as_ref(), &locus)
     {
-        eprintln!("{e}");
-        return ExitCode::FAILURE;
+        eprintln!("Error making light BAM: {e}");
     }
     #[cfg(feature = "pileup")]
     if args.pileup
@@ -1618,19 +1608,19 @@ fn main() -> ExitCode {
     if let Err(e) = printnewloc(&args, &locus) {
         eprintln!("Error setting new locus result: {e}");
     }
-    if let Some(a) = blastcheck
-        && let Err(e) = printgenelist(&a, &mut args, false)
     {
-        eprintln!("Error setting new gene list: {e}");
+        let mut genes: Vec<GeneInfos> = locushashresult
+            .values_mut()
+            .flat_map(|genehit| genehit.into_iter().map(|g| g.geneinfo.clone().into()))
+            .collect();
+        if let Err(e) = printgenelist(&mut genes, &mut args, false) {
+            eprintln!("Error setting new gene list: {e}");
+        }
     }
-    if !locushashresult.is_empty()
-        && let Err(e) = printvalidatedalleles(
-            &args,
-            downloadref(false, args.cacheerase, &releaseversion).map(|(_, release)| release),
-            &locushashresult,
-        )
-    {
-        eprintln!("Error setting alleles result: {e}");
+    if !locushashresult.is_empty() {
+        if let Err(e) = printvalidatedalleles(&args, releaseversion, &locushashresult) {
+            eprintln!("Error setting alleles result: {e}");
+        }
     }
     if args.assembly.is_some()
         && let Err(e) = generatesequence(&args, &args.outdir, false, &locus)
@@ -1705,7 +1695,7 @@ where
         .delimiter(b',')
         .comment(Some(b'#'))
         .flexible(true)
-        .quote_style(csv::QuoteStyle::Never)
+        .quote_style(csv::QuoteStyle::Necessary)
         .from_writer(writer);
     for borne in bornes {
         csv.write_record([
@@ -1719,23 +1709,21 @@ where
     csv.flush()?;
     Ok(())
 }
-// Print only validated alleles
-fn printvalidatedalleles<T>(
+fn printvalidatedallelesraw<T, W>(
+    writer: &mut T,
+    release: Option<W>,
     args: &Args,
-    release: Option<T>,
     locushash: &HashMap<LocusInfos, Vec<Genehit>>,
 ) -> io::Result<()>
 where
-    T: AsRef<str>,
+    T: io::Write,
+    W: AsRef<str>,
 {
-    let locushash = filtervalidatedallelesrecreate(&locushash);
-    let path = args.outdir.join("validatedalleles.fasta");
-    let writer = File::create(path)?;
     let mut csv = csv::WriterBuilder::new()
         .delimiter(b',')
         .comment(Some(b'#'))
         .flexible(true)
-        .quote_style(csv::QuoteStyle::Never)
+        .quote_style(csv::QuoteStyle::Necessary)
         .from_writer(writer);
     csv.write_record([
         "name",
@@ -1782,7 +1770,22 @@ where
             ])?;
         }
     }
+    csv.flush()?;
     Ok(())
+}
+// Print only validated alleles
+fn printvalidatedalleles<T>(
+    args: &Args,
+    release: Option<T>,
+    locushash: &HashMap<LocusInfos, Vec<Genehit>>,
+) -> io::Result<()>
+where
+    T: AsRef<str>,
+{
+    let locushash = filtervalidatedallelesrecreate(&locushash);
+    let path = args.outdir.join("validatedalleles.fasta");
+    let mut writer = File::create(path)?;
+    printvalidatedallelesraw(&mut writer, release, args, &locushash)
 }
 fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error::Error>> {
     let geneloc = match &args.geneloc {
@@ -1837,15 +1840,22 @@ fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error
     Ok(genes)
 }
 /// Add underscore in case gene list has duplicates
-fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
+fn checkandcorrectgenelistduplicate<T>(genes: &mut [T])
+where
+    T: GenesList + Ord + Clone,
+{
     //Invert if start >= end because strand is given and won't work
-    genes.iter_mut().filter(|p| p.start > p.end).for_each(|p| {
-        (p.start, p.end) = (p.end, p.start);
-    });
+    genes
+        .iter_mut()
+        .filter(|p| p.getstart() > p.getend())
+        .for_each(|p| {
+            p.setstart(*p.getend());
+            p.setend(*p.getstart());
+        });
     let geneclone = genes.to_vec();
-    let finish: Vec<&GeneInfos> = geneclone
+    let finish: Vec<&T> = geneclone
         .iter()
-        .duplicates_by(|g| (&g.gene, &g.chromosome))
+        .duplicates_by(|g| (g.getgene(), g.getchromosome()))
         .collect();
     if !finish.is_empty() {
         println!(
@@ -1853,21 +1863,25 @@ fn checkandcorrectgenelistduplicate(genes: &mut [GeneInfos]) {
         );
         let mut count: HashMap<Genename, usize> = HashMap::new();
         for name in genes.iter_mut() {
-            name.gene.name = if finish
-                .iter()
-                .any(|g| g.gene.eq(&name.gene) && g.chromosome.eq(&name.chromosome))
-            {
-                let count = count.entry(name.gene.clone()).or_insert(0);
+            let newname = if finish.iter().any(|g| {
+                g.getgene().eq(&name.getgene())
+                    && g.getchromosome()
+                        .eq_ignore_ascii_case(&name.getchromosome())
+            }) {
+                let count = count.entry(name.getgene().clone()).or_insert(0);
                 *count += 1;
-                format!("{}_{}", name.gene.name, count)
+                format!("{}_{}", name.getgene().name, count)
                     .replace(",", "_")
                     .trim()
                     .to_string()
             } else {
-                name.gene.name.replace(",", "_").trim().to_string()
+                name.getgene().name.replace(",", "_").trim().to_string()
             };
-            name.chromosome = name.chromosome.replace(",", "_").trim().to_string()
+            let newname = Genename::new(newname, name.getgene().exon.clone()).unwrap();
+            name.setgene(newname);
+            name.setchromosome(name.getchromosome().replace(",", "_").trim().to_string());
         }
+        println!("Correction finished.");
     }
     genes.sort_unstable();
 }
@@ -2310,7 +2324,7 @@ where
     let text_style = fontstyle.into_text_style(&root);
     let _ = root.fill(&plotters::prelude::WHITE);
     let max = hash.values().map(|p| p.gettotal()).max().unwrap_or(0) + 5;
-    let colorgene = if gene.status.isvalidated() {
+    let colorgene = if gene.getstatus().isvalidated() {
         full_palette::GREEN
     } else {
         full_palette::RED
@@ -3013,7 +3027,7 @@ pub(crate) fn geneisokay(reads100m: usize, hash: &BTreeMap<Position, Posread>) -
             (f, a) if !a.isvalid() => OkStatus::new(
                 AcceptedStatus::Rejected,
                 Some(format!(
-                    "{} {} is a {}",
+                    "{} {} is a {} position",
                     *SUSPICIOUSPOSITIONALERT,
                     f.getobasedpos(),
                     if a.iswarning() {

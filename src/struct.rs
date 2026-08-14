@@ -135,6 +135,7 @@ pub(crate) struct Args {
     #[arg(short = 'z', long)]
     pub(crate) outlightbam: Option<PathBuf>,
     /// Output pileup in outdir
+    #[cfg(feature = "pileup")]
     #[arg(short = 'p', long)]
     pub(crate) pileup: bool,
     ///Haploid status (only if locuspos is not set)
@@ -644,6 +645,14 @@ impl<'de> Deserialize<'de> for Name {
     {
         let val: &str = serde::Deserialize::deserialize(deserializer)?;
         Name::from_str(val).map_err(serde::de::Error::custom)
+    }
+}
+impl From<Name> for Genename {
+    fn from(value: Name) -> Self {
+        Genename {
+            name: value.gene,
+            exon: value.label,
+        }
     }
 }
 impl Name {
@@ -1957,15 +1966,24 @@ impl GenesList for GeneInfos {
     fn getgene(&self) -> &Genename {
         &self.gene
     }
-
     fn getchromosome(&self) -> &str {
         &self.chromosome
     }
-
+    fn setgene(&mut self, gene: Genename) {
+        self.gene = gene;
+    }
     fn getstrand(&self) -> &Strand {
         &self.strand
     }
-
+    fn setchromosome(&mut self, chromosome: String) {
+        self.chromosome = chromosome;
+    }
+    fn setend(&mut self, pos: Position) {
+        self.end = pos;
+    }
+    fn setstart(&mut self, pos: Position) {
+        self.start = pos;
+    }
     fn getstart(&self) -> &Position {
         &self.start
     }
@@ -2229,11 +2247,14 @@ impl<'de> Deserialize<'de> for Strand {
         let s: &str = de::Deserialize::deserialize(deserializer)?;
 
         match s.to_lowercase().as_str() {
-            "1" | "-" | "minus" => Ok(Strand::Minus),
-            "0" | "+" | "plus" => Ok(Strand::Plus),
+            "1" | "-" | "minus" | "reverse" | "rev" => Ok(Strand::Minus),
+            "0" | "+" | "plus" | "forward" | "fwd" => Ok(Strand::Plus),
             _ => Err(de::Error::unknown_variant(
                 s,
-                &["1 or - or minus", "0 or + or plus"],
+                &[
+                    "1 or - or minus or reverse or rev",
+                    "0 or + or plus or forward or fwd",
+                ],
             )),
         }
     }
@@ -2253,6 +2274,10 @@ pub trait GenesList {
     fn getstrand(&self) -> &Strand;
     fn getstart(&self) -> &Position;
     fn getend(&self) -> &Position;
+    fn setstart(&mut self, pos: Position);
+    fn setend(&mut self, pos: Position);
+    fn setgene(&mut self, gene: Genename);
+    fn setchromosome(&mut self, chromosome: String);
     #[allow(dead_code)]
     fn getstatus(&self) -> &OkStatus;
     fn alterstatus(&mut self, status: OkStatus);
@@ -2281,6 +2306,22 @@ impl IntoIterator for Phred {
 pub(crate) struct Genehit {
     pub(crate) geneinfo: GeneInfosFinish,
     pub(crate) hit: Option<Blastmatch>,
+}
+impl Eq for Genehit {}
+impl PartialEq for Genehit {
+    fn eq(&self, other: &Self) -> bool {
+        self.geneinfo.eq(&other.geneinfo)
+    }
+}
+impl Ord for Genehit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.geneinfo.cmp(&other.geneinfo)
+    }
+}
+impl PartialOrd for Genehit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(&other))
+    }
 }
 impl Genehit {
     ///Construct a Vec of Genehit from Geneinfosfinish and Blastmatch
@@ -2361,11 +2402,21 @@ impl GenesList for GeneInfosFinish {
     fn getchromosome(&self) -> &str {
         &self.chromosome
     }
-
+    fn setgene(&mut self, gene: Genename) {
+        self.gene = gene;
+    }
     fn getstrand(&self) -> &Strand {
         &self.strand
     }
-
+    fn setchromosome(&mut self, chromosome: String) {
+        self.chromosome = chromosome;
+    }
+    fn setend(&mut self, pos: Position) {
+        self.end = pos;
+    }
+    fn setstart(&mut self, pos: Position) {
+        self.start = pos;
+    }
     fn getstart(&self) -> &Position {
         &self.start
     }

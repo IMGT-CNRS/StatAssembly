@@ -4,7 +4,7 @@ mod tests {
     use std::{
         collections::HashMap,
         fs,
-        io::{BufReader, ErrorKind::UnexpectedEof, Read as read2},
+        io::{BufReader, Cursor, ErrorKind::UnexpectedEof, Read as read2, Seek},
         path::{Path, PathBuf},
         thread::sleep,
         time::Duration,
@@ -14,10 +14,10 @@ mod tests {
         extractgenelist, filtervalidatedallelesrecreate, generategeneinfos, getorsetparams,
         getreaderoffile,
         identification::{sendresult, sendresultcompressed},
-        locusposparser, posread,
+        locusposparser, posread, printvalidatedallelesraw,
         r#struct::{
-            Args, Filecrea, Genehit, Genename, Haplotype::Primary, HashMapinfo, LocusHaplo,
-            LocusInfos, Species, SpeciesError,
+            Args, Filecrea, Genehit, Genename, GenesList, Haplotype::Primary, HashMapinfo,
+            LocusHaplo, LocusInfos, Species, SpeciesError,
         },
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
@@ -302,8 +302,9 @@ mod tests {
             assert_eq!(
                 record,
                 record2,
-                "Record4 {} is different",
-                String::from_utf8_lossy(record.qname())
+                "Record4 {} is different because {}",
+                String::from_utf8_lossy(record.qname()),
+                String::from_utf8_lossy(record2.qname())
             );
         }
         if !activ {
@@ -454,6 +455,43 @@ mod tests {
                         } else {
                             assert!(line.getinsertion() == 0);
                         }
+                    }
+                    //Check validatedalleles output
+                    {
+                        let entry = locushash
+                            .iter()
+                            .flat_map(|(l, p)| {
+                                if let Some(b) =
+                                    p.iter().find(|e| gene.getgene() == e.geneinfo.getgene())
+                                {
+                                    Some((l, b))
+                                } else {
+                                    None
+                                }
+                            })
+                            .next()
+                            .unwrap();
+                        let mut fakehash = HashMap::new();
+                        fakehash.insert(entry.0.clone(), vec![entry.1.clone()]);
+                        let mut cursor = Cursor::new(Vec::new());
+                        {
+                            printvalidatedallelesraw(
+                                &mut cursor,
+                                None::<String>,
+                                &args4,
+                                &fakehash,
+                            )
+                            .unwrap();
+                        }
+                        cursor.rewind().unwrap();
+                        let mut val = Vec::new();
+                        cursor.read_to_end(&mut val).unwrap();
+                        assert_eq!(
+                            String::from_utf8_lossy(&val).trim(),
+                            "name,position,subject,locus,strand,bestmatch,identity
+\"#IMGT/GENE-DB release Unknown\"
+IGHV(III)-82*01_V-REGION,101154845-101155136,NC_060938.1,IGH (Primary),REV,No hits,Unknown"
+                        );
                     }
                     done = true;
                 }

@@ -975,9 +975,9 @@ dependencies = [
 
 [[package]]
 name = "extended-htslib"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d756dea6b246829b26a3fa25b5af7fb42ddcdcf4b27e1241cfaccbba1061b92"
+checksum = "61b3ea4a8db43043cefc4b6c44c31ba770c38236ecb0c81cb3133eadab5bcae0"
 dependencies = [
  "bio-types",
  "byteorder",
@@ -1443,9 +1443,9 @@ dependencies = [
 
 [[package]]
 name = "http-body-util"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f41fd6a08e4d4ec69df65976da761afd5ad5e58a9d4acb46bd1c953a9e3ff2"
+checksum = "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c"
 dependencies = [
  "bytes",
  "futures-core",
