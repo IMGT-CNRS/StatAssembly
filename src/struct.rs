@@ -1,18 +1,7 @@
-use bio::io::fasta;
-use extended_htslib::bam::IndexedReader;
-use indicatif::ProgressBar;
-use itertools::Itertools;
-use plotters::backend::{BitMapBackend, SVGBackend};
-use plotters::coord::Shift;
-use plotters::drawing::DrawingArea;
-use serde::ser::SerializeTupleStruct;
-use serde_with::serde_as;
-use tempfile::NamedTempFile;
 /*
-This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
-It was created and used by IMGT Team (https://www.imgt.org).
+* IMGT/StatAssembly
 Available under EUPL license
-Made by: Guilhem Zeitoun
+Made by: Guilhem Zeitoun and IMGT Team
 */
 use crate::submissions::{
     REQUESTCLIENT, getallelefromblast, getchromosomefromblast, getpositionfromblast,
@@ -22,8 +11,17 @@ use crate::{
     ALERTPERC, DELIMITERFASTA, MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO,
     WARNINGPERC, geneisokay, getassemblyreader, locusisokay,
 };
+use bio::io::fasta;
 use clap::{Parser, ValueEnum, crate_authors};
+use extended_htslib::bam::IndexedReader;
+use indicatif::ProgressBar;
+use itertools::Itertools;
+use plotters::backend::{BitMapBackend, SVGBackend};
+use plotters::coord::Shift;
+use plotters::drawing::DrawingArea;
+use serde::ser::SerializeTupleStruct;
 use serde::{Deserialize, Serialize, de};
+use serde_with::serde_as;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::ErrorKind::{self, InvalidInput};
@@ -34,18 +32,19 @@ use std::str::FromStr;
 use std::{borrow::Cow, fmt::Display, fs::File, hash::Hash, io, path::PathBuf};
 use std::{env, fs};
 use strum_macros::EnumIter;
+use tempfile::NamedTempFile;
 #[derive(Parser, Debug)]
 #[clap(
     author = crate_authors!("\n"),
-    before_help = "This script analyzes BAM files coming from reads assembled on an assembly to assess IG/TR loci quality.\nYou can also submit new sequences to IMGT.",
-    after_help = format!("This code was made by and for IMGT (the international ImMunoGeneTics information system) under {} license.",env!("CARGO_PKG_LICENSE")),
+    before_help = "This script analyzes BAM files coming from reads assembled on an assembly to assess IG/TR loci quality in a standard way.", //\nYou can also submit new sequences to IMGT.",
+    after_help = format!("This code was made by IMGT (the international ImMunoGeneTics information system) under {} license.",env!("CARGO_PKG_LICENSE")),
     arg_required_else_help=true,
     display_name="IMGT/StatAssembly",
     help_template = "\
     {name} {version}
     Authors: {author-section}
     {before-help}
-    About: {about-with-newline}
+
     {usage-heading} {usage}
 
     {all-args}{after-help}
@@ -53,10 +52,10 @@ use strum_macros::EnumIter;
 )]
 #[command(version, author, about, long_about = None)]
 pub(crate) struct Args {
-    /// Input file (BAM-indexed file)
+    /// Input BAM file (BAM-sorted and indexed file)
     #[arg(short, long, required_if_eq_any=[("command","analyze"),("command","full")])]
     pub(crate) file: Option<PathBuf>,
-    /// Index file if not default
+    /// Index BAM file if not default
     #[arg(short, long)]
     pub(crate) index: Option<PathBuf>,
     ///CSV containing locus infos. See example file for blueprint. If unset, will try all loci on both haplotypes
@@ -80,16 +79,19 @@ pub(crate) struct Args {
     /// Force cigar even if no =. Some functionalities would be disabled
     #[arg(long)]
     pub(crate) force: bool,
-    /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 10 and 15 minutes.
+    /// Disable new version verification
+    #[arg(long)]
+    pub(crate) noversioncheck: bool,
+    /// If the BAM file is truncated, length of the overall extracted sequence (default: 0 meaning full length). This analysis takes between 2 and 5 minutes.
     #[arg(long, default_value_t = 0)]
     pub(crate) extractedlength: u64,
-    /// Params file if not default and already calculated, else will be calculated at startup (10-15 minutes) if not stored already.
+    /// Params file if not default. Else retrieve the saved one from outputdir else will be calculated at startup (2-5 minutes).
     #[arg(long)]
     pub(crate) paramsfile: Option<PathBuf>,
-    /// Huge region (more than 10 Mb)
+    /// Accept huge region (more than 10 Mb)
     #[arg(long)]
     pub(crate) hugeregion: bool,
-    /// Number of threads to decrypt bgzf files (0 for number of threads up to 12)
+    /// Number of threads to decrypt bgzf files (0 for number of available threads up to 12)
     #[arg(long, default_value_t = 0)]
     pub(crate) threads: usize,
     /// Only strand-specific alignments to reference
@@ -122,7 +124,7 @@ pub(crate) struct Args {
     /// Save as SVG images (create big images)
     #[arg(long)]
     pub(crate) svg: bool,
-    ///Species name (must match NCBI taxonomy & for folder creation)
+    ///Species name (must match NCBI taxonomy aka scientific name, common name or taxon ID), used for filenames.
     #[arg(short, long)]
     pub(crate) species: String,
     ///Gene location (csv file). See example file for blueprint.
@@ -131,22 +133,22 @@ pub(crate) struct Args {
     ///Output directory (created or overwritten)
     #[arg(short, long)]
     pub(crate) outdir: PathBuf,
-    ///Output light BAM for submission
-    #[arg(short = 'z', long)]
+    ///Output light BAM for submission, you can provide the argument without any value, it would default to outdir/outlight.bam.
+    #[arg(short = 'z', long, num_args=0..=1,require_equals=true,default_missing_value="default")]
     pub(crate) outlightbam: Option<PathBuf>,
     /// Output pileup in outdir
     #[cfg(feature = "pileup")]
     #[arg(short = 'p', long)]
     pub(crate) pileup: bool,
     ///Haploid status (only if locuspos is not set)
-    #[arg(long, conflicts_with = "locuspos")]
+    #[arg(long, short = 'H', alias = "hap", conflicts_with = "locuspos")]
     pub(crate) haploid: bool,
-    /// Do not submit to IMGT
+    /// Do not ask to submit to IMGT
     #[arg(long)]
     pub(crate) nosubmit: bool,
-    /// Erase cache files
+    /// Do not use cache files
     #[arg(long)]
-    pub(crate) cacheerase: bool,
+    pub(crate) cachebypass: bool,
     /// Automatic token to submit
     #[arg(long, value_parser=checktoken, conflicts_with = "nosubmit")]
     pub(crate) mytoken: Option<String>,
@@ -156,7 +158,7 @@ pub(crate) struct Args {
     /// Command
     #[arg(value_enum)]
     pub(crate) command: Command,
-    /// Do one thread after the other if low memory
+    /// Do one analysis after the other; if low memory
     #[arg(long)]
     pub(crate) lowmemory: bool,
 }
@@ -320,56 +322,6 @@ impl From<Filecrea> for PathBuf {
         value.getpath().to_path_buf()
     }
 }
-/*
-pub(crate) enum Image<'a> {
-    Png(DrawingArea<BitMapBackend<'a>, Shift>),
-    Svg(DrawingArea<SVGBackend<'a>, Shift>),
-}
-impl<'a> Image<'a> {
-    pub fn getsvg(&self) -> Option<&DrawingArea<SVGBackend<'a>, Shift>> {
-        match self {
-            Self::Svg(a) => Some(a),
-            _ => None,
-        }
-    }
-    pub fn getpng(&self) -> Option<&DrawingArea<BitMapBackend<'a>, Shift>> {
-        match self {
-            Self::Png(a) => Some(a),
-            _ => None,
-        }
-    }
-}
- */
-/* pub(crate) enum ImageType {
-    Svg((PathBuf, (u32, u32))),
-    Png((PathBuf, (u32, u32))),
-}
-impl ImageType {
-    #[allow(unused)]
-    pub fn newsvg(svg: PathBuf, size: (u32, u32)) -> Self {
-        Self::Svg((svg, size))
-    }
-    #[allow(unused)]
-    pub fn newpng(png: PathBuf, size: (u32, u32)) -> Self {
-        Self::Png((png, size))
-    }
-    #[allow(unused)]
-    pub fn get(&self) -> &Self {
-        &self
-    }
-    #[allow(unused)]
-    pub fn ispng(&self) -> bool {
-        matches!(self, Self::Png(_))
-    }
-    #[allow(unused)]
-    pub fn getpath(&self) -> &Path {
-        match self {
-            Self::Svg(a) => &a.0,
-            Self::Png(a) => &a.0,
-        }
-    }
-}
-*/
 #[derive(Debug, Deserialize)]
 pub(crate) struct GitLabTag {
     pub(crate) name: String,
@@ -1835,6 +1787,17 @@ impl GeneInfos {
             status: OkStatus::default(),
         }
     }
+    pub(crate) fn settoname(&self, spec: &Species) -> Name {
+        Name::new(
+            Some(self.getchromosome().to_string()),
+            self.getgene().to_string(),
+            spec.safestring().to_string(),
+            self.getgene().exon.clone(),
+            *self.getstart(),
+            *self.getend(),
+            self.getstrand().clone(),
+        )
+    }
     pub(crate) fn addtosequence<T>(
         &self,
         seq: T,
@@ -1844,15 +1807,7 @@ impl GeneInfos {
     where
         T: AsRef<[u8]>,
     {
-        let gene = Name::new(
-            Some(self.getchromosome().to_string()),
-            self.getgene().to_string(),
-            spec.safestring().to_string(),
-            self.getgene().exon.clone(),
-            *self.getstart(),
-            *self.getend(),
-            self.getstrand().clone(),
-        );
+        let gene = self.settoname(&spec);
         fasta.write(&gene.to_string(), None, seq.as_ref())
     }
     /*
@@ -2277,6 +2232,7 @@ pub trait GenesList {
     fn setstart(&mut self, pos: Position);
     fn setend(&mut self, pos: Position);
     fn setgene(&mut self, gene: Genename);
+    #[allow(unused)]
     fn setchromosome(&mut self, chromosome: String);
     #[allow(dead_code)]
     fn getstatus(&self) -> &OkStatus;
@@ -2325,16 +2281,17 @@ impl PartialOrd for Genehit {
 }
 impl Genehit {
     ///Construct a Vec of Genehit from Geneinfosfinish and Blastmatch
-    pub(crate) fn constructfromvec(list: &[GeneInfosFinish], hit: &[Blastmatch]) -> Vec<Self> {
+    pub(crate) fn constructfromvec(
+        list: &[GeneInfosFinish],
+        realspecies: &Species,
+        hit: &[Blastmatch],
+    ) -> Vec<Self> {
         let mut construct = Vec::new();
         construct.reserve_exact(list.len());
         for gene in list {
             let find = hit.iter().find(|p| {
-                p.getallelename() == gene.getgene().name
-                    && p.turnsubjectintoname()
-                        .and_then(|f| f.numacc)
-                        .unwrap_or(p.getsubject().to_string())
-                        == gene.getchromosome()
+                let genesubject = GeneInfos::from(gene.clone()).settoname(&realspecies);
+                p.getsubject() == genesubject.to_string()
             });
             let new = Self::new(gene.clone(), find.cloned());
             construct.push(new);

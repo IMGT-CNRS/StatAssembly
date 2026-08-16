@@ -1,3 +1,8 @@
+/*
+* IMGT/StatAssembly
+Available under EUPL license
+Made by: Guilhem Zeitoun and IMGT Team
+*/
 use extended_htslib::bam::{
     self,
     pileup::{RustPileupConfig, RustPileups},

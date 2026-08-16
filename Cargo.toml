@@ -43,7 +43,6 @@ rammap-core = { version = "1.1.2", default-features = false, features = ["parall
 oxidize-pdf = { version = "4.3.0", optional = true }
 rayon = "1.12.0"
 semver = "1.0.28"
-natord = "1.0.9"
 [lints.rust]
 unsafe_code = "deny"
 [profile.release]
@@ -63,6 +62,6 @@ auto_link_exclude_list = [
     "libpthread.so*",
 ]
 [features]
-default = []
+default = ["pdf"]
 pdf = ["dep:oxidize-pdf"]
 pileup = ["extended-htslib/pileuprayon"]

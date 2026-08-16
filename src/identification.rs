@@ -1,3 +1,8 @@
+/*
+* IMGT/StatAssembly
+Available under EUPL license
+Made by: Guilhem Zeitoun and IMGT Team
+*/
 use bio::io::fasta;
 use itertools::Itertools;
 use rammap::Aligner;
@@ -203,9 +208,9 @@ pub(crate) fn locusallposition(
     };
     let (bornespath, referencepath, releaseversion) = match (
         infos,
-        downloadref(true, args.cacheerase, &None).map(|(mut a, b)| {
+        downloadref(true, args.cachebypass, &None).map(|(mut a, b)| {
             (
-                speciesandorphonfiltering(&mut a, None, b.clone(), species, true, args.cacheerase),
+                speciesandorphonfiltering(&mut a, None, b.clone(), species, true, args.cachebypass),
                 b,
             )
         }),
@@ -227,13 +232,6 @@ pub(crate) fn locusallposition(
             ));
         }
     };
-    /* let file = NamedTempFile::new_in(&env::temp_dir())?;
-    let mut merge = File::create(&file)?;
-    let read = fs::read_to_string(&reference.0)?;
-    let read2 = fs::read_to_string(&reference.1)?;
-    merge.write_all(read.as_bytes())?;
-    merge.write_all(read2.as_bytes())?;
-    println!("Blasting to get position of loci."); */
     let info = threadlaunch(referencepath, &assembly, args, bornespath);
     let (mut blast, mut bornes) = match info {
         Ok((a, Some(Some(b)))) => (a, Some(b)),
@@ -286,7 +284,7 @@ pub(crate) fn locusallposition(
             let scoreactual = b.length / b.qlen * b.pident.powi(2) as usize;
             let newscore = elem.length / elem.qlen * elem.pident.powi(2) as usize;
             if newscore > scoreactual {
-                statusvec.insert(k.clone(), elem);
+                statusvec.insert(k.clone(), elem); //Erase all value
             }
         } else {
             statusvec.insert((elem.sseqid.clone(), elem.sstart, elem.send), elem);
@@ -297,16 +295,6 @@ pub(crate) fn locusallposition(
     data.sort_unstable();
     data.dedup();
     data.shrink_to_fit();
-    /* let writer = csv::WriterBuilder::new()
-    .delimiter(b',')
-    .comment(Some(b'#'))
-    .has_headers(true)
-    .from_path(Path::join(&env::temp_dir(), "test2.txt"));
-    if let Ok(mut r) = writer {
-        for elem in data.iter() {
-            let _ = r.serialize(elem);
-        }
-    }  */
     let range = find_global_best_range(&data, &bornes).ok_or(io::Error::new(
         ErrorKind::InvalidInput,
         "No locus found after BLAST analysis",
@@ -373,7 +361,7 @@ pub(crate) fn retainbestmatch(blast: &mut Vec<Blast>) {
 pub(crate) fn downloadbornes(args: &Args) -> Option<Filecrea> {
     println!("Downloading bornes sequence from IMGT");
     let tempfile = Path::join(&env::temp_dir(), "bornes.fasta");
-    if args.cacheerase || !fileincache(&tempfile) {
+    if args.cachebypass || !fileincache(&tempfile) {
         println!("Downloading IMGT bornes, please wait...");
         match sendresultcompressed(&REQUESTCLIENT, BORNESLINK.as_str()) {
             Ok(e) => {
@@ -400,7 +388,7 @@ pub(crate) fn downloadmotifs(args: &Args) -> Option<Filecrea> {
     println!("Downloading motifs sequence from IMGT");
     let tempfile = Path::join(&env::temp_dir(), "motifs.fasta");
     let file = Filecrea::createfrompath(&tempfile);
-    if args.cacheerase || !fileincache(&tempfile) {
+    if args.cachebypass || !fileincache(&tempfile) {
         println!("Downloading IMGT motifs, please wait...");
         match sendresultcompressed(&REQUESTCLIENT, MOTIFLINK.as_str()) {
             Ok(e) => {
@@ -532,7 +520,7 @@ pub(crate) fn find_global_best_range(
                             .unwrap_or(1)
                             .try_into()
                             .unwrap_or(1),
-                    ), //TODO: Set position 1 if saturating
+                    ),
                     Position::new(
                         false,
                         end.checked_add(BORNES).unwrap_or(1).try_into().unwrap_or(1),

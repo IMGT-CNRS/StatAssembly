@@ -1,3 +1,8 @@
+/*
+* IMGT/StatAssembly
+Available under EUPL license
+Made by: Guilhem Zeitoun and IMGT Team
+*/
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
@@ -85,6 +90,7 @@ lazy_static! {
           "/download/GENE-DB/IMGTGENEDB-ReferenceSequences.fasta-nt-WithoutGaps-F+ORF+allP"
     );
     pub static ref GITHUBVERSION: String = "https://src.koda.cnrs.fr/api/v4/projects/imgt-igh%2Fstatassembly/repository/tags".to_string();
+    pub static ref GITHUBHOME: String = "https://src.koda.cnrs.fr/imgt-igh/statassembly".to_string();
     pub static ref SUBMISSIONLINK: String = format!(
         "{}{}",
         WEBSERVER.as_str(),
@@ -423,32 +429,6 @@ pub(crate) fn speciesandorphonfiltering(
             "Empty data after filtering",
         ));
     }
-    /* let newdata = if newdata.is_empty() {
-        println!("New species!!");
-        let bufreader = io::Cursor::new(newdata);
-        let reader = fasta::Reader::new(bufreader);
-        let fastaread = readfastareader(reader);
-        return match fastaread {
-            Ok(b) => {
-                let mut new = Vec::new();
-                b.iter().for_each(|f| {
-                    if let Ok(v) = Newfasta::new(f) {
-                        new.push(v);
-                    } else {
-                        eprintln!("Line {} is skipped as an error occured", f.name)
-                    }
-                });
-                (Some(new), None)
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                (None, None)
-            }
-        };
-        file
-    } else {
-        newdata
-    }; */
     if tempfile.getpath() != outfile.getpath() {
         std::fs::write(outfile.getpath(), &info)?;
     }
@@ -597,14 +577,7 @@ pub(crate) fn matchmotif(
     if let Some(a) = locus {
         locusfiltering(a, &mut blast);
     }
-    blast.iter_mut().for_each(|_p| {
-        //Already performed
-        //if p.sstart > p.send {
-        //    (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
-        //}
-    });
     statusblastmotifs(&mut blast);
-    //let _ = fs::remove_file(name);
     Ok(blast.into_iter().map(|f| f.into()).collect())
 }
 pub(crate) fn genesblast(
@@ -643,7 +616,7 @@ pub(crate) fn genesblast(
         return Ok((Vec::new(), None));
     }
     let (reference, version) =
-        match downloadref(true, args.cacheerase, releaseversion).map(|(mut a, b)| {
+        match downloadref(true, args.cachebypass, releaseversion).map(|(mut a, b)| {
             (
                 speciesandorphonfiltering(
                     &mut a,
@@ -651,7 +624,7 @@ pub(crate) fn genesblast(
                     b.clone(),
                     species,
                     false,
-                    args.cacheerase,
+                    args.cachebypass,
                 ),
                 b,
             )
@@ -859,6 +832,8 @@ where
             }
             Ok(Some(_)) => {
                 println!("BLAST has been done. Parsing.");
+                println!("File is {}", output);
+                sleep(Duration::new(20, 0));
                 let file = File::open(output)?;
                 let reader = BufReader::new(file);
                 let mut csv = csv::ReaderBuilder::new()
@@ -883,7 +858,6 @@ where
             }
         };
     };
-    //let _ = fs::remove_file(output);
     Ok(result)
 }
 /// Returns rank, name and id
@@ -1061,102 +1035,13 @@ where
         ))),
     }
 }
-/*
-pub(crate) fn launchblast(
-    species: &str,
-    locus: &Locus,
-    subject: &Path,
-    args: &Args,
-) -> Result<Vec<Newfasta>, ()> {
-    let (realspecies, _) = match getspeciesfromncbi(&REQUESTCLIENT, &species) {
-        Err(e) => {
-            eprintln!("{e}");
-            return Err(());
-        }
-        Ok(b) => b,
-    };
-    println!("The species is {}.", realspecies.);
-    let (path, releaseversion) = match downloadref(true).map(|(a, b)| {
-        (
-            speciesandorphonfiltering(
-                &a,
-                Some(locus),
-                b.clone(),
-                species.as_ref(),
-                false,
-                args.cacheerase,
-            ),
-            b,
-        )
-    }) {
-        None => return Err(()),
-        Some((Err(a), ..)) => return Err(()),
-        Some((Ok(a), b)) => (a, b),
-    };
-    let filtering = match speciesandorphonfiltering(
-        &path,
-        Some(locus),
-        releaseversion,
-        &realspecies,
-        false,
-        args.cacheerase,
-    ) {
-        Err(e) => {
-            eprintln!("{e}");
-            return Err(());
-        }
-        Ok(b) => b,
-    };
-    let result: Vec<Newfasta> =
-        match blastcommand(filtering.as_path(), subject, Blastlevel::default()) {
-            Err(e) => {
-                eprintln!("{e}");
-                return Err(());
-            }
-            Ok(mut c) => {
-                statusblast(&mut c);
-                let status: Vec<Newfasta> = c
-                    .iter()
-                    .map(|c| {
-                        let b: &dyn Blastcalc = c;
-                        Newfasta::from(b)
-                    })
-                    .collect();
-                let sequence = status.iter().fold(String::new(), |mut acc, f| {
-                    let f: &dyn Seqresult = f;
-                    acc.push_str(&format!("\n{}", f));
-                    acc
-                });
-                if let Err(e) = fs::write("sequence_finished.fasta", sequence) {
-                    eprintln!("An error has occured while priting sequence: {e}.");
-                    return Err(());
-                }
-                status
-            }
-        };
-    if result.is_empty() {
-        eprintln!(
-            "BLAST result is empty. No new alleles matching IMGT criteria has been identified."
-        );
-        return Err(());
-    }
-    Ok(result)
-} */
 pub(crate) fn submit(
     args: &Args,
     locus: &[crate::LocusInfos],
     c: &[Genehit],
     realspecies: &Species,
 ) -> Result<(), String> {
-    //let result: Vec<Newfasta> = c.into_iter().map(Newfasta::newfromblastowner).collect();
     let dir = env::temp_dir();
-    /* if dir.is_dir() {
-        eprintln!("Archive directory exists, going to be deleted.");
-        if let Err(e) = fs::remove_dir_all(&dir) {
-            let dir = dir.display();
-            return Err(format!("Cannot remove the directory {dir}, error is {e}."));
-        }
-    } */
     let dirtemp = match TempDir::new_in(dir) {
         Err(e) => return Err(format!("Cannot create archive directory, error is {e}")),
         Ok(p) => p,
@@ -1167,22 +1052,6 @@ pub(crate) fn submit(
         Some(Err(e)) => return Err(format!("Error with assembly: {e}")),
         Some(Ok(b)) => b,
     };
-    /* let locuspos =
-        File::create(dir.join("newloc.csv")).map_err(|f| format!("Locus csv, error is {f}"))?;
-    locuspos
-        .lock()
-        .map_err(|f| format!("Error acquiring lock. Error is {f}"))?;
-    let mut csv = csv::WriterBuilder::new()
-        .comment(Some(b'#'))
-        .delimiter(b'\t')
-        .has_headers(false)
-        .from_writer(locuspos);
-    for loci in locus.iter() {
-        csv.serialize(loci)
-            .map_err(|p| format!("Error serializing locus position: {p}"))?;
-    }
-    csv.flush()
-        .map_err(|p| format!("Error serializing locus position: {p}"))?; */
     let lightbam = dir.join("outlight.bam");
     generatelightbam(args, &lightbam, None, locus)?;
     let sequencefile = generatesequence(args, dir, false, locus)?;
@@ -1685,12 +1554,6 @@ pub(crate) fn getprogressbar<R>(size: u64, reader: R) -> io::Result<ProgressRead
     })
 }
 pub(crate) fn submission(token: &str, species: &Species, archive: Filecrea) -> io::Result<()> {
-    /* let multipart = reqwest::blocking::multipart::Form::new()
-    .file("genelist", "submission/genelist.csv")?
-    .file("sequences", "submission/sequences.txt")?
-    .file("locuspos", "submission/locus.txt")?
-    .text("type","submission")
-    .file("locus", "submission/locus.bam")?; */
     let file_size = archive.getpath().metadata()?.len();
     let progress_reader = getprogressbar(file_size, archive.getfile()?)?;
     let zip = reqwest::blocking::multipart::Form::new()
@@ -1739,6 +1602,5 @@ pub(crate) fn submission(token: &str, species: &Species, archive: Filecrea) -> i
             format!("An unexpected error has occured. Please retry later. Error is {e}"),
         )),
     }?;
-    //std::fs::remove_file(archive)?;
     Ok(())
 }

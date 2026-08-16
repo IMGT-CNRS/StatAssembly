@@ -1,6 +1,10 @@
+/*
+* IMGT/StatAssembly
+Available under EUPL license
+Made by: Guilhem Zeitoun and IMGT Team
+*/
 use std::io;
 use std::io::ErrorKind::InvalidInput;
-// main.rs
 use std::io::Write;
 use std::path::Path;
 use std::{collections::HashMap, fs::File};
@@ -8,16 +12,17 @@ use std::{collections::HashMap, fs::File};
 use itertools::Itertools;
 use num_format::{Locale, ToFormattedString};
 use oxidize_pdf::document::DocumentEncryption;
+
 use oxidize_pdf::encryption::{OwnerPassword, UserPassword};
 use oxidize_pdf::{Color, Document, Font, Image, Page, PageTables, TableOptions, encryption};
 use serde::Serialize;
 
-use crate::r#struct::{Blastmatch, Filecrea, GeneInfos, LocusInfos};
+use crate::r#struct::{Blastmatch, Filecrea, GeneInfos, Genehit, LocusInfos};
 use crate::{AUTHOR, NAME, VERSION, getgeneinfos};
 
 pub(crate) fn generatepdf(
     infos: &[LocusInfos],
-    hash: &HashMap<LocusInfos, Vec<Blastmatch>>,
+    hash: &HashMap<LocusInfos, Vec<Genehit>>,
     outdir: &Path,
 ) -> io::Result<Filecrea> {
     let locusdata: Vec<Vec<String>> = infos
@@ -28,16 +33,15 @@ pub(crate) fn generatepdf(
             b.push(a.getcontig().to_string());
             b.push(a.start.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.end.getobasedpos().to_formatted_string(&Locale::en));
-            b.push(a.complement.to_string());
+            b.push(a.strand.to_string());
             b.push(a.status.to_string());
             b
         })
         .collect();
-    let hashdata: Vec<(&LocusInfos, Vec<GeneInfos>)> = hash
-        .into_iter()
-        .map(|(a, f)| (a, getgeneinfos(&f)))
+    let hashdata: Vec<GeneInfos> = hash
+        .values()
+        .flat_map(|f| f.iter().map(|b| GeneInfos::from(b.geneinfo.clone())))
         .collect();
-    let hashdata: Vec<GeneInfos> = hashdata.into_iter().map(|(a, b)| b).flatten().collect();
     let elem: Vec<Vec<String>> = hashdata
         .into_iter()
         .map(|a| {
@@ -53,7 +57,7 @@ pub(crate) fn generatepdf(
         .collect();
     // Create a new document
     let mut doc = Document::new();
-    doc.set_title("IMGT/StatAssembly summary");
+    doc.set_title(format!("IMGT/StatAssembly version {} summary", VERSION));
 
     // Create a page
     let mut page = Page::a4();

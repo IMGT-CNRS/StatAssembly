@@ -1,8 +1,9 @@
 /*
+ * IMGT/StatAssembly
 This software allows the analysis of BAM files to identify the confidence on a locus (specifically IG and TR) as well as allele confidence.
 It was created and used by IMGT Team (https://www.imgt.org).
 Available under EUPL license
-Made by: Guilhem Zeitoun
+Made by: Guilhem Zeitoun and IMGT Team
 */
 #![warn(clippy::unwrap_used)]
 #![warn(clippy::expect_used)]
@@ -37,10 +38,10 @@ use strum::IntoEnumIterator;
 //use noodles_fasta::{self as fasta, record::Sequence};
 use crate::r#struct::*;
 use crate::submissions::{
-    GITHUBVERSION, INVALIDCOVERAGE, NOTENOUGHMATCHREADS, REQUESTCLIENT, SOFTCLIPTOOMUCH,
-    SUSPICIOUSPOSITIONALERT, askforsubmission, checkifblastpresent, generatelightbam,
-    generatesequence, genesblast, getindexforbam, getprogressbarclassic, getprogressbarspin,
-    positionfiltering,
+    GITHUBHOME, GITHUBVERSION, INVALIDCOVERAGE, NOTENOUGHMATCHREADS, REQUESTCLIENT,
+    SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT, askforsubmission, checkifblastpresent,
+    generatelightbam, generatesequence, genesblast, getindexforbam, getprogressbarclassic,
+    getprogressbarspin, positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use extended_htslib::bam::record::{Cigar, CsValue};
@@ -127,26 +128,6 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
         }
     }
 }
-/* fn blasttogenelist(list: &[Blastmatch], new: bool) -> Vec<GeneInfos> {
-    let mut vec = Vec::new();
-    for elem in list.iter().filter(|p| !new || p.onlynewalleles()) {
-        let (posa, posb) = elem.getpos();
-        let (posa, posb) = match (posa.try_into(), posb.try_into()) {
-            (Ok(a), Ok(b)) => (a, b),
-            _ => (0, 0),
-        };
-        let info = GeneInfos {
-            gene: getnamefromblast(elem.qseqid()).unwrap_or("unknown".to_string()),
-            chromosome: elem.sseqid.clone(),
-            strand: elem.getstrand(),
-            start: Position::newfromoposition( min(posa, posb)),
-            end: Position::newfromoposition( max(posa, posb)),
-            status: OkStatus::default(),
-        };
-        vec.push(info);
-    }
-    vec
-} */
 #[allow(clippy::type_complexity)]
 fn iteralert(
     args: &Args,
@@ -955,61 +936,6 @@ fn available_memory() -> Option<usize> {
     let available_mem: usize = size.parse().ok()?;
     Some(available_mem)
 }
-/*
-fn setgraphbitmap<'a>(
-    haplotype: usize,
-    haplotypebool: bool,
-    args: &'a Args,
-    outputdir: &Path,
-    speciesblast: &Species,
-    floci: &LocusInfos,
-) -> Result<HashMap<Haplotype, Vec<(String, ImageType)>>, String> {
-    let readresultsize = (
-        1800,
-        1000 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
-    );
-    let mismatchsize = (
-        1200,
-        600 * std::convert::TryInto::<u32>::try_into(haplotype).unwrap_or(1),
-    );
-    let elem = if haplotypebool {
-        vec![Haplotype::Primary]
-    } else {
-        Haplotype::iter().collect()
-    };
-    let mut list: HashMap<Haplotype, Vec<(String, ImageType)>> = HashMap::new();
-    //Need to peuplate the HashMap before else Image has bad lifetime
-    for haplo in elem.iter() {
-        for fgraph in ["readresult", "mismatchgraph"] {
-            let ext = if args.svg { "svg" } else { "png" };
-            let outputfile = outputdir.join(givename(
-                &speciesblast,
-                &floci.getlocus(),
-                &floci.contig,
-                haplotypebool,
-                &format!("{fgraph}.{ext}"),
-                true,
-            ));
-            let size = if fgraph == "readresult" {
-                readresultsize
-            } else {
-                mismatchsize
-            };
-            let root = if args.svg {
-                ImageType::Svg((outputfile, size))
-            } else {
-                ImageType::Png((outputfile, size))
-            };
-            if let Some(b) = list.get_mut(&haplo) {
-                b.push((fgraph.to_string(), root));
-            } else {
-                list.insert(haplo.clone(), vec![(fgraph.to_string(), root)]);
-            }
-        }
-    }
-    Ok(list)
-}
-*/
 fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, HashMapinfo>> {
     let mut pos: BTreeMap<Position, HashMapinfo> = BTreeMap::new();
     let mut reader = match getreaderoffile(&args) {
@@ -1033,9 +959,6 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
         //return ExitCode::FAILURE;
     }
     let mut nocount = true;
-    //let filename = outputdir.join(format!("{}.pileup", &loci.locus));
-    //let file = File::create(&filename).unfwrap();
-    //let mut writer = BufWriter::new(file);
     let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
     //Populate all B-Tree position, 0-based, invert if locus complement
     let iterator: Vec<(usize, i64)> = if loci.strand.isrev() {
@@ -1089,12 +1012,6 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
             && let Ok(a) = &progress
         {
             a.set_position(count);
-            /* let _ = writeln!(
-                lock,
-                "Processed {} reads in {:.3} s",
-                count.to_formatted_string(&Locale::en),
-                Instant::now().saturating_duration_since(time).as_secs_f32()
-            ); */
         }
         nocount = false;
         match processcounting(&args, &mut pos, message, loci, &p, sep) {
@@ -1206,8 +1123,8 @@ fn findanalyse(
 }
 fn main() -> ExitCode {
     let mut args = Args::parse();
-    if checknewversion() {
-        return ExitCode::FAILURE;
+    if !args.noversioncheck {
+        checknewversion();
     }
     if !args.lowmemory
         && let Some(b) = available_memory()
@@ -1526,6 +1443,7 @@ fn main() -> ExitCode {
                     locushash(
                         &geneli,
                         loci,
+                        &speciesblast,
                         &blasthit.unwrap_or(Vec::new()),
                         &mut locushashresult,
                     );
@@ -1583,7 +1501,7 @@ fn main() -> ExitCode {
                         }
                         (Ok(_), Ok(b)) => b,
                     };
-                    locushash(&result, loci, &data, &mut locushashresult);
+                    locushash(&result, loci, &speciesblast, &data, &mut locushashresult);
                 } else {
                     eprintln!("No assembly to check gene list.");
                 }
@@ -1593,6 +1511,11 @@ fn main() -> ExitCode {
     }
     drop(oldlocus); //Drop to allow unwrap or clone to actually not clone
     let locus = unmergelocus(Rc::unwrap_or_clone(groupedin));
+    if let Some(b) = args.outlightbam.as_ref()
+        && b.eq("default")
+    {
+        args.outlightbam = Some(PathBuf::from(&args.outdir).join("outlight.bam"));
+    }
     if let Some(light) = &args.outlightbam
         && let Err(e) = generatelightbam(&args, light, getindexforbam(&light).as_ref(), &locus)
     {
@@ -1608,6 +1531,7 @@ fn main() -> ExitCode {
         eprintln!("Error setting new locus result: {e}");
     }
     {
+        locushashresult.values_mut().for_each(|p| p.sort_unstable());
         let mut genes: Vec<GeneInfos> = locushashresult
             .values_mut()
             .flat_map(|genehit| genehit.into_iter().map(|g| g.geneinfo.clone().into()))
@@ -1665,10 +1589,11 @@ fn filternewandvalidatedalleles(entry: &mut HashMap<LocusInfos, Vec<Genehit>>) {
 fn locushash(
     result: &[GeneInfosFinish],
     loci: &LocusInfos,
+    realspecies: &Species,
     data: &[Blastmatch],
     locushashresult: &mut HashMap<LocusInfos, Vec<Genehit>>,
 ) {
-    let mut generation = Genehit::constructfromvec(&result, &data);
+    let mut generation = Genehit::constructfromvec(&result, realspecies, &data);
     if let Some(a) = locushashresult.get_mut(&loci) {
         a.append(&mut generation);
     } else {
@@ -1763,7 +1688,10 @@ where
                 geneinfo.getchromosome(),
                 locus.getlocushaplo().to_string().as_str(),
                 geneinfo.getstrand().to_string().as_str(),
-                hit.map_or("No hits", |f| f.getallelename()),
+                hit.map_or("No hits".to_string(), |f| {
+                    Genename::from(f.getquery().clone()).to_string()
+                })
+                .as_str(),
                 hit.map_or("Unknown".to_string(), |f| f.getidentity().to_string())
                     .as_str(),
             ])?;
@@ -1974,39 +1902,40 @@ fn generategeneinfos(
         }
         let range = record.reference_start()..record.reference_end();
         coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
-        'outer: for (_, gread, cigar) in record.aligned_block_pairs_cigar() {
+        for (_, gread, cigar) in record.aligned_block_pairs_cigar() {
+            if gread.start.saturating_sub(1) > gene.end.getzbasedpos() {
+                break;
+            }
             if matches!(cigar, Cigar::Ins(_)) {
                 let p = gread.start.saturating_sub(1); //Because end position is exclusive
                 match hash.get_mut(&Position::newfromzposition(p)) {
                     Some(d) => d.addinsertion(1),
                     None => {
                         if p > gene.end.getzbasedpos() {
-                            break 'outer;
+                            break;
                         }
                     } //Outside coverage of gene
                 }
             }
-        }
-        'outer: for [start, end] in record.aligned_blocks() {
-            for p in start..end {
-                match hash.get_mut(&Position::newfromzposition(p)) {
-                    Some(d) => d.addindel(1),
-                    None => {
-                        if start > gene.end.getzbasedpos() {
-                            break 'outer;
-                        }
-                    } //Outside coverage of gene
+            if matches!(cigar, Cigar::Match(_) | Cigar::Diff(_) | Cigar::Equal(_)) {
+                for p in gread.clone() {
+                    match hash.get_mut(&Position::newfromzposition(p)) {
+                        Some(d) => d.addindel(1),
+                        None => {
+                            if p > gene.end.getzbasedpos() {
+                                break;
+                            }
+                        } //Outside coverage of gene
+                    }
                 }
             }
-        }
-        if !args.force {
-            'outer: for [start, end] in iterblock(&record).unwrap_or_default() {
-                for p in start..end {
+            if !args.force && matches!(cigar, Cigar::Equal(_)) {
+                for p in gread {
                     match hash.get_mut(&Position::newfromzposition(p)) {
                         Some(d) => d.addmatch(1),
                         None => {
-                            if start > gene.end.getzbasedpos() {
-                                break 'outer;
+                            if p > gene.end.getzbasedpos() {
+                                break;
                             }
                         } //Outside coverage of gene
                     }
@@ -2293,25 +2222,25 @@ fn printpossus(
         false,
     ));
     let mut csv = csv::WriterBuilder::new()
-        .has_headers(true)
+        //.has_headers(true)
         .comment(Some(b'#'))
         .delimiter(b'\t')
         .from_path(&outputfile)?;
-    /* if data.is_empty() {
-        csv.write_record(["No warning or alerting positions found."])?;
-    } else { */
-    csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])?;
-    for (gene, vec) in data {
-        csv.write_field(gene.gene.to_string())?;
-        let infos = vec.iter().fold(String::new(), |mut acc, f| {
-            acc.push_str(&format!("-{}({})", f.1, if f.0 { "!" } else { "~" }));
-            acc
-        });
-        let infos = infos.trim_matches('-');
-        csv.write_field(infos)?;
-        csv.write_record(None::<&[u8]>)?;
+    if data.is_empty() {
+        csv.write_record(["#No warning or alerting positions found."])?;
+    } else {
+        csv.write_record(["Gene", "Positions (! for alerting, ~ for warning)"])?;
+        for (gene, vec) in data {
+            csv.write_field(gene.gene.to_string())?;
+            let infos = vec.iter().fold(String::new(), |mut acc, f| {
+                acc.push_str(&format!("-{}({})", f.1, if f.0 { "!" } else { "~" }));
+                acc
+            });
+            let infos = infos.trim_matches('-');
+            csv.write_field(infos)?;
+            csv.write_record(None::<&[u8]>)?;
+        }
     }
-    //}
     csv.flush()?;
     println!(
         "Gene suspicious position has been saved to {}",
@@ -2340,19 +2269,34 @@ where
         full_palette::RED
     };
     let (top, bottom) = root.split_vertically((70).percent_height());
+    let text = format!(
+        "Reads coverage for {} ({}) on {} ({})",
+        genename,
+        gene.strand,
+        loci.getcontig(),
+        loci.gethaplotype()
+    );
+    let mut size = 20; //Size between 12 and 20px depending of size of text
+    while size > 12 {
+        let length = root.estimate_text_size(&text, &("sans-serif", size).into_text_style(&root));
+        if let Ok((calculatedwidth, _)) = length
+            && calculatedwidth
+                < 85 * top
+                    .get_pixel_range()
+                    .0
+                    .max()
+                    .map_or(u32::MAX, |b| b.try_into().unwrap_or(u32::MAX))
+                    / 100
+        {
+            break;
+        }
+        size -= 1;
+    }
     let mut chart = ChartBuilder::on(&top)
         .set_label_area_size(LabelAreaPosition::Left, 40)
-        .right_y_label_area_size(60)
+        .right_y_label_area_size(40)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
-        .caption(
-            format!(
-                "Reads coverage for {} ({}-{})",
-                genename,
-                loci.gethaplotype(),
-                gene.strand
-            ),
-            ("sans-serif", 22, &colorgene),
-        )
+        .caption(text, ("sans-serif", size, &colorgene))
         .build_cartesian_2d(1..hash.len(), 0..max)
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //Reverse complement genes
@@ -2492,39 +2436,12 @@ where
                 )
             });
     }
-    //Continue graph
-    /* chart
-        .configure_mesh()
-        .x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
-        .x_desc("Position in sequence (bp)")
-        .y_desc("Reads count")
-        .label_style(text_style.clone())
-        .light_line_style(GREY_400.mix(0.6))
-        .x_max_light_lines(5)
-        .y_max_light_lines(2)
-        //.disable_y_mesh()
-        .draw()
-        .unwrap();
-    if !args.nolegend {
-        chart
-            .configure_series_labels()
-            .position(plotters::chart::SeriesLabelPosition::LowerRight)
-            .background_style(WHITE.mix(0.6))
-            .label_font(text_style)
-            .border_style(BLACK.mix(0.8))
-            .draw()
-            .unwrap();
-    } */
-    //Secondary
-    /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
-    //let softclipmax = core::cmp::max(calc,max);
-     */
-    let max = (hash
+    let max = hash
         .iter()
         .map(|(_, p)| (p.getsoftclip() * 100f32.round()) as usize)
         .max()
         .unwrap_or(0)
-        + 5); //Soft clips is on percent (x100)
+        + 5; //Soft clips is on percent (x100)
     let mut secondary = chart.set_secondary_coord(
         usize::try_from(loci.start.getobasedpos()).unwrap_or(0)
             ..usize::try_from(loci.end.getobasedpos()).unwrap_or(0),
@@ -2585,7 +2502,7 @@ where
     let max = 100;
     let mut chart = ChartBuilder::on(&bottom)
         .set_label_area_size(LabelAreaPosition::Left, 40)
-        .right_y_label_area_size(60)
+        .right_y_label_area_size(40)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption("Average PHRED score for matching reads", ("sans-serif", 18))
         .build_cartesian_2d(1..hash.len(), 0..max)
@@ -2954,7 +2871,7 @@ where
     root.present().map_err(|_| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())
 }
-pub(crate) fn checknewversion() -> bool {
+pub(crate) fn checknewversion() {
     let r = match REQUESTCLIENT
         .get(GITHUBVERSION.to_string())
         .send()
@@ -2963,13 +2880,13 @@ pub(crate) fn checknewversion() -> bool {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error checking new version: {e}");
-            return false;
+            return;
         }
     };
     let r = if let Ok(r) = r {
         r
     } else {
-        return false;
+        return;
     };
     if let Some(a) = r.first() {
         let version = &a.name;
@@ -2980,22 +2897,22 @@ pub(crate) fn checknewversion() -> bool {
                 if liveversion.gt(&actual) && liveversion.patch > actual.patch =>
             {
                 eprintln!(
-                    "A patch version of {} is available. Please update when possible.",
-                    NAME.as_str()
+                    "A patch version of {} is available ({}). Please update when possible at {}.",
+                    NAME.as_str(),
+                    version,
+                    GITHUBHOME.to_string()
                 );
-                false
             }
             (Ok(liveversion), Ok(actual)) if liveversion.gt(&actual) => {
                 eprintln!(
-                    "Another version of {} is available. Please update to continue. Exiting.",
-                    NAME.as_str()
+                    "Another version of {} is available ({}). Please update at {} when possible.",
+                    NAME.as_str(),
+                    version,
+                    GITHUBHOME.to_string()
                 );
-                true
             }
-            _ => false,
+            _ => (),
         }
-    } else {
-        false
     }
 }
 pub(crate) fn geneisokay(reads100m: usize, hash: &BTreeMap<Position, Posread>) -> OkStatus {
@@ -3297,69 +3214,6 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("Overlapping reads")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::ORANGE_300));
-    //Secondary
-    /* let softclipmax = ((softclipmax as f32 /max as f32 * 10.0).ceil() / 10.0 * max as f32) as i64;
-    //let softclipmax = core::cmp::max(calc,max);
-     */
-    /* let mut secondary = chart.set_secondary_coord(
-        loci.start.getobasedpos()..loci.end.getobasedpos(),
-        0..softclipmax,
-    );
-    secondary
-        .configure_mesh()
-        .x_label_formatter(&|f| {
-            format!(
-                "{} ({})",
-                f.to_formatted_string(&Locale::en),
-                pos.iter()
-                    .find(|p| { p.position.getobasedpos() == *f })
-                    .unwrap()
-                    .locuspos
-                    .getobasedpos()
-                    .to_formatted_string(&Locale::en)
-            )
-        })
-        .x_desc("Genomic position (bp)")
-        .y_desc("Average softclip")
-        .disable_x_mesh()
-        .label_style(text_style.clone())
-        .y_max_light_lines(2)
-        //.disable_y_mesh()
-        .draw()
-        .unwrap();
-    //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
-    secondary
-        .draw_secondary_series(
-            Histogram::vertical(&secondary)
-                .baseline(0)
-                .margin(3)
-                .data(pos.iter().filter_map(|p| {
-                    if p.softclips.is_normal() {
-                        Some((
-                            usize::try_from(p.position.getobasedpos()).unwrap(),
-                            (p.softclips * 100f32) as i64,
-                        ))
-                    } else {
-                        None
-                    }
-                }))
-                .style(full_palette::BLACK.mix(0.4).filled()),
-        )
-        .unwrap()
-        .label("Average softclip")
-        .legend(|(x, y)| {
-            plotters::element::Rectangle::new(
-                [(x, y), (x + 15, y + 5)],
-                full_palette::BLACK.filled(),
-            )
-        });
-    secondary
-        .configure_secondary_axes()
-        .y_desc("Soft clips")
-        .label_style(text_style.clone())
-        //.disable_y_mesh()
-        .draw()
-        .unwrap();     */
     if !args.nolegend {
         chart
             .configure_series_labels()

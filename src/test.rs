@@ -1,3 +1,8 @@
+/*
+* IMGT/StatAssembly
+Available under EUPL license
+Made by: Guilhem Zeitoun and IMGT Team
+*/
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -179,12 +184,6 @@ mod tests {
         }
         assert_eq!(data.iter().nth(3069).unwrap().qual, Some(80), "Issue");
         assert!(data.iter().nth(1022).unwrap().qual.is_none(), "Issue");
-    }
-    #[test]
-    fn sort() {
-        let firstread = "SRR11292123.93478";
-        let secondread = "SRR9087599.373459";
-        assert!(natord::compare_ignore_case(firstread, secondread) == cmp::Ordering::Greater);
     }
     #[test]
     fn testbam() {
