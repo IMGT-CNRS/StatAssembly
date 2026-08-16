@@ -1211,7 +1211,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut locushashresult: HashMap<LocusInfos, Vec<Genehit>> = HashMap::new();
+    let mut locushashresult: BTreeMap<LocusInfos, Vec<Genehit>> = BTreeMap::new();
     let grouped = Rc::make_mut(&mut groupedin);
     for locus in grouped {
         let haplotype = locus.len();
@@ -1571,8 +1571,8 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 fn filtervalidatedallelesrecreate(
-    entry: &HashMap<LocusInfos, Vec<Genehit>>,
-) -> HashMap<LocusInfos, Vec<Genehit>> {
+    entry: &BTreeMap<LocusInfos, Vec<Genehit>>,
+) -> BTreeMap<LocusInfos, Vec<Genehit>> {
     let mut entry = entry.clone();
     entry
         .values_mut()
@@ -1580,7 +1580,7 @@ fn filtervalidatedallelesrecreate(
     entry.retain(|g, v| g.getstatus().isvalidated() && !v.is_empty());
     entry
 }
-fn filternewandvalidatedalleles(entry: &mut HashMap<LocusInfos, Vec<Genehit>>) {
+fn filternewandvalidatedalleles(entry: &mut BTreeMap<LocusInfos, Vec<Genehit>>) {
     entry
         .values_mut()
         .for_each(|gene| gene.retain(|p| p.isnewalleleandvalid()));
@@ -1591,7 +1591,7 @@ fn locushash(
     loci: &LocusInfos,
     realspecies: &Species,
     data: &[Blastmatch],
-    locushashresult: &mut HashMap<LocusInfos, Vec<Genehit>>,
+    locushashresult: &mut BTreeMap<LocusInfos, Vec<Genehit>>,
 ) {
     let mut generation = Genehit::constructfromvec(&result, realspecies, &data);
     if let Some(a) = locushashresult.get_mut(&loci) {
@@ -1637,7 +1637,7 @@ fn printvalidatedallelesraw<T, W>(
     writer: &mut T,
     release: Option<W>,
     args: &Args,
-    locushash: &HashMap<LocusInfos, Vec<Genehit>>,
+    locushash: &BTreeMap<LocusInfos, Vec<Genehit>>,
 ) -> io::Result<()>
 where
     T: io::Write,
@@ -1704,7 +1704,7 @@ where
 fn printvalidatedalleles<T>(
     args: &Args,
     release: Option<T>,
-    locushash: &HashMap<LocusInfos, Vec<Genehit>>,
+    locushash: &BTreeMap<LocusInfos, Vec<Genehit>>,
 ) -> io::Result<()>
 where
     T: AsRef<str>,
@@ -2074,14 +2074,6 @@ fn genelist(
         return Ok(Vec::new());
     }
     let outputdir = &args.outdir;
-    let outputfile = outputdir.join(givename(
-        species,
-        loci.getlocus(),
-        &loci.getcontig(),
-        loci.gethaplotype().isprimary(),
-        "geneanalysis.csv",
-        false,
-    ));
     let mut finale: Vec<GeneInfosFinish> = Vec::with_capacity(genes.len());
     //For each gene, list of alerting positions, bbool said suspicious or warning position
     let mut alertingpositions: BTreeMap<GeneInfos, Vec<(bool, usize)>> = BTreeMap::new();
@@ -2123,11 +2115,21 @@ fn genelist(
     }
     progressbar.finish();
     finale.sort_unstable(); //Sort the table
+    let outputfile = outputdir.join(givename(
+        species,
+        loci.getlocus(),
+        &loci.getcontig(),
+        loci.gethaplotype().isprimary(),
+        "geneanalysis.csv",
+        false,
+    ));
     let mut csv = csv::WriterBuilder::new()
         .has_headers(true)
+        .flexible(true)
         .comment(Some(b'#'))
         .delimiter(b'\t')
         .from_path(&outputfile)?;
+    csv.write_record(&[format!("# All reads: {}", args.allreads)])?;
     for gene in finale.iter() {
         csv.serialize(gene)?;
     }

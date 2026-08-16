@@ -25,7 +25,7 @@ use quick_xml::events::Event;
 use reqwest::blocking::multipart;
 use reqwest::{StatusCode, tls};
 use std::cmp::{Ordering, max, min};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io::ErrorKind::InvalidData;
 use std::io::{BufWriter, IsTerminal, Seek, Write};
@@ -832,8 +832,6 @@ where
             }
             Ok(Some(_)) => {
                 println!("BLAST has been done. Parsing.");
-                println!("File is {}", output);
-                sleep(Duration::new(20, 0));
                 let file = File::open(output)?;
                 let reader = BufReader::new(file);
                 let mut csv = csv::ReaderBuilder::new()
@@ -1175,7 +1173,7 @@ pub(crate) fn askforsubmission(
     realspecies: &Species,
     locus: &[LocusInfos],
     args: &Args,
-    infos: &HashMap<LocusInfos, Vec<Genehit>>,
+    infos: &BTreeMap<LocusInfos, Vec<Genehit>>,
 ) -> io::Result<()> {
     let quest = REQUESTCLIENT
         .get(SUBMISSIONLINK.as_str())
@@ -1221,10 +1219,7 @@ pub(crate) fn askforsubmission(
                 return Ok(());
             }
         }
-        let mut blastmatch: Vec<Genehit> = Vec::new();
-        for data in infos.values() {
-            blastmatch.append(&mut data.clone());
-        }
+        let blastmatch: Vec<Genehit> = infos.values().flat_map(|p| p.clone()).collect();
         submit(args, locus, &blastmatch, realspecies)
             .map_err(|f| io::Error::new(io::ErrorKind::InvalidInput, f.to_string()))?;
     }

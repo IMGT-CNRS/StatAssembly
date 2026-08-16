@@ -329,6 +329,7 @@ pub(crate) fn locusallposition(
             todo!(
                 "Return one or two bornes, how does it change locus position?? should we do this beore find_global_range?"
             );
+            todo!("Check blast results")
         } */
         bornes2.sort_unstable_by(|a, b| {
             match a
@@ -505,35 +506,35 @@ pub(crate) fn find_global_best_range(
             groups.insert((loci, Haplotype::Alternate), (sseq, complement, min, max));
         }
     }
-    Some(
-        groups
-            .into_iter()
-            .map(|((locus, hap), (sseq, complement, start, end))| {
-                LocusInfos::new(
-                    locus,
-                    hap,
-                    sseq,
-                    Position::new(
-                        false,
-                        start
-                            .checked_sub(BORNES)
-                            .unwrap_or(1)
-                            .try_into()
-                            .unwrap_or(1),
-                    ),
-                    Position::new(
-                        false,
-                        end.checked_add(BORNES).unwrap_or(1).try_into().unwrap_or(1),
-                    ),
-                    if complement {
-                        Strand::Minus
-                    } else {
-                        Strand::Plus
-                    },
-                )
-            })
-            .collect(),
-    )
+    let mut loc: Vec<LocusInfos> = groups
+        .into_iter()
+        .map(|((locus, hap), (sseq, complement, start, end))| {
+            LocusInfos::new(
+                locus,
+                hap,
+                sseq,
+                Position::new(
+                    false,
+                    start
+                        .checked_sub(BORNES)
+                        .unwrap_or(1)
+                        .try_into()
+                        .unwrap_or(1),
+                ),
+                Position::new(
+                    false,
+                    end.checked_add(BORNES).unwrap_or(1).try_into().unwrap_or(1),
+                ),
+                if complement {
+                    Strand::Minus
+                } else {
+                    Strand::Plus
+                },
+            )
+        })
+        .collect();
+    loc.sort_unstable();
+    Some(loc)
 }
 pub(crate) fn sendresult(request: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
     match request.get(url).send() {

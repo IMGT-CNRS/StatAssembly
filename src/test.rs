@@ -7,8 +7,7 @@ Made by: Guilhem Zeitoun and IMGT Team
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::{
-        cmp::{self},
-        collections::HashMap,
+        collections::BTreeMap,
         fs,
         io::{BufReader, Cursor, ErrorKind::UnexpectedEof, Read as read2, Seek},
         path::{Path, PathBuf},
@@ -441,7 +440,7 @@ mod tests {
         let mut i = 0;
         let mut done = false;
         let mean = getorsetparams(Path::new("example_files/results/.mean"), &args4).unwrap();
-        let mut locushash: HashMap<LocusInfos, Vec<Genehit>> = HashMap::new();
+        let mut locushash: BTreeMap<LocusInfos, Vec<Genehit>> = BTreeMap::new();
         for loci in result.iter_mut() {
             let info = posread(&args4, &loci).unwrap();
             loci.setstatus(mean.getmean(), &args4, &info);
@@ -518,7 +517,7 @@ mod tests {
                             })
                             .next()
                             .unwrap();
-                        let mut fakehash = HashMap::new();
+                        let mut fakehash = BTreeMap::new();
                         fakehash.insert(entry.0.clone(), vec![entry.1.clone()]);
                         let mut cursor = Cursor::new(Vec::new());
                         {

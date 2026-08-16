@@ -1302,6 +1302,7 @@ impl Blastmatch {
             identity,
         }
     }
+    #[allow(unused)]
     /// Try to parse subject into name
     pub(crate) fn turnsubjectintoname(&self) -> Option<Name> {
         Name::from_str(self.getsubject()).ok()
