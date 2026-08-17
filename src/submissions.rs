@@ -512,7 +512,7 @@ pub(crate) fn statusblastvs(data: &mut Vec<Blast>) {
                 g != f
                     && g.sseqid == f.sseqid
                     && (g.length as f32 / g.qlen as f32 * g.pident.powf(1.1))
-                        >= (f.length as f32 / f.qlen as f32 * f.pident.powf(1.1))
+                        > (f.length as f32 / f.qlen as f32 * f.pident.powf(1.1))
             })
             .not()
     });
@@ -1407,7 +1407,7 @@ where
             if !data.is_sorted_by(|a, b| sorting(a, b) != Ordering::Greater) {
                 if !onemessage {
                     onemessage = true;
-                    println!("BAM was not sorted, sorting now.");
+                    println!("Sorting BAM file.");
                 }
                 data.sort_unstable_by(sorting);
             }

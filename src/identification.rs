@@ -24,6 +24,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fs::File,
+    intrinsics::unreachable,
     io::{
         self, BufReader, Cursor,
         ErrorKind::{self, InvalidFilename},
@@ -321,39 +322,6 @@ pub(crate) fn locusallposition(
         }
         Err(a) => Err(a),
     };
-    if let Some(bornes2) = &mut bornes
-        && let Ok(d) = &range
-    {
-        bornes2.retain(|p| d.iter().any(|k| k.getcontig() == p.getsubject()));
-        /* if args.haploid {
-            todo!(
-                "Return one or two bornes, how does it change locus position?? should we do this beore find_global_range?"
-            );
-            todo!("Check blast results")
-        } */
-        bornes2.sort_unstable_by(|a, b| {
-            match a
-                .getallelename()
-                .to_lowercase()
-                .cmp(&b.getallelename().to_lowercase())
-            {
-                Ordering::Equal => a
-                    .getsubject()
-                    .to_lowercase()
-                    .cmp(&b.getsubject().to_lowercase()),
-                ord => ord,
-            }
-        });
-        bornes2.dedup_by(|a, b| {
-            a.getsubject() == b.getsubject()
-                && a.getallelename().eq_ignore_ascii_case(b.getallelename())
-        });
-        if bornes2.is_empty() {
-            eprintln!("No bornes were identified.");
-        } else {
-            printpotentialbornes(bornes2, args)?;
-        }
-    }
     range.map(|f| (f, data, releaseversion))
 }
 pub(crate) fn retainbestmatch(blast: &mut Vec<Blast>) {
@@ -422,6 +390,15 @@ pub(crate) fn find_global_best_range(
         .iter()
         .filter_map(|p| p.getlocusname().map(|d| (d, p)))
         .into_group_map_by(|(l, f)| (l.clone(), f.getsubject()));
+    let mut bornes = match bornes {
+        Some(bornes) => Some(
+            bornes
+                .iter()
+                .filter_map(|p| p.getlocusname().map(|d| (d, p)))
+                .into_group_map_by(|(l, f)| (l.clone(), f.getsubject())),
+        ),
+        None => None,
+    };
     hash.iter_mut().for_each(|(_, v)| {
         v.sort_unstable_by(|(_, a), (_, b)| match a.getsubject().cmp(b.getsubject()) {
             Ordering::Equal => match a.getpos().0.cmp(&b.getpos().0) {
@@ -459,6 +436,19 @@ pub(crate) fn find_global_best_range(
         }
     }
     if let Some(borneblast) = &bornes {
+        let info = locus
+            .iter()
+            .map(|(key, val)| (key, val.iter().min(), val.iter().max()));
+        for (loc, min, max) in info {
+            let values = locus
+                .get_mut(loc)
+                .unwrap_or_else(|| unreachable!("Controlled beforehand"));
+            let findaborne = /*  */;
+            if std::cmp::max(b.sstart, b.send).abs_diff(std::cmp::min(a.send, a.sstart)) <= BORNES {
+                values.insert(borneblast.clone());
+                break 'borne;
+            }
+        }
         'borne: for borneblast in borneblast {
             for values in locus.values_mut() {
                 //todo!("Check min and max if already filtered and check good contig");

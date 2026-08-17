@@ -50,7 +50,7 @@ cargo run --release
 Here is the command to execute with example files from the repository folder on linux 64bits:
 
 ```bash
-binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -a example_files/assembly.fasta -f example_files/CHM13v2.0.bam -s human -l example_files/CHM13v2.0loc.csv -g example_files/CHM13v2.0geneloc.csv -o results/ full
+binaries/IMGT_StatAssembly_linux_x64_86 --totalread --extractedlength 4772468 -a example_files/assembly.fasta -f example_files/CHM13v2.0.bam -s human -z=results/locus.bam -l example_files/CHM13v2.0geneloc.csv -o results/ full
 ```
 
 The list of arguments used in the example (more available in software help):

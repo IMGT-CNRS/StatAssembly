@@ -1384,7 +1384,6 @@ pub trait Blastcalc {
     fn getchromosomefromsubject(&self) -> Option<String> {
         getchromosomefromblast(self.getsubject())
     }
-    #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
         Locus::from_str(self.getallelename().split_at(3).0).ok()
     }

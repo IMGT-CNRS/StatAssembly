@@ -44,34 +44,39 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - name: Setup OpenSSL
-      if: runner.os == 'windows'
-      shell: powershell
-      run: |
-          choco install openssl.light
-          $env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"
-          $env:OPENSSL_LIB_DIR="$env:OPENSSL_DIR\lib"
-          $env:OPENSSL_INCLUDE_DIR="$env:OPENSSL_DIR\include"
-          $env:OPENSSL_NO_VENDOR=1
-          $env:RUSTFLAGS="-Ctarget-feature=+crt-static"
-          $env:Path += ";$env:OPENSSL_DIR\bin"
-    - name: Install dependencies
-      if: runner.os == 'linux'
-      run: |
-          sudo apt-get update
-          sudo apt-get -y install \
-            libfontconfig1-dev \
-            libharfbuzz-dev \
-            libtiff-dev \
-            libconfig++-dev \
-            libconfig-dev
-    - uses: actions/checkout@v4
-    - uses: taiki-e/upload-rust-binary-action@v1
-      with:
-        bin: IMGT_StatAssembly
-        include: LICENSE,README.md
-        target: ${{ matrix.target }}
-        archive: $bin-$tag-$target
-        tar: unix
-        zip: windows
-        token: ${{ secrets.GITHUB_TOKEN }}
+        - uses: actions/checkout@v4
+        - name: Install dependencies
+          if: runner.os == 'Linux'
+          run: |
+              sudo apt-get update
+              sudo apt-get -y install \
+                libfontconfig1-dev \
+                libharfbuzz-dev \
+                libtiff-dev \
+                libconfig++-dev \
+                libconfig-dev
+        - name: Setup OpenSSL
+          if: runner.os == 'Windows'
+          shell: powershell
+          run: |
+              choco install openssl.light
+              echo "OPENSSL_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
+              echo "OPENSSL_LIB_DIR=C:\Program Files\OpenSSL-Win64\lib" >> $env:GITHUB_ENV
+              echo "OPENSSL_INCLUDE_DIR=C:\Program Files\OpenSSL-Win64\include" >> $env:GITHUB_ENV
+              echo "OPENSSL_NO_VENDOR=1" >> $env:GITHUB_ENV
+              echo "RUSTFLAGS=-Ctarget-feature=+crt-static" >> $env:GITHUB_ENV
+              echo "C:\Program Files\OpenSSL-Win64\bin" >> $env:GITHUB_PATH
+        - name: Setup OpenSSL
+          if: runner.os == 'macOS'
+          run: |
+              brew install openssl@3
+              echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> $GITHUB_ENV
+        - uses: taiki-e/upload-rust-binary-action@v1
+          with:
+            bin: IMGT_StatAssembly
+            include: LICENSE,README.md
+            target: ${{ matrix.target }}
+            archive: $bin-$tag-$target
+            tar: unix
+            zip: windows
+            token: ${{ secrets.GITHUB_TOKEN }}

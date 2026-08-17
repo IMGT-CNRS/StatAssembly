@@ -3251,6 +3251,7 @@ where
         .x_label_style(text_style.clone())
         .disable_x_axis()
         .disable_y_mesh()
+        .x_max_light_lines(10)
         .draw();
     let breaks: Vec<(i64, i64)> = pos
         .iter()
@@ -3308,8 +3309,8 @@ where
                 .baseline(0)
                 .margin(3)
                 .data(pos.iter().filter_map(|p| {
-                    if p.psoftclips.is_normal() {
-                        Some((p.position.getobasedpos(), (p.psoftclips * 100f32) as i64))
+                    if p.osoftclips.is_normal() {
+                        Some((p.position.getobasedpos(), (p.osoftclips * 100f32) as i64))
                     } else {
                         None
                     }
