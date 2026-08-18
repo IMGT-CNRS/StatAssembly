@@ -140,9 +140,6 @@ where
         .nth(2)
         .map(|f| f.to_string())
 }
-pub(crate) fn getallelefromblast(text: &Name) -> &str {
-    &text.gene
-}
 pub(crate) fn getchromosomefromblast<T>(text: T) -> Option<String>
 where
     T: AsRef<str>,

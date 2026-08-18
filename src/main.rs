@@ -1166,7 +1166,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let (locus, mut blastcheck, releaseversion) =
+    let (mut locus, mut blastcheck, releaseversion) =
         match locusposparser(&args, &speciesblast, blastpresent) {
             Err(f) => {
                 eprintln!("Error locus parser: {f}");
@@ -1185,6 +1185,7 @@ fn main() -> ExitCode {
         eprintln!("Error gene list: {e}");
         return ExitCode::FAILURE;
     }
+    locus.sort_unstable();
     if args.command == Command::Find {
         findanalyse(blastpresent, &blastcheck, &mut args, &locus, &speciesblast);
         endmessage(&firstinstant, &args);
@@ -1621,6 +1622,11 @@ where
         .flexible(true)
         .quote_style(csv::QuoteStyle::Necessary)
         .from_writer(writer);
+    if bornes.is_empty() {
+        csv.write_record(&["#No bornes found"])?;
+        csv.flush()?;
+        return Ok(());
+    }
     for borne in bornes {
         csv.write_record([
             borne.getallelename(),

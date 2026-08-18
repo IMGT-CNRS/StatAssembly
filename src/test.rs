@@ -159,12 +159,12 @@ mod tests {
         sleep(Duration::new(3, 0)); //Sleep for NCBI
         let pongo = Species::new("pongo");
         let expected = "The term used is not a species or an subspecies.".to_string();
-        if let Err(e) = pongo
-            && e == SpeciesError::Invalid(expected)
+        if let Err(e) = &pongo
+            && e == &SpeciesError::Invalid(expected)
         {
             ()
         } else {
-            panic!("Pongo should be blocked");
+            panic!("Pongo should be blocked. Got {:?}", pongo.as_ref());
         }
     }
     #[test]
@@ -190,6 +190,7 @@ mod tests {
         let a = Filecrea::createtemp(None, Some("test.bam")).unwrap();
         let b = Filecrea::createtemp(None, Some("test.bam.csi")).unwrap();
         // Fake args as a Vec<&str>
+        let output = format!("-z={}", a.getpath().to_str().unwrap());
         let fake_args = vec![
             "IMGT_StatAssembly",
             "-f",
@@ -205,8 +206,7 @@ mod tests {
             "example_files/CHM13v2.0geneloc.csv",
             "-o",
             testo.path().to_str().unwrap(),
-            "-z",
-            a.getpath().to_str().unwrap(),
+            &output,
             "analyze",
         ];
         let args4 = Args::try_parse_from(fake_args)
@@ -408,6 +408,7 @@ mod tests {
     fn testlocuspositionandgenes() {
         let testo = TempDir::new().unwrap();
         let a = NamedTempFile::with_suffix("test4.bam").unwrap();
+        let output = format!("-z={}", a.path().to_str().unwrap());
         // Fake args as a Vec<&str>
         let fake_args = vec![
             "IMGT_StatAssembly",
@@ -423,8 +424,7 @@ mod tests {
             "example_files/CHM13v2.0geneloc.csv",
             "-o",
             testo.path().to_str().unwrap(),
-            "-z",
-            a.path().to_str().unwrap(),
+            &output,
             "analyze",
         ];
         // Parse using `try_parse_from`

@@ -4,8 +4,7 @@ Available under EUPL license
 Made by: Guilhem Zeitoun and IMGT Team
 */
 use crate::submissions::{
-    REQUESTCLIENT, getallelefromblast, getchromosomefromblast, getpositionfromblast,
-    getspeciesfromncbi,
+    REQUESTCLIENT, getchromosomefromblast, getpositionfromblast, getspeciesfromncbi,
 };
 use crate::{
     ALERTPERC, DELIMITERFASTA, MATCHREADS, MIN_PHREDSCORE, MIN_READLENGTH, SOFTCLIPRATIO,
@@ -530,9 +529,7 @@ impl Species {
                     return Err(SpeciesError::Blocked);
                 }
                 Some(b) if b.kind() == InvalidInput => {
-                    return Err(SpeciesError::Invalid(format!(
-                        "Invalid species. Error is {b}"
-                    )));
+                    return Err(SpeciesError::Invalid(b.to_string()));
                 }
                 Some(_) => {
                     eprintln!("NCBI unavailable, your species won't be checked. Error is {e}");
@@ -608,6 +605,9 @@ impl From<Name> for Genename {
     }
 }
 impl Name {
+    pub(crate) fn getallelefromblast(&self) -> &str {
+        self.gene.as_str()
+    }
     pub(crate) fn new(
         numacc: Option<String>,
         gene: String,
@@ -676,7 +676,7 @@ impl FromStr for Name {
             }
         } else if s.trim().starts_with("NCBI|") {
             let mut split = split.into_iter();
-            split.next(); //Skip NCBI|
+            split.next(); //Skip NCBI| and set isaborne
             let regexp = regex::Regex::new(r"([\w\.]+):([0-9]+)\-([0-9]+)")
                 .unwrap_or_else(|_| unreachable!("Valid regexp"));
             match (
@@ -1373,7 +1373,7 @@ pub trait Blastcalc {
     fn getstrand(&self) -> &Strand;
     fn getquery(&self) -> &Name;
     fn getallelename(&self) -> &str {
-        getallelefromblast(self.getquery())
+        self.getquery().getallelefromblast()
     }
     /// Get position of the lab&el, not position of the element
     fn getpositionfromsubject(&self) -> Option<(Position, Position, Strand)> {
@@ -1384,9 +1384,12 @@ pub trait Blastcalc {
     fn getchromosomefromsubject(&self) -> Option<String> {
         getchromosomefromblast(self.getsubject())
     }
+    /// Get locus name
+    #[allow(dead_code)]
     fn getlocusname(&self) -> Option<Locus> {
         Locus::from_str(self.getallelename().split_at(3).0).ok()
     }
+    /// Get identity score
     fn getidentity(&self) -> f32;
 }
 impl Blastcalc for Blast {
@@ -1700,6 +1703,10 @@ pub(crate) struct Genename {
     pub(crate) exon: Option<String>,
 }
 impl Genename {
+    #[allow(dead_code)]
+    pub(crate) fn getlocusname(&self) -> Option<Locus> {
+        Locus::from_str(self.name.split_at(3).0).ok()
+    }
     ///Same as deserialize when it comes to exon, should be merged
     pub(crate) fn new<T>(name: T, exon: Option<String>) -> io::Result<Self>
     where
@@ -1810,60 +1817,6 @@ impl GeneInfos {
         let gene = self.settoname(&spec);
         fasta.write(&gene.to_string(), None, seq.as_ref())
     }
-    /*
-    * let (imagereadtop, imagereadbottom, imagematchtop, imagematchbottom) =
-        match (haplotypebool, readpath, mismatchpath) {
-            (true, ImageType::Png((a, rsize)), ImageType::Png((b, lsize))) => {
-                let (rsplit, rsplit2) = BitMapBackend::new(a.as_path(), rsize)
-                    .into_drawing_area()
-                    .split_vertically(50);
-                let (lsplit, lsplit2) = BitMapBackend::new(b.as_path(), lsize)
-                    .into_drawing_area()
-                    .split_vertically(50);
-                (
-                    Image::Png(rsplit),
-                    Some(Image::Png(rsplit2)),
-                    Image::Png(lsplit),
-                    Some(Image::Png(lsplit2)),
-                )
-            }
-            (false, ImageType::Png((a, rsize)), ImageType::Png((b, lsize))) => (
-                Image::Png(BitMapBackend::new(&a, rsize).into_drawing_area()),
-                None,
-                Image::Png(BitMapBackend::new(&b, lsize).into_drawing_area()),
-                None,
-            ),
-            (true, ImageType::Svg((a, rsize)), ImageType::Svg((b, lsize))) => {
-                let (rsplit, rsplit2) = SVGBackend::new(&a, rsize)
-                    .into_drawing_area()
-                    .split_vertically(50);
-                let (lsplit, lsplit2) = SVGBackend::new(&b, lsize)
-                    .into_drawing_area()
-                    .split_vertically(50);
-                (
-                    Image::Svg(rsplit),
-                    Some(Image::Svg(rsplit2)),
-                    Image::Svg(lsplit),
-                    Some(Image::Svg(lsplit2)),
-                )
-            }
-            (false, ImageType::Svg((a, rsize)), ImageType::Svg((b, lsize))) => (
-                Image::Svg(SVGBackend::new(&a, rsize).into_drawing_area()),
-                None,
-                Image::Svg(SVGBackend::new(&b, lsize).into_drawing_area()),
-                None,
-            ),
-            _ => unreachable!("Error in format"),
-        };
-    infos.insert(
-        (keys, "readresult".to_string()),
-        (imagereadtop, imagereadbottom),
-    );
-    infos.insert(
-        (keys, "mismatchresult".to_string()),
-        (imagematchtop, imagematchbottom),
-    );
-    */
     pub(crate) fn extractsequence(
         &self,
         fasta: &mut fasta::IndexedReader<File>,
@@ -1956,6 +1909,22 @@ impl GenesList for GeneInfos {
     }
 }
 impl LocusInfos {
+    pub(crate) fn newfromlocushap(
+        locushap: LocusHaplo,
+        contig: String,
+        start: Position,
+        end: Position,
+        strand: Strand,
+    ) -> Self {
+        Self {
+            locusinfo: locushap,
+            contig,
+            start,
+            end,
+            strand,
+            status: OkStatus::default(),
+        }
+    }
     pub(crate) fn new(
         locus: Locus,
         haplotype: Haplotype,
@@ -2157,6 +2126,20 @@ impl PartialOrd for GeneInfos {
 impl Ord for GeneInfos {
     //Filter by chromosome, then by start ASC and end DESC
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        /* match self
+            .getgene()
+            .getlocusname()
+            .cmp(&other.getgene().getlocusname())
+        {
+            std::cmp::Ordering::Equal => match self.chromosome.cmp(&other.chromosome) {
+                std::cmp::Ordering::Equal => match self.start.cmp(&other.start) {
+                    std::cmp::Ordering::Equal => self.end.cmp(&other.end).reverse(),
+                    ord => ord,
+                },
+                e => e,
+            },
+            ord => ord,
+        } */
         match self.chromosome.cmp(&other.chromosome) {
             std::cmp::Ordering::Equal => match self.start.cmp(&other.start) {
                 std::cmp::Ordering::Equal => self.end.cmp(&other.end).reverse(),

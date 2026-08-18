@@ -11,8 +11,8 @@ use reqwest::{StatusCode, header};
 use crate::{
     BORNES, LOCUSSEPARATOR, TIMEOUT_IN_MN, getassemblyreader, printpotentialbornes,
     r#struct::{
-        Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, Haplotype, Locus, LocusInfos,
-        Name, Position, Species, Status, Strand,
+        Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, Haplotype, Locus, LocusHaplo,
+        LocusInfos, Name, Position, Species, Status, Strand,
     },
     submissions::{
         BORNESLINK, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK, blastcommand, checkoverlap,
@@ -24,7 +24,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fs::File,
-    intrinsics::unreachable,
     io::{
         self, BufReader, Cursor,
         ErrorKind::{self, InvalidFilename},
@@ -296,7 +295,7 @@ pub(crate) fn locusallposition(
     data.sort_unstable();
     data.dedup();
     data.shrink_to_fit();
-    let range = find_global_best_range(&data, &bornes).ok_or(io::Error::new(
+    let range = find_global_best_range(&data, &bornes, &args).ok_or(io::Error::new(
         ErrorKind::InvalidInput,
         "No locus found after BLAST analysis",
     ));
@@ -383,22 +382,21 @@ pub(crate) fn downloadmotifs(args: &Args) -> Option<Filecrea> {
 pub(crate) fn find_global_best_range(
     blastcheck: &[Blastmatch],
     bornes: &Option<Vec<Blastmatch>>,
+    args: &Args,
 ) -> Option<Vec<LocusInfos>> {
-    let mut groups: HashMap<(Locus, Haplotype), (String, bool, usize, usize)> = HashMap::new();
+    let mut groups: HashMap<LocusHaplo, (String, bool, usize, usize, bool)> = HashMap::new();
     let blastcheck = blastcheck.to_vec();
     let mut hash = blastcheck
         .iter()
         .filter_map(|p| p.getlocusname().map(|d| (d, p)))
         .into_group_map_by(|(l, f)| (l.clone(), f.getsubject()));
     let mut bornes = match bornes {
-        Some(bornes) => Some(
-            bornes
-                .iter()
-                .filter_map(|p| p.getlocusname().map(|d| (d, p)))
-                .into_group_map_by(|(l, f)| (l.clone(), f.getsubject())),
-        ),
+        Some(bornes) => Some(bornes.iter().into_group_map_by(|f| f.getsubject())),
         None => None,
     };
+    if let Some(p) = &mut bornes {
+        p.values_mut().for_each(|d| d.sort_unstable());
+    }
     hash.iter_mut().for_each(|(_, v)| {
         v.sort_unstable_by(|(_, a), (_, b)| match a.getsubject().cmp(b.getsubject()) {
             Ordering::Equal => match a.getpos().0.cmp(&b.getpos().0) {
@@ -408,112 +406,181 @@ pub(crate) fn find_global_best_range(
             ord => ord,
         })
     });
-    let mut locus: HashMap<(Locus, String, u32), std::collections::BTreeSet<Blastmatch>> =
-        HashMap::new();
+    let mut locusborne: HashMap<
+        (Locus, String, u32),
+        (
+            std::collections::BTreeSet<Blastmatch>,
+            (Option<Blastmatch>, Option<Blastmatch>),
+        ),
+    > = HashMap::new();
     for ((loci, sseqname), data) in hash.iter() {
         let mut index = 0;
         for (_, elem) in data {
-            let d = match locus.get_mut(&(loci.clone(), sseqname.to_string(), index)) {
+            let d = match locusborne.get_mut(&(loci.clone(), sseqname.to_string(), index)) {
                 Some(a) => a,
                 None => {
                     let mut e = BTreeSet::new();
                     e.insert((*elem).clone());
-                    locus.insert((loci.clone(), sseqname.to_string(), index), e);
+                    locusborne.insert(
+                        (loci.clone(), sseqname.to_string(), index),
+                        (e, (None, None)),
+                    );
                     continue;
                 }
             };
-            if let Some(b) = d.last()
+            if let Some(b) = d.0.last()
                 && std::cmp::max(b.sstart, b.send).abs_diff(std::cmp::min(elem.send, elem.sstart))
                     <= LOCUSSEPARATOR
             {
-                d.insert((*elem).clone());
+                d.0.insert((*elem).clone());
             } else {
                 index += 1;
                 let mut e = BTreeSet::new();
                 e.insert((*elem).clone());
-                locus.insert((loci.clone(), sseqname.to_string(), index), e);
+                locusborne.insert(
+                    (loci.clone(), sseqname.to_string(), index),
+                    (e, (None, None)),
+                );
             }
         }
     }
-    if let Some(borneblast) = &bornes {
-        let info = locus
-            .iter()
-            .map(|(key, val)| (key, val.iter().min(), val.iter().max()));
-        for (loc, min, max) in info {
-            let values = locus
-                .get_mut(loc)
-                .unwrap_or_else(|| unreachable!("Controlled beforehand"));
-            let findaborne = /*  */;
-            if std::cmp::max(b.sstart, b.send).abs_diff(std::cmp::min(a.send, a.sstart)) <= BORNES {
-                values.insert(borneblast.clone());
-                break 'borne;
-            }
-        }
-        'borne: for borneblast in borneblast {
-            for values in locus.values_mut() {
-                //todo!("Check min and max if already filtered and check good contig");
-                for val in values.iter() {
-                    let a = borneblast;
-                    let b = val;
-                    if std::cmp::max(b.sstart, b.send).abs_diff(std::cmp::min(a.send, a.sstart))
-                        <= BORNES
-                    {
-                        values.insert(borneblast.clone());
-                        break 'borne;
-                    }
-                }
-            }
-        }
-    }
-    let real =
-        locus
-            .into_iter()
-            .sorted_unstable_by(|((al, ass, _), av), ((bl, bs, _), bv)| match al.cmp(bl) {
-                Ordering::Equal => match av.iter().count().cmp(&bv.iter().count()) {
-                    Ordering::Equal => ass.cmp(bs),
-                    ord2 => ord2.reverse(),
-                },
-                ord => ord,
+    if let Some(borneblast) = bornes {
+        for (key, (val, (bornefirst, bornesecond))) in locusborne.iter_mut() {
+            let itera = val.clone();
+            let (loc, min, max) = match (key, itera.iter().min(), itera.iter().min()) {
+                (c, Some(a), Some(b)) => (c, a, b),
+                _ => continue,
+            };
+            let mut raw = borneblast
+                .iter()
+                .filter(|(key, _)| **key == loc.1.as_str())
+                .flat_map(|(_, hit)| hit.into_iter());
+            let findfirstborne = raw.find(|val| {
+                val.sstart.abs_diff(min.sstart) <= LOCUSSEPARATOR
+                    || val.sstart.abs_diff(max.send) <= LOCUSSEPARATOR
+                    || val.send.abs_diff(max.send) <= LOCUSSEPARATOR
+                    || val.send.abs_diff(min.sstart) <= LOCUSSEPARATOR
             });
-    for ((loci, sseq, _), blast) in real {
-        if !groups.contains_key(&(loci.clone(), Haplotype::Primary)) {
+            let findsecondborne = raw.find(|val| {
+                findfirstborne.is_none_or(|f| f.getallelename() != val.getallelename()) //Do not take the same borne twice
+                    && (val.sstart.abs_diff(min.sstart) <= LOCUSSEPARATOR
+                        || val.sstart.abs_diff(max.send) <= LOCUSSEPARATOR
+                        || val.send.abs_diff(max.send) <= LOCUSSEPARATOR
+                        || val.send.abs_diff(min.sstart) <= LOCUSSEPARATOR)
+            });
+            let data = |borne: Option<&&Blastmatch>,
+                        toput: &mut Option<Blastmatch>,
+                        min: &Blastmatch,
+                        max: &Blastmatch,
+                        val: &mut BTreeSet<Blastmatch>| {
+                if let Some(hit) = borne {
+                    *toput = Some((*hit).clone());
+                    let range = min.sstart..=max.send;
+                    if range.contains(&hit.sstart) || range.contains(&hit.send) {
+                        if hit.send.saturating_sub(min.sstart) < hit.sstart.saturating_sub(max.send)
+                        {
+                            //Cutting after the borne
+                            //Bornes is at the beggining of the locus
+                            val.retain(|p| p.sstart > hit.sstart);
+                        } else {
+                            //Bornes is at the end of the locus
+                            val.retain(|p| p.send < hit.send);
+                        }
+                    } else if hit.sstart.abs_diff(min.sstart) <= BORNES
+                        || hit.sstart.abs_diff(max.send) <= BORNES
+                        || hit.send.abs_diff(max.send) <= BORNES
+                        || hit.send.abs_diff(min.sstart) <= BORNES
+                    {
+                        val.insert((*hit).clone());
+                    }
+                };
+            };
+            data(findfirstborne, bornefirst, &min, &max, val);
+            data(findsecondborne, bornesecond, &min, &max, val);
+        }
+    }
+    if locusborne.is_empty() {
+        eprintln!("Cannot find any locus, aborting.");
+        return None;
+    }
+    let real = locusborne.into_iter().sorted_unstable_by(
+        |((al, ass, _), (av, _)), ((bl, bs, _), (bv, _))| match al.cmp(bl) {
+            Ordering::Equal => match av.iter().count().cmp(&bv.iter().count()) {
+                Ordering::Equal => ass.cmp(bs),
+                ord2 => ord2.reverse(),
+            },
+            ord => ord,
+        },
+    );
+    let bornesscript = |bornes: (Option<Blastmatch>, Option<Blastmatch>),
+                        locus: &LocusHaplo,
+                        bornestoprint: &mut Vec<Blastmatch>| {
+        let addlocustoname = |name: &mut Blastmatch| {
+            name.qseqid.gene = format!("{}_{}", name.qseqid.gene, locus.to_string());
+        };
+        match bornes {
+            (Some(mut first), Some(mut second)) => {
+                addlocustoname(&mut first);
+                bornestoprint.push(first);
+                addlocustoname(&mut second);
+                bornestoprint.push(second);
+                true
+            }
+            (Some(mut first), None) => {
+                addlocustoname(&mut first);
+                bornestoprint.push(first);
+                true
+            }
+            (None, Some(_)) => unreachable!("First borne cannot be null if second borne"),
+            (None, None) => false,
+        }
+    };
+    let mut bornestoprint = Vec::new();
+    for ((loci, sseq, _), (blast, bornes)) in real {
+        let primaryhap = LocusHaplo::new(loci.clone(), Haplotype::Primary);
+        let secondhap = LocusHaplo::new(loci.clone(), Haplotype::Alternate);
+        if !groups.contains_key(&primaryhap) {
             let (min, max) = match (blast.first(), blast.last()) {
                 (Some(a), Some(b)) => (min(a.sstart, a.send), max(b.sstart, b.send)),
                 _ => unreachable!("vec is not empty"),
             };
+            let hasbornes = bornesscript(bornes, &primaryhap, &mut bornestoprint);
             let split = blast.iter().into_group_map_by(|f| &f.complement);
             let complement = split.get(&Strand::Minus).map_or(0, |s| s.len())
                 > split.get(&Strand::Plus).map_or(0, |s| s.len());
-            groups.insert((loci, Haplotype::Primary), (sseq, complement, min, max));
-        } else if !groups.contains_key(&(loci.clone(), Haplotype::Alternate)) {
+            groups.insert(primaryhap, (sseq, complement, min, max, hasbornes));
+        } else if !groups.contains_key(&LocusHaplo::new(loci.clone(), Haplotype::Alternate)) {
             let (min, max) = match (blast.first(), blast.last()) {
                 (Some(a), Some(b)) => (min(a.sstart, a.send), max(b.sstart, b.send)),
                 _ => unreachable!("vec is not empty"),
             };
+            let hasbornes = bornesscript(bornes, &secondhap, &mut bornestoprint);
             let split = blast.iter().into_group_map_by(|f| &f.complement);
             let complement = split.get(&Strand::Minus).map_or(0, |s| s.len())
                 > split.get(&Strand::Plus).map_or(0, |s| s.len());
-            groups.insert((loci, Haplotype::Alternate), (sseq, complement, min, max));
+            groups.insert(secondhap, (sseq, complement, min, max, hasbornes));
         }
     }
     let mut loc: Vec<LocusInfos> = groups
         .into_iter()
-        .map(|((locus, hap), (sseq, complement, start, end))| {
-            LocusInfos::new(
-                locus,
-                hap,
+        .map(|(haplo, (sseq, complement, start, end, hasbornes))| {
+            LocusInfos::newfromlocushap(
+                haplo,
                 sseq,
                 Position::new(
                     false,
                     start
-                        .checked_sub(BORNES)
+                        .checked_sub(if hasbornes { 0 } else { BORNES })
                         .unwrap_or(1)
                         .try_into()
                         .unwrap_or(1),
                 ),
                 Position::new(
                     false,
-                    end.checked_add(BORNES).unwrap_or(1).try_into().unwrap_or(1),
+                    end.checked_add(if hasbornes { 0 } else { BORNES })
+                        .unwrap_or(1)
+                        .try_into()
+                        .unwrap_or(1),
                 ),
                 if complement {
                     Strand::Minus
@@ -523,6 +590,10 @@ pub(crate) fn find_global_best_range(
             )
         })
         .collect();
+    bornestoprint.sort_unstable();
+    if let Err(e) = printpotentialbornes(&bornestoprint, args) {
+        eprintln!("Cannot print bornes. Error is {e}");
+    }
     loc.sort_unstable();
     Some(loc)
 }
