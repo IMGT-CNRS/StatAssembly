@@ -1,3 +1,14 @@
+## v2.0.1 - 2026-08-20
+
+### Fixed
+
+- Plus/Minus strand for gene
+- Update of MD parsing (update of extended-htslib)
+
+### Soon (version 2.1 )
+
+- Alter output CS file setting CS tag.
+
 ## v2.0.0 - 2026-08-19
 
 IMGT/StatAssembly v2.0.0 is a major version update bringing new functionalities.
