@@ -22,7 +22,7 @@ mod tests {
         locusposparser, posread, printvalidatedallelesraw,
         r#struct::{
             Args, Filecrea, Genehit, Genename, GenesList, Haplotype::Primary, HashMapinfo,
-            LocusHaplo, LocusInfos, Species, SpeciesError,
+            LocusHaplo, LocusInfos, Positionstrand, Species, SpeciesError,
         },
         submissions::{
             BORNESLINK, RELEASELINK, REQUESTCLIENT, checkifblastpresent, decompressseq,
@@ -472,8 +472,8 @@ mod tests {
                         None,
                         FetchDefinition::RegionString(
                             gene.chromosome.as_bytes(),
-                            gene.start.getobasedpos(),
-                            gene.end.getzbasedpos(),
+                            gene.getpositionstart().getobasedpos(),
+                            gene.getpositionend().getzbasedpos(),
                         ),
                         RustPileupConfig::default(),
                     )

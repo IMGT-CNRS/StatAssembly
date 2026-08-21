@@ -51,7 +51,7 @@ pub(crate) fn printpileup(species: &Species, args: &Args, locus: &[LocusInfos]) 
                 args.assemblyindex.as_ref(),
                 bam::FetchDefinition::RegionString(
                     loc.contig.as_bytes(),
-                    loc.start.getzbasedpos(),
+                    loc.getpositionstart().getzbasedpos(),
                     loc.end.getzbasedpos(),
                 ),
                 RustPileupConfig::default(),

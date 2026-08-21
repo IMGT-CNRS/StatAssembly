@@ -31,7 +31,11 @@ pub(crate) fn generatepdf(
             let mut b = Vec::new();
             b.push(a.locusinfo.to_string());
             b.push(a.getcontig().to_string());
-            b.push(a.start.getobasedpos().to_formatted_string(&Locale::en));
+            b.push(
+                a.getpositionstart()
+                    .getobasedpos()
+                    .to_formatted_string(&Locale::en),
+            );
             b.push(a.end.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.strand.to_string());
             b.push(a.status.to_string());
@@ -48,7 +52,11 @@ pub(crate) fn generatepdf(
             let mut b = Vec::new();
             b.push(a.gene.to_string());
             b.push(a.chromosome.to_string());
-            b.push(a.start.getobasedpos().to_formatted_string(&Locale::en));
+            b.push(
+                a.getpositionstart()
+                    .getobasedpos()
+                    .to_formatted_string(&Locale::en),
+            );
             b.push(a.end.getobasedpos().to_formatted_string(&Locale::en));
             b.push(a.strand.to_string());
             b.push(a.status.to_string());

@@ -161,6 +161,42 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) lowmemory: bool,
 }
+/// Set position and strand
+pub(crate) trait Positionstrand {
+    /// Get strand
+    fn getstrand(&self) -> &Strand;
+    /// Get position start
+    fn getpositionstart(&self) -> &Position;
+    /// Get position end
+    fn getpositionend(&self) -> &Position;
+    /// Set position start
+    fn setpositionstart(&mut self, start: Position) -> Result<()>;
+    /// Set position end
+    fn setpositionend(&mut self, end: Position) -> Result<()>;
+    /// Set strand
+    fn setstrand(&mut self, strand: Strand);
+    /// Get correct strand
+    fn getcorrectstrand(&mut self) {
+        let val = match self.getstrand() {
+            Strand::Unknown if self.getpositionstart() > self.getpositionend() => {
+                let (start, end) = (
+                    self.getpositionend().clone(),
+                    self.getpositionstart().clone(),
+                );
+                self.setpositionstart(Position::new(true, 0))
+                    .unwrap_or_else(|_| unreachable!("Position is 0"));
+                self.setpositionend(end)
+                    .unwrap_or_else(|_| unreachable!("Position set incorrect."));
+                self.setpositionstart(start)
+                    .unwrap_or_else(|_| unreachable!("Position set incorrect."));
+                Strand::Minus
+            }
+            Strand::Unknown => Strand::Plus,
+            e => e.clone(),
+        };
+        self.setstrand(val);
+    }
+}
 // Allow to manipulate tempfile and plain files and ensure remove of temp file when dropped.
 pub(crate) struct Filecrea {
     file: Filechoice,
@@ -575,9 +611,37 @@ pub(crate) struct Name {
     pub(crate) gene: String,
     pub(crate) species: String,
     pub(crate) label: Option<String>,
-    pub(crate) posstart: Position,
-    pub(crate) posend: Position,
-    pub(crate) strand: Strand,
+    posstart: Position,
+    posend: Position,
+    strand: Strand,
+}
+impl Positionstrand for Name {
+    fn getpositionend(&self) -> &Position {
+        &self.posend
+    }
+    fn getpositionstart(&self) -> &Position {
+        &self.posstart
+    }
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
+    fn setpositionend(&mut self, end: Position) -> Result<()> {
+        if &end < self.getpositionstart() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.posend = end;
+        Ok(())
+    }
+    fn setpositionstart(&mut self, start: Position) -> Result<()> {
+        if &start > self.getpositionend() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.posstart = start;
+        Ok(())
+    }
+    fn setstrand(&mut self, strand: Strand) {
+        self.strand = strand;
+    }
 }
 impl Serialize for Name {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -617,10 +681,26 @@ impl Name {
         posend: Position,
         strand: Strand,
     ) -> Self {
-        let (posstart, posend) = if posstart > posend {
-            (posend, posstart)
+        let (posstart, posend, strand) = if posstart > posend {
+            (
+                posend,
+                posstart,
+                if strand.isunknown() {
+                    Strand::Minus
+                } else {
+                    strand
+                },
+            )
         } else {
-            (posstart, posend)
+            (
+                posstart,
+                posend,
+                if strand.isunknown() {
+                    Strand::Plus
+                } else {
+                    strand
+                },
+            )
         };
         Self {
             numacc,
@@ -709,8 +789,8 @@ impl FromStr for Name {
                 Strand::Plus
             };
         let (start, end) = (
-            Position::newfromoposition(posstart),
-            Position::newfromoposition(posend),
+            Position::newfromoposition(std::cmp::min(posend, posstart)),
+            Position::newfromoposition(std::cmp::max(posend, posstart)),
         );
         Ok(Self {
             numacc: if numacc.trim().is_empty() || numacc.trim() == "N/A" {
@@ -1168,7 +1248,7 @@ impl Posread {
         total: usize,
         softclips: f32,
         args: &Args,
-    ) -> Result<Self, MyError> {
+    ) -> Result<Self> {
         if r#match + indel > total {
             return Err(MyError(String::from("Invalid total")));
         }
@@ -1626,7 +1706,7 @@ impl FromStr for Newfasta {
 }
 #[derive(Debug)]
 pub(crate) struct MyError(String);
-
+pub type Result<T, E = MyError> = std::result::Result<T, E>;
 impl std::fmt::Display for MyError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -1771,11 +1851,39 @@ impl Display for Genename {
 pub(crate) struct GeneInfos {
     pub(crate) gene: Genename,
     pub(crate) chromosome: String,
-    pub(crate) strand: Strand,
-    pub(crate) start: Position,
-    pub(crate) end: Position,
+    strand: Strand,
+    start: Position,
+    end: Position,
     #[serde(skip_deserializing)]
     pub(crate) status: OkStatus,
+}
+impl Positionstrand for GeneInfos {
+    fn getpositionend(&self) -> &Position {
+        &self.end
+    }
+    fn getpositionstart(&self) -> &Position {
+        &self.start
+    }
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
+    fn setpositionend(&mut self, end: Position) -> Result<()> {
+        if &end < self.getpositionstart() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.end = end;
+        Ok(())
+    }
+    fn setpositionstart(&mut self, start: Position) -> Result<()> {
+        if &start > self.getpositionend() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.start = start;
+        Ok(())
+    }
+    fn setstrand(&mut self, strand: Strand) {
+        self.strand = strand;
+    }
 }
 impl GeneInfos {
     pub(crate) fn new(
@@ -1880,24 +1988,8 @@ impl GenesList for GeneInfos {
     fn setgene(&mut self, gene: Genename) {
         self.gene = gene;
     }
-    fn getstrand(&self) -> &Strand {
-        &self.strand
-    }
     fn setchromosome(&mut self, chromosome: String) {
         self.chromosome = chromosome;
-    }
-    fn setend(&mut self, pos: Position) {
-        self.end = pos;
-    }
-    fn setstart(&mut self, pos: Position) {
-        self.start = pos;
-    }
-    fn getstart(&self) -> &Position {
-        &self.start
-    }
-
-    fn getend(&self) -> &Position {
-        &self.end
     }
 
     fn getstatus(&self) -> &OkStatus {
@@ -1906,6 +1998,12 @@ impl GenesList for GeneInfos {
 
     fn alterstatus(&mut self, status: OkStatus) {
         self.status = status;
+    }
+    fn getstart(&self) -> &Position {
+        &self.start
+    }
+    fn getend(&self) -> &Position {
+        &self.end
     }
 }
 impl LocusInfos {
@@ -2158,6 +2256,9 @@ pub(crate) enum Strand {
     Minus,
 }
 impl Strand {
+    pub(crate) fn isunknown(&self) -> bool {
+        self == &Strand::Unknown
+    }
     pub(crate) fn isrev(&self) -> bool {
         self == &Strand::Minus
     }
@@ -2209,11 +2310,6 @@ impl Display for Strand {
 pub trait GenesList {
     fn getgene(&self) -> &Genename;
     fn getchromosome(&self) -> &str;
-    fn getstrand(&self) -> &Strand;
-    fn getstart(&self) -> &Position;
-    fn getend(&self) -> &Position;
-    fn setstart(&mut self, pos: Position);
-    fn setend(&mut self, pos: Position);
     fn setgene(&mut self, gene: Genename);
     #[allow(unused)]
     fn setchromosome(&mut self, chromosome: String);
@@ -2223,6 +2319,8 @@ pub trait GenesList {
     fn setstatus(&mut self, reads100m: usize, hash: &BTreeMap<Position, Posread>) {
         self.alterstatus(geneisokay(reads100m, hash));
     }
+    fn getstart(&self) -> &Position;
+    fn getend(&self) -> &Position;
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Phred(Vec<Vec<u8>>);
@@ -2313,9 +2411,9 @@ impl From<GeneInfosFinish> for Genehit {
 pub(crate) struct GeneInfosFinish {
     pub(crate) gene: Genename,
     pub(crate) chromosome: String,
-    pub(crate) strand: Strand,
-    pub(crate) start: Position,
-    pub(crate) end: Position,
+    strand: Strand,
+    start: Position,
+    end: Position,
     pub(crate) length: u64,
     #[serde(rename = "ratio average reads length / gene length")]
     pub(crate) readscoverage: f32,
@@ -2334,6 +2432,34 @@ pub(crate) struct GeneInfosFinish {
     pub(crate) coveragex: usize,
     pub(crate) status: OkStatus,
 }
+impl Positionstrand for GeneInfosFinish {
+    fn getpositionend(&self) -> &Position {
+        &self.end
+    }
+    fn getpositionstart(&self) -> &Position {
+        &self.start
+    }
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
+    fn setpositionend(&mut self, end: Position) -> Result<()> {
+        if &end < self.getpositionstart() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.end = end;
+        Ok(())
+    }
+    fn setpositionstart(&mut self, start: Position) -> Result<()> {
+        if &start > self.getpositionend() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.start = start;
+        Ok(())
+    }
+    fn setstrand(&mut self, strand: Strand) {
+        self.strand = strand;
+    }
+}
 impl GenesList for GeneInfosFinish {
     fn getgene(&self) -> &Genename {
         &self.gene
@@ -2345,24 +2471,8 @@ impl GenesList for GeneInfosFinish {
     fn setgene(&mut self, gene: Genename) {
         self.gene = gene;
     }
-    fn getstrand(&self) -> &Strand {
-        &self.strand
-    }
     fn setchromosome(&mut self, chromosome: String) {
         self.chromosome = chromosome;
-    }
-    fn setend(&mut self, pos: Position) {
-        self.end = pos;
-    }
-    fn setstart(&mut self, pos: Position) {
-        self.start = pos;
-    }
-    fn getstart(&self) -> &Position {
-        &self.start
-    }
-
-    fn getend(&self) -> &Position {
-        &self.end
     }
 
     fn getstatus(&self) -> &OkStatus {
@@ -2371,6 +2481,12 @@ impl GenesList for GeneInfosFinish {
 
     fn alterstatus(&mut self, status: OkStatus) {
         self.status = status;
+    }
+    fn getstart(&self) -> &Position {
+        &self.start
+    }
+    fn getend(&self) -> &Position {
+        &self.end
     }
 }
 impl Ord for dyn GenesList {
@@ -2561,12 +2677,40 @@ impl FakeLocusinfo {
 pub(crate) struct LocusInfos {
     pub(crate) locusinfo: LocusHaplo,
     pub(crate) contig: String,
-    pub(crate) start: Position,
-    pub(crate) end: Position,
+    start: Position,
+    end: Position,
     #[serde(skip)]
-    pub(crate) strand: Strand,
+    strand: Strand,
     #[serde(skip_deserializing)]
     pub(crate) status: OkStatus,
+}
+impl Positionstrand for LocusInfos {
+    fn getpositionend(&self) -> &Position {
+        &self.end
+    }
+    fn getpositionstart(&self) -> &Position {
+        &self.start
+    }
+    fn getstrand(&self) -> &Strand {
+        &self.strand
+    }
+    fn setpositionend(&mut self, end: Position) -> Result<()> {
+        if &end < self.getpositionstart() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.end = end;
+        Ok(())
+    }
+    fn setpositionstart(&mut self, start: Position) -> Result<()> {
+        if &start > self.getpositionend() {
+            return Err(MyError("Invalid position".to_string()));
+        }
+        self.start = start;
+        Ok(())
+    }
+    fn setstrand(&mut self, strand: Strand) {
+        self.strand = strand;
+    }
 }
 impl Serialize for LocusInfos {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

@@ -12,7 +12,7 @@ use crate::{
     BORNES, LOCUSSEPARATOR, TIMEOUT_IN_MN, getassemblyreader, printpotentialbornes,
     r#struct::{
         Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, Haplotype, Locus, LocusHaplo,
-        LocusInfos, Name, Position, Species, Status, Strand,
+        LocusInfos, Name, Position, Positionstrand, Species, Status, Strand,
     },
     submissions::{
         BORNESLINK, MOTIFLINK, RELEASELINK, REQUESTCLIENT, VQUESTLINK, blastcommand, checkoverlap,
@@ -26,7 +26,7 @@ use std::{
     fs::File,
     io::{
         self, BufReader, Cursor,
-        ErrorKind::{self, InvalidFilename},
+        ErrorKind::{self, InvalidFilename, InvalidInput},
         Read, Write,
     },
     path::{Path, PathBuf},
@@ -268,8 +268,16 @@ pub(crate) fn locusallposition(
     blast.shrink_to_fit();
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
-            (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
-        } else {
+            (p.sstart, p.send, p.complement) = (
+                p.send,
+                p.sstart,
+                if p.getstrand().isunknown() {
+                    Strand::Minus
+                } else {
+                    p.getstrand().clone()
+                },
+            );
+        } else if p.getstrand().isunknown() {
             p.complement = Strand::Plus;
         }
         p.setstatus();
@@ -303,20 +311,21 @@ pub(crate) fn locusallposition(
     //Set to maximum length of assembly if the locus is at the end of the sequence
     let range = match range {
         Ok(mut b) => {
-            b.iter_mut().for_each(|a| {
+            for elem in b.iter_mut() {
                 let max = infos
                     .index
                     .sequences()
                     .iter()
-                    .find(|c| &c.name == a.getcontig())
+                    .find(|c| &c.name == elem.getcontig())
                     .map(|b| b.len);
                 if let Some(max) = max
                     && let Ok(maxi) = max.try_into()
-                    && a.end.getzbasedpos() > maxi
+                    && elem.getpositionend().getzbasedpos() > maxi
                 {
-                    a.end = Position::newfromzposition(maxi);
+                    elem.setpositionend(Position::newfromzposition(maxi))
+                        .map_err(|e| io::Error::new(InvalidInput, e))?;
                 }
-            });
+            }
             Ok(b)
         }
         Err(a) => Err(a),

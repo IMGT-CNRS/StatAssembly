@@ -8,7 +8,8 @@ Made by: Guilhem Zeitoun and IMGT Team
 use crate::identification::{downloadmotifs, downloadref, retainbestmatch};
 use crate::r#struct::{
     Args, Blast, Blastcalc, Blastlevel, Blastmatch, Filecrea, GeneInfos, Genehit, GenesList, Locus,
-    LocusInfos, Name, Newfasta, Position, ProgressReader, Seqresult, Species, Strand, safestring,
+    LocusInfos, Name, Newfasta, Position, Positionstrand, ProgressReader, Seqresult, Species,
+    Strand, safestring,
 };
 use crate::{EMAIL, NAME, PHYLUMLIMIT, TIMEOUT_IN_MN, VERSION, getassemblyreader, getreaderoffile};
 use bio::io::fasta;
@@ -265,8 +266,15 @@ where
 {
     blast.retain(|p| {
         locus.iter().any(|f| {
-            let range: RangeInclusive<usize> = f.start.getobasedpos().try_into().unwrap_or_default()
-                ..=f.end.getobasedpos().try_into().unwrap_or_default();
+            let range: RangeInclusive<usize> = f
+                .getpositionstart()
+                .getobasedpos()
+                .try_into()
+                .unwrap_or_default()
+                ..=f.getpositionend()
+                    .getobasedpos()
+                    .try_into()
+                    .unwrap_or_default();
             f.getcontig().as_str() == p.getsubject()
                 && checkoverlap(&(p.getpos().0..=p.getpos().1), &range)
         })
@@ -647,9 +655,21 @@ pub(crate) fn genesblast(
     locusfiltering(locus, &mut blast);
     blast.iter_mut().for_each(|p| {
         if p.sstart > p.send {
-            (p.sstart, p.send, p.complement) = (p.send, p.sstart, Strand::Minus);
+            (p.sstart, p.send, p.complement) = (
+                p.send,
+                p.sstart,
+                if p.getstrand().isunknown() {
+                    Strand::Minus
+                } else {
+                    p.complement.clone()
+                },
+            );
         } else {
-            p.complement = Strand::Plus;
+            p.complement = if p.getstrand().isunknown() {
+                Strand::Plus
+            } else {
+                p.complement.clone()
+            };
         }
     });
     statusblastvs(&mut blast);
@@ -669,7 +689,7 @@ pub(crate) fn locuspos(
         let opt = opt.clone();
         a.getlocusname() == Some(opt.locus)
             && a.sseqid == opt.contig
-            && (opt.start.getobasedpos()..=opt.end.getobasedpos())
+            && (opt.getpositionstart().getobasedpos()..=opt.getpositionend().getobasedpos())
                 .contains(&a.sstart.try_into().unwrap_or_default())
     };
     if !blast.iter().any(fil) {
@@ -1272,9 +1292,9 @@ pub(crate) fn generatesequenceraw(
                 Some(&format!(
                     "{}:{}-{}/{}",
                     list.getlocushaplo(),
-                    list.start.getobasedpos(),
-                    list.end.getobasedpos(),
-                    list.strand
+                    list.getpositionstart().getobasedpos(),
+                    list.getpositionend().getobasedpos(),
+                    list.getstrand()
                 )),
                 seq.as_bytes(),
             )?;
@@ -1321,14 +1341,6 @@ pub(crate) fn generatesequence(
     encoder.finish().map_err(|_| format!("Error gzip"))?;
     Ok(sequencefile)
 }
-pub(crate) fn getindexforbam(outpath: &Path) -> Option<PathBuf> {
-    let mut f = outpath.to_path_buf();
-    if f.add_extension("csi") {
-        Some(f)
-    } else {
-        None
-    }
-}
 pub(crate) fn generatelightbam<T>(
     args: &Args,
     light: T,
@@ -1338,6 +1350,15 @@ pub(crate) fn generatelightbam<T>(
 where
     T: AsRef<Path>,
 {
+    let light = if light
+        .as_ref()
+        .to_string_lossy()
+        .eq_ignore_ascii_case("default")
+    {
+        PathBuf::from(&args.outdir).join("outlight.bam")
+    } else {
+        light.as_ref().to_path_buf()
+    };
     println!("Generating small BAM.");
     let bam = if let Ok(r) = getreaderoffile(args) {
         r
@@ -1347,13 +1368,13 @@ where
     let mut onemessage = false;
     {
         let mut writer = if let Ok(files) = bam::Writer::from_path(
-            light.as_ref(),
+            &light,
             &bam::Header::from_template(bam.header()),
             bam::Format::Bam,
         ) {
             files
         } else {
-            let file = light.as_ref().display();
+            let file = light.display();
             return Err(format!("Cannot create file {file} for light bam."));
         };
         let _ = writer.set_threads(
@@ -1363,7 +1384,7 @@ where
         );
         let mut locus = locus.to_vec();
         locus.sort_unstable_by(|a, b| match a.getcontig().cmp(&b.getcontig()) {
-            Ordering::Equal => a.start.cmp(&b.start),
+            Ordering::Equal => a.getpositionstart().cmp(&b.getpositionstart()),
             ord => ord,
         });
         for f in locus.into_iter() {
@@ -1375,8 +1396,8 @@ where
             if bam
                 .fetch((
                     f.getcontig().as_bytes(),
-                    f.start.getzbasedpos(),
-                    f.end.getobasedpos(),
+                    f.getpositionstart().getzbasedpos(),
+                    f.getpositionend().getobasedpos(),
                 ))
                 .is_err()
             {
@@ -1385,10 +1406,21 @@ where
             let mut data = Vec::new();
             data.try_reserve(2048)
                 .map_err(|_| "Cannot reserve memory".to_string())?;
-            for read in bam.rc_records().filter_map(Result::ok) {
+            for mut read in bam.rc_records().filter_map(Result::ok) {
+                if let Some(makeread) = Rc::get_mut(&mut read) {
+                    //Alter CS tag to short version and remove MD tag (later version)
+                    if semver::Version::parse(VERSION)
+                        .is_ok_and(|f| f >= semver::Version::new(2, 1, 0))
+                    {
+                        let _ = makeread.remove_aux(b"MD");
+                    }
+                    if let Ok(cg) = makeread.getorgeneratecsblock(false) {
+                        let _ = makeread.updateorsetcstag(&cg.cs);
+                    }
+                }
                 if data.len().abs_diff(data.capacity()) < 10 {
                     data.try_reserve(2048)
-                        .map_err(|_| "Cannot reserve memory".to_string())?;
+                        .map_err(|_| "Cannot reserve memory".to_string())?; //Reserve memory when the capacity gets low (to avoid automatic one)
                 }
                 data.push(read);
             }
@@ -1417,7 +1449,7 @@ where
     }
     println!("Indexing BAM file.");
     bam::index::build(
-        light.as_ref(),
+        light.as_path(),
         lightindex.as_ref().map(|a| a.as_ref()),
         Type::Csi(2_u32.pow(14)),
         available_parallelism()

@@ -26,7 +26,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::ErrorKind::{InvalidData, InvalidInput};
 use std::num::NonZero;
-use std::ops::{Add, Div, Mul, Range, RangeInclusive};
+use std::ops::{Add, Div, Mul, Range, RangeInclusive, Sub};
 use std::path::Path;
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -40,8 +40,8 @@ use crate::r#struct::*;
 use crate::submissions::{
     GITHUBHOME, GITHUBVERSION, INVALIDCOVERAGE, NOTENOUGHMATCHREADS, REQUESTCLIENT,
     SOFTCLIPTOOMUCH, SUSPICIOUSPOSITIONALERT, askforsubmission, checkifblastpresent,
-    generatelightbam, generatesequence, genesblast, getindexforbam, getprogressbarclassic,
-    getprogressbarspin, positionfiltering,
+    generatelightbam, generatesequence, genesblast, getprogressbarclassic, getprogressbarspin,
+    positionfiltering,
 };
 use extended_htslib::bam::ext::{BamRecordExtensions, IterAlignedPairs};
 use extended_htslib::bam::record::{Cigar, CsValue};
@@ -100,7 +100,7 @@ lazy_static! {
     #[allow(clippy::unwrap_used)]
     static ref regexpword: regex::Regex = regex::Regex::new(r"[^-\w()]").unwrap_or_else(|_| unreachable!("Regex issue"));
 }
-//Return block of positions thanks to CS/MD tag or CIGAR = (preferred if existing)
+/// Return block of genomic positions thanks to CS/MD tag or CIGAR = (preferred if existing)
 fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
     match (
         record.aligned_blocks_match(),
@@ -114,8 +114,7 @@ fn iterblock(record: &bam::Record) -> Option<Vec<[i64; 2]>> {
                 .filter_map(|p| match (&p.state, p.getgenomepos()) {
                     (CsValue::Same(d), Some(pos)) => Some([
                         pos,
-                        pos.checked_add(d.getsize().checked_sub(1)?.try_into().ok()?)
-                            .unwrap_or(0),
+                        pos.checked_add(d.getsize().try_into().ok()?).unwrap_or(0),
                     ]),
                     _ => None,
                 })
@@ -464,32 +463,27 @@ fn locusposparser(
                 d.getlocus(),
                 d.gethaplotype(),
                 d.getcontig(),
-                d.start.getobasedpos(),
-                d.end.getobasedpos()
+                d.getpositionstart().getobasedpos(),
+                d.getpositionend().getobasedpos()
             ),
         ));
     }
     //make complement if locus is complement
     locusrecord.0.iter_mut().for_each(|r| {
-        if r.start >= r.end {
-            (r.end, r.start) = (r.start, r.end);
-            r.strand = Strand::Minus;
-        } else {
-            r.strand = Strand::Plus;
-        }
+        r.getcorrectstrand();
     });
     if !args.hugeregion
         && let Some(big) = locusrecord
             .0
             .iter()
-            .find(|p| p.end.length(&p.start) >= ALERTLOCUSSIZE)
+            .find(|p| p.getpositionend().length(p.getpositionstart()) >= ALERTLOCUSSIZE)
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
                 "The region {}-{} ({}) from {} is more than {} bp (actually: {}) and might be incorrect. Check your input file ({}) is correct.\nIf wanted, please add --hugeregion parameters. Be careful software might use a lot of memory.",
-                big.start.getobasedpos(),
-                big.end.getobasedpos(),
+                big.getpositionstart().getobasedpos(),
+                big.getpositionend().getobasedpos(),
                 big.getcontig(),
                 big.getlocus(),
                 ALERTLOCUSSIZE.to_formatted_string(&Locale::en),
@@ -539,10 +533,15 @@ fn generategenelist(
 fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
     data.iter()
         .filter_map(|p| {
-            let strand = if p.send < p.sstart {
-                Strand::Minus
-            } else {
-                Strand::Plus
+            let (start, end, strand) = match p.getstrand() {
+                Strand::Unknown => {
+                    if p.sstart > p.send {
+                        (p.send, p.sstart, Strand::Minus)
+                    } else {
+                        (p.sstart, p.send, Strand::Plus)
+                    }
+                }
+                e => (p.sstart, p.send, e.clone()),
             };
             let gene = match Genename::new(&p.getquery().gene, p.getquery().label.clone()) {
                 Ok(a) => a,
@@ -559,15 +558,15 @@ fn getgeneinfos(data: &[Blastmatch]) -> Vec<GeneInfos> {
                 gene,
                 subject,
                 strand,
-                Position::newfromoposition(p.sstart.try_into().unwrap_or_default()),
-                Position::newfromoposition(p.send.try_into().unwrap_or_default()),
+                Position::newfromoposition(start.try_into().unwrap_or_default()),
+                Position::newfromoposition(end.try_into().unwrap_or_default()),
             ))
         })
         .collect()
 }
 fn printgenelist<T>(genelist: &mut [T], args: &mut Args, tmp: bool) -> io::Result<Option<Filecrea>>
 where
-    T: GenesList + Clone + Ord + serde::Serialize,
+    T: GenesList + Positionstrand + Clone + Ord + serde::Serialize,
 {
     checkandcorrectgenelistduplicate(genelist);
     let genenamefile = if tmp {
@@ -661,9 +660,15 @@ fn processcounting(
     //Get range to put the reads inclusive pos
     let newrange = Position::new(
         true,
-        max(record.reference_start(), locus.start.getzbasedpos()),
+        max(
+            record.reference_start(),
+            locus.getpositionstart().getzbasedpos(),
+        ),
     )
-        ..Position::newfromzposition(min(locus.end.getobasedpos(), record.reference_end()));
+        ..Position::newfromzposition(min(
+            locus.getpositionend().getobasedpos(),
+            record.reference_end(),
+        ));
     let hitter = if let Some(d) = pos.get_mut(start) {
         Some(d)
     } else if let Some(d) = pos.get_mut(end) {
@@ -686,7 +691,7 @@ fn processcounting(
     }
     let (message, matched, aligned) = match iteralert(args, message, record) {
         (_, None, _) => {
-            return Ok(false);
+            return Err(io::Error::from(io::ErrorKind::AddrNotAvailable));
         } //Kill software, errors sent by iteralert
         (newmessage, Some(p), aligned) => {
             message = newmessage;
@@ -717,7 +722,7 @@ fn processcounting(
                     record.mapq(),
                     String::from_utf8_lossy(record.qname())
                 );
-                return Ok(false);
+                return Err(io::Error::from(io::ErrorKind::AddrNotAvailable));
             }
         };
         targeting.globalmismatch = match (args.totalread, getglobalmismatch(record)) {
@@ -952,16 +957,16 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
         eprintln!(
             "The region {}:{}-{} cannot be found, skipped.",
             loci.getcontig(),
-            loci.start.getobasedpos(),
-            loci.end.getobasedpos()
+            loci.getpositionstart().getobasedpos(),
+            loci.getpositionend().getobasedpos()
         );
         return Ok(pos);
         //return ExitCode::FAILURE;
     }
     let mut nocount = true;
-    let locusrange = loci.start.getzbasedpos()..=loci.end.getzbasedpos();
+    let locusrange = loci.getpositionstart().getzbasedpos()..=loci.getpositionend().getzbasedpos();
     //Populate all B-Tree position, 0-based, invert if locus complement
-    let iterator: Vec<(usize, i64)> = if loci.strand.isrev() {
+    let iterator: Vec<(usize, i64)> = if loci.getstrand().isrev() {
         locusrange.rev().enumerate().collect()
     } else {
         locusrange.enumerate().collect()
@@ -989,7 +994,8 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
         1
     } else {
         max(
-            (loci.end.getobasedpos() - loci.start.getobasedpos() + 1) / 250,
+            (loci.getpositionend().getobasedpos() - loci.getpositionstart().getobasedpos() + 1)
+                / 250,
             100,
         ) //250 points for quality point or 100nt break
     };
@@ -1015,6 +1021,10 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
         }
         nocount = false;
         match processcounting(&args, &mut pos, message, loci, &p, sep) {
+            Err(e) if e.kind() == io::ErrorKind::AddrNotAvailable => {
+                pos.clear();
+                return Ok(pos);
+            }
             Err(e) => {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, e));
             }
@@ -1032,8 +1042,8 @@ fn posread(args: &Args, loci: &LocusInfos) -> io::Result<BTreeMap<Position, Hash
         eprintln!(
             "The region {}:{}-{} has no data, skipped.",
             loci.getcontig(),
-            loci.start.getobasedpos(),
-            loci.end.getobasedpos()
+            loci.getpositionstart().getobasedpos(),
+            loci.getpositionend().getobasedpos()
         );
         return Ok(pos);
         //return ExitCode::FAILURE;
@@ -1119,6 +1129,12 @@ fn findanalyse(
             eprintln!("Error setting gene list result: {e}");
             return;
         }
+    }
+    if let Some(b) = args.outlightbam.as_ref()
+        && let Err(e) = generatelightbam(args, b, None, locus)
+    {
+        eprintln!("Error setting small bam: {e}");
+        return;
     }
 }
 fn main() -> ExitCode {
@@ -1512,13 +1528,8 @@ fn main() -> ExitCode {
     }
     drop(oldlocus); //Drop to allow unwrap or clone to actually not clone
     let locus = unmergelocus(Rc::unwrap_or_clone(groupedin));
-    if let Some(b) = args.outlightbam.as_ref()
-        && b.eq("default")
-    {
-        args.outlightbam = Some(PathBuf::from(&args.outdir).join("outlight.bam"));
-    }
     if let Some(light) = &args.outlightbam
-        && let Err(e) = generatelightbam(&args, light, getindexforbam(&light).as_ref(), &locus)
+        && let Err(e) = generatelightbam(&args, light, None, &locus)
     {
         eprintln!("Error making light BAM: {e}");
     }
@@ -1775,16 +1786,13 @@ fn checkgenelistformat(args: &Args) -> Result<Vec<GeneInfos>, Box<dyn std::error
 /// Add underscore in case gene list has duplicates
 fn checkandcorrectgenelistduplicate<T>(genes: &mut [T])
 where
-    T: GenesList + Ord + Clone,
+    T: GenesList + Positionstrand + Ord + Clone,
 {
     //Invert if start >= end because strand is given and won't work
     genes
         .iter_mut()
         .filter(|p| p.getstart() > p.getend())
-        .for_each(|p| {
-            p.setstart(*p.getend());
-            p.setend(*p.getstart());
-        });
+        .for_each(|p| p.getcorrectstrand());
     let geneclone = genes.to_vec();
     let finish: Vec<&T> = geneclone
         .iter()
@@ -1834,10 +1842,10 @@ fn extractgenelist(
     if !full {
         genes.retain(|gene| {
             &gene.chromosome == loci.getcontig()
-                && (loci.start.getobasedpos()..=loci.end.getobasedpos())
-                    .contains(&gene.start.getobasedpos())
-                && (loci.start.getobasedpos()..=loci.end.getobasedpos())
-                    .contains(&gene.end.getobasedpos())
+                && (loci.getpositionstart().getobasedpos()..=loci.getpositionend().getobasedpos())
+                    .contains(&gene.getpositionstart().getobasedpos())
+                && (loci.getpositionstart().getobasedpos()..=loci.getpositionend().getobasedpos())
+                    .contains(&gene.getpositionend().getobasedpos())
         });
     }
     if genes.is_empty() {
@@ -1858,7 +1866,8 @@ fn generategeneinfos(
     let (mut reads, mut readsfull, mut reads100, mut reads100m, mut realreads100m, mut phredscore) =
         (0, 0, 0, 0, 0f32, Vec::new());
     //O position is exclusive
-    let genegenericrange = gene.start.getzbasedpos()..gene.end.getobasedpos();
+    let genegenericrange =
+        gene.getpositionstart().getzbasedpos()..gene.getpositionend().getobasedpos();
     let mut hash = {
         //As gene start is 1-ranged, put it as 0-range with -1. End is exclusive so -1/+1 = 0
         let mut hash: BTreeMap<Position, Posread> = BTreeMap::new(); //Match and full match and total
@@ -1909,7 +1918,7 @@ fn generategeneinfos(
         let range = record.reference_start()..record.reference_end();
         coverageperc += ranges::Ranges::from(range.clone()).into_iter().count();
         for (_, gread, cigar) in record.aligned_block_pairs_cigar() {
-            if gread.start.saturating_sub(1) > gene.end.getzbasedpos() {
+            if gread.start.saturating_sub(1) > gene.getpositionend().getzbasedpos() {
                 break;
             }
             if matches!(cigar, Cigar::Ins(_)) {
@@ -1917,7 +1926,7 @@ fn generategeneinfos(
                 match hash.get_mut(&Position::newfromzposition(p)) {
                     Some(d) => d.addinsertion(1),
                     None => {
-                        if p > gene.end.getzbasedpos() {
+                        if p > gene.getpositionend().getzbasedpos() {
                             break;
                         }
                     } //Outside coverage of gene
@@ -1928,19 +1937,7 @@ fn generategeneinfos(
                     match hash.get_mut(&Position::newfromzposition(p)) {
                         Some(d) => d.addindel(1),
                         None => {
-                            if p > gene.end.getzbasedpos() {
-                                break;
-                            }
-                        } //Outside coverage of gene
-                    }
-                }
-            }
-            if !args.force && matches!(cigar, Cigar::Equal(_)) {
-                for p in gread {
-                    match hash.get_mut(&Position::newfromzposition(p)) {
-                        Some(d) => d.addmatch(1),
-                        None => {
-                            if p > gene.end.getzbasedpos() {
+                            if p > gene.getpositionend().getzbasedpos() {
                                 break;
                             }
                         } //Outside coverage of gene
@@ -1955,59 +1952,79 @@ fn generategeneinfos(
         };
         if record
             .aligned_blocks()
-            .any(|p| validrange(p, &gene.start, &gene.end))
+            .any(|p| validrange(p, gene.getpositionstart(), gene.getpositionend()))
         {
             reads100 += 1;
         }
-        if validrange([range.start, range.end], &gene.start, &gene.end) {
+        if validrange(
+            [range.start, range.end],
+            gene.getpositionstart(),
+            gene.getpositionend(),
+        ) {
             readsfull += 1;
         }
         if !args.force
-            && iterblock(&record)
-                .is_some_and(|f| f.into_iter().any(|p| validrange(p, &gene.start, &gene.end)))
+            && let Some(aligned) = iterblock(&record)
         {
-            let mut aligned = record.aligned_pairs();
-            let realstart = aligned.find(|p| p.last() == Some(&gene.start.getobasedpos()));
-            let realend = aligned.find(|p| p.last() == Some(&gene.end.getobasedpos()));
-            if let (Some(Some(start)), Some(Some(end))) = (
-                realstart.map(|p| p.first().copied()),
-                realend.map(|p| p.first().copied()),
-            ) {
-                let newphredscore = record
-                    .qual()
-                    .iter()
-                    .skip(start.try_into().unwrap_or_default())
-                    .take(
-                        end.saturating_sub(start)
-                            .saturating_add(1)
-                            .try_into()
-                            .unwrap_or_default(),
-                    )
-                    .copied()
-                    .collect::<Vec<u8>>();
-                let minscore = newphredscore
-                    .iter()
-                    .filter(|a| **a > 0u8)
-                    .nth(newphredscore.len() / 2);
-                //Ponderation based on lowest quality of a read at a gene position
-                let fscore = match minscore {
-                    Some(0..=10) | None => 0,
-                    Some(11..=20) => 1,
-                    Some(21..=30) => 3,
-                    Some(31..=40) => 7,
-                    Some(41..=50) => 9,
-                    Some(51..) => 10,
-                } as f32;
-                phredscore.push(newphredscore);
-                realreads100m = realreads100m.mul(10f32).add(fscore).div(10f32);
+            for p in aligned.iter().flat_map(|[a, b]| *a..*b) {
+                match hash.get_mut(&Position::newfromzposition(p)) {
+                    Some(d) => d.addmatch(1),
+                    None => {
+                        if p > gene.getpositionend().getzbasedpos() {
+                            break;
+                        }
+                    } //Outside coverage of gene
+                }
             }
-            reads100m += 1;
+            if aligned
+                .into_iter()
+                .any(|p| validrange(p, &gene.getpositionstart(), &gene.getpositionend()))
+            {
+                let mut aligned = record.aligned_pairs();
+                let realstart =
+                    aligned.find(|p| p.last() == Some(&gene.getpositionstart().getobasedpos()));
+                let realend =
+                    aligned.find(|p| p.last() == Some(&gene.getpositionend().getobasedpos()));
+                if let (Some(Some(start)), Some(Some(end))) = (
+                    realstart.map(|p| p.first().copied()),
+                    realend.map(|p| p.first().copied()),
+                ) {
+                    let newphredscore = record
+                        .qual()
+                        .iter()
+                        .skip(start.try_into().unwrap_or_default())
+                        .take(
+                            end.saturating_sub(start)
+                                .saturating_add(1)
+                                .try_into()
+                                .unwrap_or_default(),
+                        )
+                        .copied()
+                        .collect::<Vec<u8>>();
+                    let minscore = newphredscore
+                        .iter()
+                        .filter(|a| **a > 0u8)
+                        .nth(newphredscore.len() / 2);
+                    //Ponderation based on lowest quality of a read at a gene position
+                    let fscore = match minscore {
+                        Some(0..=10) | None => 0,
+                        Some(11..=20) => 1,
+                        Some(21..=30) => 3,
+                        Some(31..=40) => 7,
+                        Some(41..=50) => 9,
+                        Some(51..) => 10,
+                    } as f32;
+                    phredscore.push(newphredscore);
+                    realreads100m = realreads100m.mul(10f32).add(fscore).div(10f32);
+                }
+                reads100m += 1;
+            }
         }
         for p in range {
             match hash.get_mut(&Position::newfromzposition(p)) {
                 Some(d) => d.addtotal(1),
                 None => {
-                    if record.reference_start() > gene.end.getzbasedpos() {
+                    if record.reference_start() > gene.getpositionend().getzbasedpos() {
                         break;
                     }
                 } //Outside coverage of gene
@@ -2032,7 +2049,7 @@ fn generategeneinfos(
         .count();
     //Reverse if complement
     let text = {
-        let iterator = gethash(&hash, gene as &dyn GenesList);
+        let iterator = gethash(&hash, gene);
         //Merging data
         iterator.into_iter().fold(String::new(), |mut acc, (_, f)| {
             acc.push_str(&format!(
@@ -2048,11 +2065,13 @@ fn generategeneinfos(
         })
     };
     let text = String::from(text.trim_end_matches('-'));
-    gene.setstatus(reads100m, &hash);
+    if !args.force {
+        gene.setstatus(reads100m, &hash);
+    }
     let coverageperc = ((coverageperc * 1_000
         / reads
-        / usize::try_from(gene.end.length(&gene.start)).unwrap_or(usize::MAX))
-        as f32)
+        / usize::try_from(gene.getpositionend().length(gene.getpositionstart()))
+            .unwrap_or(usize::MAX)) as f32)
         .round()
         / 1_000.0;
     let elem = GeneInfosFinish::new(
@@ -2280,7 +2299,7 @@ where
     let text = format!(
         "Reads coverage for {} ({}) on {} ({})",
         genename,
-        gene.strand,
+        gene.getstrand(),
         loci.getcontig(),
         loci.gethaplotype()
     );
@@ -2308,7 +2327,7 @@ where
         .build_cartesian_2d(1..hash.len(), 0..max)
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     //Reverse complement genes
-    let hash = gethash(&hash, gene as &dyn GenesList);
+    let hash = gethash(&hash, gene);
     chart
         .draw_series(LineSeries::new(
             hash.iter()
@@ -2451,8 +2470,8 @@ where
         .unwrap_or(0)
         + 5; //Soft clips is on percent (x100)
     let mut secondary = chart.set_secondary_coord(
-        usize::try_from(loci.start.getobasedpos()).unwrap_or(0)
-            ..usize::try_from(loci.end.getobasedpos()).unwrap_or(0),
+        usize::try_from(loci.getpositionstart().getobasedpos()).unwrap_or(0)
+            ..usize::try_from(loci.getpositionend().getobasedpos()).unwrap_or(0),
         0..max,
     );
     secondary
@@ -2466,7 +2485,7 @@ where
         //.disable_y_mesh()
         .draw()
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
-    //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
+    //let mut second = chart.set_secondary_coord(loci.getpositionstart()..loci.end, 0..max);
     secondary
         .draw_secondary_series(
             Histogram::vertical(&secondary)
@@ -2529,36 +2548,38 @@ where
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?
         .label("PHRED score")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], BLACK.mix(0.7)));
-    chart
-        .draw_series(
-            Histogram::vertical(&secondary)
-                .style(full_palette::ORANGE_300.mix(0.3).filled())
-                .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
-                    let pos1 = pos + 1;
-                    if val.iswarning() {
-                        Some((pos1, max))
-                    } else {
-                        None
-                    }
-                }))
-                .margin(0),
-        )
-        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
-    chart
-        .draw_series(
-            Histogram::vertical(&secondary)
-                .style(full_palette::RED_400.mix(0.3).filled())
-                .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
-                    let pos1 = pos + 1;
-                    if val.issuspicious() {
-                        Some((pos1, max))
-                    } else {
-                        None
-                    }
-                }))
-                .margin(0),
-        )
-        .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
+    if !args.force {
+        chart
+            .draw_series(
+                Histogram::vertical(&secondary)
+                    .style(full_palette::ORANGE_300.mix(0.3).filled())
+                    .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
+                        let pos1 = pos + 1;
+                        if val.iswarning() {
+                            Some((pos1, max))
+                        } else {
+                            None
+                        }
+                    }))
+                    .margin(0),
+            )
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
+        chart
+            .draw_series(
+                Histogram::vertical(&secondary)
+                    .style(full_palette::RED_400.mix(0.3).filled())
+                    .data(hash.iter().enumerate().filter_map(|(pos, (_, val))| {
+                        let pos1 = pos + 1;
+                        if val.issuspicious() {
+                            Some((pos1, max))
+                        } else {
+                            None
+                        }
+                    }))
+                    .margin(0),
+            )
+            .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
+    }
     chart
         .configure_mesh()
         //.x_label_formatter(&|f| f.to_formatted_string(&Locale::en).to_string())
@@ -2588,10 +2609,13 @@ where
     top.present().map_err(|_e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, "Unable to write result to file, please make sure 'plotters-doc-data' dir exists under current dir")))?;
     Ok(())
 }
-fn gethash<'a>(
+fn gethash<'a, T>(
     hash: &'a BTreeMap<Position, Posread>,
-    gene: &'a dyn GenesList,
-) -> Vec<(&'a Position, &'a Posread)> {
+    gene: &'a T,
+) -> Vec<(&'a Position, &'a Posread)>
+where
+    T: GenesList + Positionstrand,
+{
     match gene.getstrand() {
         Strand::Plus => hash.iter().collect(),
         Strand::Unknown => Vec::new(),
@@ -2708,7 +2732,10 @@ where
             ),
             ("sans-serif", 28),
         )
-        .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..100)
+        .build_cartesian_2d(
+            loci.getpositionstart().getobasedpos()..loci.getpositionend().getobasedpos(),
+            0..100,
+        )
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     if !args.force {
         chart
@@ -2745,8 +2772,10 @@ where
         .label("Misalign (%)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 15, y)], full_palette::RED_400));
     let max = 100;
-    let mut secondary =
-        chart.set_secondary_coord(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max);
+    let mut secondary = chart.set_secondary_coord(
+        loci.getpositionstart().getobasedpos()..loci.getpositionend().getobasedpos(),
+        0..max,
+    );
     secondary
         .configure_mesh()
         .y_label_formatter(&|f| format!("{f}%"))
@@ -2768,7 +2797,7 @@ where
         //.disable_y_mesh()
         .draw()
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
-    //let mut second = chart.set_secondary_coord(loci.start..loci.end, 0..max);
+    //let mut second = chart.set_secondary_coord(loci.getpositionstart()..loci.end, 0..max);
     secondary
         .draw_secondary_series(LineSeries::new(
             pos.iter().filter_map(|p| {
@@ -2819,7 +2848,7 @@ where
                 ("sans-serif", 40),
             )  */
             .build_cartesian_2d(
-                loci.start.getobasedpos()..loci.end.getobasedpos(),
+                loci.getpositionstart().getobasedpos()..loci.getpositionend().getobasedpos(),
                 0.0..max as f64 * 1.1 / 10_000.0,
             )
             .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
@@ -3040,23 +3069,31 @@ where
     let _ = root.fill(&plotters::prelude::WHITE);
     let (top, bottom) = root.split_vertically((80).percent_height());
     let (start, end, tenlines) = if let Some(full) = loci.getfulllength(args)
-        && telomereposition(&loci.start, &full)
+        && telomereposition(loci.getpositionstart(), &full)
     {
         (
             None,
             Some(full),
-            loci.getlength().saturating_sub(full.length(&loci.end)) / 9,
+            loci.getlength()
+                .saturating_sub(full.length(&loci.getpositionend()))
+                / 9,
         )
     } else if let Some(full) = loci.getfulllength(args)
-        && (telomereposition(&loci.end, &full))
+        && (telomereposition(loci.getpositionend(), &full))
     {
         (
             Some(
-                TELOMERESEP
-                    .saturating_sub(loci.start.getobasedpos().try_into().unwrap_or_default()),
+                TELOMERESEP.saturating_sub(
+                    loci.getpositionstart()
+                        .getobasedpos()
+                        .try_into()
+                        .unwrap_or_default(),
+                ),
             ),
             Some(full),
-            loci.getlength().saturating_sub(full.length(&loci.end)) / 9,
+            loci.getlength()
+                .saturating_sub(full.length(&loci.getpositionend()))
+                / 9,
         )
     } else {
         (None, None, loci.getlength() / 9)
@@ -3079,7 +3116,10 @@ where
             ),
             ("sans-serif", 28, &colorgene),
         )
-        .build_cartesian_2d(loci.start.getobasedpos()..loci.end.getobasedpos(), 0..max)
+        .build_cartesian_2d(
+            loci.getpositionstart().getobasedpos()..loci.getpositionend().getobasedpos(),
+            0..max,
+        )
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     let _ = chart
         .configure_mesh()
@@ -3104,10 +3144,10 @@ where
         .draw_series(
             LineSeries::new(
                 pos.iter().filter_map(|p| {
-                    if (p.position.getobasedpos() - loci.start.getobasedpos())
+                    if (p.position.getobasedpos() - loci.getpositionstart().getobasedpos())
                         .rem_euclid(std::cmp::max(tenlines, 1))
                         == 0
-                        || (loci.end - p.position).getzbasedpos().abs() <= 1
+                        || (loci.getpositionend().sub(p.position)).getzbasedpos().abs() <= 1
                     {
                         Some((
                             p.position.getobasedpos(),
@@ -3129,10 +3169,10 @@ where
         .draw_series(
             AreaSeries::new(
                 pos.iter().filter_map(|p| {
-                    if (p.position.getobasedpos() - loci.start.getobasedpos())
+                    if (p.position.getobasedpos() - loci.getpositionstart().getobasedpos())
                         .rem_euclid(std::cmp::max(tenlines, 1))
                         == 0
-                        || (loci.end - p.position).getzbasedpos().abs() <= 1
+                        || (loci.getpositionend().sub(p.position)).getzbasedpos().abs() <= 1
                     {
                         Some((
                             p.position.getobasedpos(),
@@ -3245,7 +3285,8 @@ where
             ("sans-serif", 40),
         )  */
         .build_cartesian_2d(
-            (loci.start.getobasedpos()..loci.end.getobasedpos()).into_segmented(),
+            (loci.getpositionstart().getobasedpos()..loci.getpositionend().getobasedpos())
+                .into_segmented(),
             0..100i64,
         )
         .map_err(|e| Box::new(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
